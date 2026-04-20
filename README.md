@@ -22,6 +22,8 @@ thClaws is a **native-Rust AI agent workspace** that runs locally on your machin
 
 - **Multi-provider.** Anthropic, OpenAI, Gemini, Alibaba DashScope, OpenRouter, Ollama (local and Anthropic-compatible), and Agentic Press — auto-detected by model name prefix. Switch mid-session with `/model` or swap the whole provider with `/provider`.
 
+- **Any knowledge worker, not just engineers.** Chat tab for researchers, PMs, ops, legal, marketing, finance — natural-language prompts, file access, knowledge-base lookup, drafting. Terminal tab for engineers who want the raw REPL. Same engine, same sessions, same config — different preferred surface.
+
 - **Open standards, not a walled garden.** Built on the conventions the agent-tooling industry is converging on, not bespoke formats you have to learn only for us. [Model Context Protocol](https://modelcontextprotocol.io/) for tool servers. [`AGENTS.md`](https://agents.md) for project instructions — the vendor-neutral standard adopted by Google, OpenAI, Factory, Sourcegraph, and Cursor. `SKILL.md` with YAML frontmatter for packaged workflows. Your configuration is portable between thClaws, other agents that speak the same standards, and whatever comes next.
 
 - **Skills.** Reusable expert workflows packaged as a directory with `SKILL.md` plus optional scripts. The agent picks the right skill automatically when a request matches the `whenToUse` trigger, or you can invoke one explicitly as `/<skill-name>`. Install from a git URL or `.zip` archive with `/skill install`.
@@ -34,13 +36,15 @@ thClaws is a **native-Rust AI agent workspace** that runs locally on your machin
 
 - **Knowledge bases (KMS).** Per-project and per-user wikis the agent can search and read on demand. Drop markdown pages under `.thclaws/kms/<name>/pages/`, give each a one-line entry in `index.md`, and the agent gets a table of contents every turn plus `KmsRead` / `KmsSearch` tools. No embeddings — grep + read, following Andrej Karpathy's LLM-wiki pattern.
 
-- **Agent Teams.** Multi-agent coordination backed by tmux with a GUI layer. Lead coordinator + teammate executors, mailbox-based messaging, a task queue with dependencies, and optional git-worktree isolation so parallel agents don't stomp on each other.
+- **Agent orchestration.** Delegate subtasks to isolated sub-agents via the `Task` tool — each gets its own tool registry and can recurse up to 3 levels deep. Scale further with **Agent Teams**: multiple thClaws processes coordinating through a shared mailbox and task queue, each in its own tmux pane and optional git worktree. One agent writes your backend while a teammate builds the frontend in parallel, lead merges the branches when both are done.
 
 - **Settings as one file.** Every knob — permission mode, thinking budget, allowed/disallowed tools, provider endpoints, KMS attachments — lives in `.thclaws/settings.json` (project) or `~/.config/thclaws/settings.json` (user). API keys go in the OS keychain by default (macOS Keychain / Windows Credential Manager / Linux Secret Service) with `.env` fallback for CI.
 
 - **Safety first.** A filesystem sandbox scopes file tools to the working directory. Destructive shell commands are flagged before execution. You approve every mutating tool call unless you've opted into auto-approve.
 
 - **Offline-capable.** Ollama (native and Anthropic-compatible) lets you run entirely against a local model — no cloud round-trip, no API key.
+
+- **Deploy what you build.** Ship the landing pages, web apps, APIs, and AI agents you create through [Agentic Press Hosting](https://agentic-press.com) (partnered with SIS Cloud Service and Artech.Cloud) — or any other host you prefer. Schedule agents on cron, respond to webhooks, stream from public URLs. The deploy flow ships as a plugin (`/plugin install …-deploy`), so hosts are swappable; the client never locks you in.
 
 - **Shell escape.** Prefix any REPL line with `!` to run a shell command directly — no tokens, no approval prompt, no agent round-trip (`! git status`, `! ls`, etc.).
 
