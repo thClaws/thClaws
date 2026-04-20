@@ -28,6 +28,7 @@ pub enum ProviderKind {
     AgentSdk,
     OpenAI,
     OpenAIResponses,
+    OpenRouter,
     Gemini,
     Ollama,
     OllamaAnthropic,
@@ -42,6 +43,7 @@ impl ProviderKind {
         Self::AgentSdk,
         Self::OpenAI,
         Self::OpenAIResponses,
+        Self::OpenRouter,
         Self::Gemini,
         Self::Ollama,
         Self::OllamaAnthropic,
@@ -56,6 +58,7 @@ impl ProviderKind {
             Self::AgentSdk => "anthropic-agent",
             Self::OpenAI => "openai",
             Self::OpenAIResponses => "openai-responses",
+            Self::OpenRouter => "openrouter",
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
             Self::OllamaAnthropic => "ollama-anthropic",
@@ -71,6 +74,7 @@ impl ProviderKind {
             Self::AgentSdk => "agent/claude-sonnet-4-6",
             Self::OpenAI => "gpt-4o",
             Self::OpenAIResponses => "codex/gpt-5.2-codex",
+            Self::OpenRouter => "openrouter/anthropic/claude-sonnet-4-6",
             Self::Gemini => "gemini-2.0-flash",
             Self::Ollama => "ollama/llama3.2",
             Self::OllamaAnthropic => "oa/qwen3-coder",
@@ -123,6 +127,7 @@ impl ProviderKind {
             Self::AgentSdk => None, // Uses Claude Code's own auth
             Self::OpenAI => Some("OPENAI_API_KEY"),
             Self::OpenAIResponses => Some("OPENAI_API_KEY"),
+            Self::OpenRouter => Some("OPENROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
             Self::Ollama => None,
             Self::OllamaAnthropic => None,
@@ -146,7 +151,11 @@ impl ProviderKind {
     /// Also resolves short aliases first.
     pub fn detect(model: &str) -> Option<Self> {
         let model = &Self::resolve_alias(model);
-        if model.starts_with("ap/") {
+        if model.starts_with("openrouter/") {
+            // Check openrouter/ first — it's the most specific prefix.
+            // Models look like openrouter/anthropic/claude-sonnet-4-6.
+            Some(Self::OpenRouter)
+        } else if model.starts_with("ap/") {
             Some(Self::AgenticPress)
         } else if model.starts_with("managed/") {
             Some(Self::AnthropicAgent)

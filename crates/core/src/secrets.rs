@@ -95,6 +95,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::AgenticPress,
     ProviderKind::Anthropic,
     ProviderKind::OpenAI,
+    ProviderKind::OpenRouter,
     ProviderKind::Gemini,
     ProviderKind::DashScope,
 ];

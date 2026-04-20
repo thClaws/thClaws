@@ -317,6 +317,7 @@ fn auto_fallback_model(cfg: &AppConfig) -> Option<String> {
         ProviderKind::Anthropic,
         ProviderKind::OpenAI,
         ProviderKind::AgenticPress,
+        ProviderKind::OpenRouter,
         ProviderKind::Gemini,
         ProviderKind::DashScope,
         // Local providers omitted here: if the user explicitly
