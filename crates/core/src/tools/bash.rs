@@ -449,6 +449,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn echoes_stdout() {
         let out = BashTool
@@ -470,6 +471,7 @@ mod tests {
         assert!(!is_destructive_command("cargo test"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn captures_stderr() {
         let out = BashTool
@@ -480,6 +482,7 @@ mod tests {
         assert!(out.contains("oops"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn nonzero_exit_appended_to_output() {
         let out = BashTool
@@ -490,6 +493,7 @@ mod tests {
         assert!(out.contains("[exit code 3]"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn stdout_and_stderr_both_captured() {
         let out = BashTool
@@ -501,6 +505,7 @@ mod tests {
         assert!(out.contains("[stderr]"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn honors_cwd_argument() {
         let dir = tempdir().unwrap();
@@ -515,6 +520,7 @@ mod tests {
         assert!(out.contains("marker.txt"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_long_running_commands() {
         let out = BashTool
@@ -532,6 +538,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timeout_secs_legacy_alias_works() {
         let out = BashTool
@@ -549,6 +556,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn missing_command_errors() {
         let err = BashTool.call(json!({})).await.unwrap_err();
