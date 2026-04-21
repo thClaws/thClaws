@@ -258,6 +258,92 @@ fn save_recent_dir(dir: &str) {
     );
 }
 
+/// Show a native OS confirmation dialog. Returns `true` on affirmative.
+///
+/// Same shell-out pattern as `pick_directory_native`: osascript on macOS,
+/// zenity on Linux, PowerShell/MessageBox on Windows — no extra crate
+/// dependency. Blocks the calling thread until the user dismisses the
+/// dialog, so this MUST be called from the IPC worker thread, never
+/// from the tao event loop.
+///
+/// Windows MessageBox enforces "Yes"/"No" labels; `yes_label`/`no_label`
+/// are only honoured on macOS and Linux, with the message text carrying
+/// the intent on Windows.
+fn native_confirm(title: &str, message: &str, yes_label: &str, no_label: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            "display dialog \"{}\" with title \"{}\" buttons {{\"{}\", \"{}\"}} default button \"{}\"",
+            esc(message),
+            esc(title),
+            esc(no_label),
+            esc(yes_label),
+            esc(yes_label),
+        );
+        match std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let s = String::from_utf8_lossy(&out.stdout);
+                s.contains(&format!("button returned:{yes_label}"))
+            }
+            _ => false,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match std::process::Command::new("zenity")
+            .args([
+                "--question",
+                "--title",
+                title,
+                "--text",
+                message,
+                "--ok-label",
+                yes_label,
+                "--cancel-label",
+                no_label,
+            ])
+            .status()
+        {
+            Ok(s) => s.success(),
+            Err(_) => false,
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // MessageBox button labels are fixed ("Yes"/"No") by the OS; the
+        // message string has to carry the yes/no semantics. Prefix the
+        // user's label onto the message so they know which button does
+        // what.
+        let esc = |s: &str| s.replace('\'', "''");
+        let prompt = format!(
+            "{}\n\nYes = {}   No = {}",
+            esc(message),
+            esc(yes_label),
+            esc(no_label),
+        );
+        let ps = format!(
+            "Add-Type -AssemblyName PresentationCore,PresentationFramework | Out-Null; \
+             [System.Windows.MessageBox]::Show('{}', '{}', 'YesNo', 'Question').ToString()",
+            prompt,
+            esc(title),
+        );
+        match std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps])
+            .output()
+        {
+            Ok(out) => {
+                let s = String::from_utf8_lossy(&out.stdout);
+                s.trim().eq_ignore_ascii_case("Yes")
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 /// Open a native OS directory picker dialog. Returns the selected path or
 /// `None` if the user cancelled. No extra crate dependency — shells out to
 /// the platform's built-in dialog tool.
@@ -763,6 +849,35 @@ pub fn run_gui() {
                     let _ = proxy_for_ipc.send_event(
                         UserEvent::SessionLoaded(payload.to_string()),
                     );
+                }
+                "confirm" => {
+                    // Native OS confirmation dialog. Frontend sends an
+                    // `id` so it can match the async reply; we echo it
+                    // back in the result event. Default labels are
+                    // "OK"/"Cancel" if the caller doesn't override.
+                    let id = msg
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let title = msg.get("title").and_then(|v| v.as_str()).unwrap_or("Confirm");
+                    let message = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    let yes_label = msg
+                        .get("yes_label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("OK");
+                    let no_label = msg
+                        .get("no_label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Cancel");
+                    let ok = native_confirm(title, message, yes_label, no_label);
+                    let payload = serde_json::json!({
+                        "type": "confirm_result",
+                        "id": id,
+                        "ok": ok,
+                    });
+                    let _ = proxy_for_ipc
+                        .send_event(UserEvent::FileContent(payload.to_string()));
                 }
                 "set_cwd" => {
                     if let Some(path) = msg.get("path").and_then(|v| v.as_str()) {

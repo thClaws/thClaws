@@ -4,6 +4,39 @@ import { send, subscribe } from "../hooks/useIPC";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { CodeEditor } from "./CodeEditor";
 
+// Round-trip a native-OS confirm dialog through the Rust backend so we
+// get a real modal on macOS / Linux / Windows instead of relying on
+// `window.confirm` (which wry WebViews don't implement consistently).
+// The backend shows the dialog on its IPC worker thread and replies
+// with a `confirm_result` message keyed by `id`.
+function confirmNative(opts: {
+  title: string;
+  message: string;
+  yesLabel?: string;
+  noLabel?: string;
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    const id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `cf-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const unsub = subscribe((msg) => {
+      if (msg.type === "confirm_result" && msg.id === id) {
+        unsub();
+        resolve(Boolean(msg.ok));
+      }
+    });
+    send({
+      type: "confirm",
+      id,
+      title: opts.title,
+      message: opts.message,
+      yes_label: opts.yesLabel ?? "OK",
+      no_label: opts.noLabel ?? "Cancel",
+    });
+  });
+}
+
 type FileEntry = {
   name: string;
   is_dir: boolean;
@@ -145,16 +178,17 @@ export function FilesView({ active }: Props) {
     send({ type: "file_read", path, mode: "preview" });
   }, []);
 
-  const onSidebarClick = (name: string) => {
+  const onSidebarClick = async (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
     if (mode === "edit" && editorDirty) {
-      // Don't open the new file while the user has unsaved work. Nudge
-      // them to save or discard first — we can't use `window.confirm`
-      // because wry WebViews don't implement it consistently, and
-      // silently opening would lose their edits.
-      setSaveToast("save or discard current edits first");
-      setTimeout(() => setSaveToast(null), 2500);
-      return;
+      const ok = await confirmNative({
+        title: "Unsaved changes",
+        message: `You have unsaved edits to ${preview?.path ?? "this file"}. Discard them and open the new file?`,
+        yesLabel: "Discard",
+        noLabel: "Cancel",
+      });
+      if (!ok) return;
+      setEditorDirty(false);
     }
     openFile(path);
   };
