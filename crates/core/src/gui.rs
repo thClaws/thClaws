@@ -1397,6 +1397,11 @@ pub fn run_gui() {
                 }
                 "file_read" => {
                     let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    // `mode` is optional. "preview" (default) renders .md
+                    // to themed HTML; "source" returns the raw text so the
+                    // frontend can hand it to a CodeMirror / TipTap editor.
+                    let mode = msg.get("mode").and_then(|v| v.as_str()).unwrap_or("preview");
+                    let source_mode = mode == "source";
                     match crate::sandbox::Sandbox::check(raw_path) {
                         Ok(path) => {
                             let ext = path.extension()
@@ -1415,12 +1420,12 @@ pub fn run_gui() {
                                 "ico" => "image/x-icon",
                                 "bmp" => "image/bmp",
                                 "pdf" => "application/pdf",
-                                // Markdown is rendered server-side to HTML
-                                // so the webview gets a ready-to-display
-                                // document (with tables, code highlighting,
-                                // GFM extensions) instead of raw `.md` that
-                                // the frontend would have to parse.
-                                "md" | "markdown" => "text/html",
+                                // In source mode, give `.md` its real mime
+                                // so the frontend sends it to the markdown
+                                // editor; preview mode renders to HTML.
+                                "md" | "markdown" => {
+                                    if source_mode { "text/markdown" } else { "text/html" }
+                                }
                                 "html" | "htm" => "text/html",
                                 _ => "text/plain",
                             };
@@ -1432,13 +1437,14 @@ pub fn run_gui() {
                                         "path": raw_path,
                                         "content": b64,
                                         "mime": mime,
+                                        "mode": mode,
                                     });
                                     let _ = proxy_for_ipc.send_event(UserEvent::FileContent(payload.to_string()));
                                 }
                             } else {
                                 match std::fs::read_to_string(&path) {
                                     Ok(text) => {
-                                        let content = if is_markdown {
+                                        let content = if is_markdown && !source_mode {
                                             render_markdown_to_html(&text)
                                         } else {
                                             text
@@ -1448,6 +1454,7 @@ pub fn run_gui() {
                                             "path": raw_path,
                                             "content": content,
                                             "mime": mime,
+                                            "mode": mode,
                                         });
                                         let _ = proxy_for_ipc.send_event(UserEvent::FileContent(payload.to_string()));
                                     }
@@ -1457,6 +1464,7 @@ pub fn run_gui() {
                                             "path": raw_path,
                                             "content": format!("Error reading file: {e}"),
                                             "mime": "text/plain",
+                                            "mode": mode,
                                         });
                                         let _ = proxy_for_ipc.send_event(UserEvent::FileContent(payload.to_string()));
                                     }
@@ -1473,6 +1481,43 @@ pub fn run_gui() {
                             let _ = proxy_for_ipc.send_event(UserEvent::FileContent(payload.to_string()));
                         }
                     }
+                }
+                "file_write" => {
+                    // User-initiated write from the Files-tab editor. The
+                    // sandbox gate keeps us inside the working directory;
+                    // nothing here bypasses approvals that apply to the
+                    // agent — the agent's Write/Edit tools still go
+                    // through the permission prompt.
+                    let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    let (ok, error): (bool, Option<String>) =
+                        match crate::sandbox::Sandbox::check(raw_path) {
+                            Ok(path) => {
+                                if let Some(parent) = path.parent() {
+                                    if let Err(e) = std::fs::create_dir_all(parent) {
+                                        (false, Some(format!("mkdir: {e}")))
+                                    } else {
+                                        match std::fs::write(&path, content.as_bytes()) {
+                                            Ok(()) => (true, None),
+                                            Err(e) => (false, Some(format!("write: {e}"))),
+                                        }
+                                    }
+                                } else {
+                                    match std::fs::write(&path, content.as_bytes()) {
+                                        Ok(()) => (true, None),
+                                        Err(e) => (false, Some(format!("write: {e}"))),
+                                    }
+                                }
+                            }
+                            Err(e) => (false, Some(format!("access denied: {e}"))),
+                        };
+                    let payload = serde_json::json!({
+                        "type": "file_written",
+                        "path": raw_path,
+                        "ok": ok,
+                        "error": error,
+                    });
+                    let _ = proxy_for_ipc.send_event(UserEvent::FileContent(payload.to_string()));
                 }
                 "session_rename" => {
                     let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("");

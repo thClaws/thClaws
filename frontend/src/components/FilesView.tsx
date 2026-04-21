@@ -1,11 +1,8 @@
-import { useState, useEffect } from "react";
-import { Folder, File, ArrowUp } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Folder, File, ArrowUp, Pencil, Eye, Save, X } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
-
-// NOTE: .md files are rendered to HTML server-side (via comrak, with
-// GFM tables) and returned with mime `text/html`, so we no longer
-// import react-markdown / remark-gfm here — the iframe branch below
-// handles both raw `.html` files and rendered-markdown uniformly.
+import { MarkdownEditor } from "./MarkdownEditor";
+import { CodeEditor } from "./CodeEditor";
 
 type FileEntry = {
   name: string;
@@ -16,14 +13,62 @@ interface Props {
   active: boolean;
 }
 
+// UI view mode — what the user is looking at.
+type ViewMode = "preview" | "edit";
+// Backend read mode — what we asked the server for. "preview" returns
+// pre-rendered HTML for `.md` (and raw text for everything else);
+// "source" always returns raw text.
+type ReadMode = "preview" | "source";
+
+// Extensions we can open in the text editor. Binary types (image /
+// pdf) stay preview-only.
+const TEXT_EDITABLE = new Set([
+  "md", "markdown", "html", "htm", "js", "jsx", "mjs", "cjs", "ts", "tsx",
+  "css", "scss", "sass", "less", "py", "pyi", "rs", "go", "java", "kt",
+  "swift", "c", "cpp", "h", "hpp", "cs", "rb", "php", "sh", "bash", "zsh",
+  "fish", "json", "jsonc", "yaml", "yml", "toml", "xml", "svg", "sql",
+  "lua", "vim", "Dockerfile", "dockerfile", "ini", "conf", "env",
+  "gitignore", "txt", "log",
+]);
+
+function extOf(path: string): string {
+  const base = path.split("/").pop() ?? "";
+  if (!base.includes(".")) return base.toLowerCase();
+  return (base.split(".").pop() ?? "").toLowerCase();
+}
+
+function isTextEditable(path: string): boolean {
+  return TEXT_EDITABLE.has(extOf(path));
+}
+
+function isMarkdownPath(path: string): boolean {
+  const e = extOf(path);
+  return e === "md" || e === "markdown";
+}
+
 export function FilesView({ active }: Props) {
   const [currentPath, setCurrentPath] = useState(".");
   const [entries, setEntries] = useState<FileEntry[]>([]);
+
+  // The file being displayed. `content` is what the backend returned —
+  // for preview mode of a `.md` file, that's the rendered HTML; for
+  // source mode it's the raw text. `mime` drives the preview renderer;
+  // `mode` echoes the request so we know which we're looking at.
   const [preview, setPreview] = useState<{
     path: string;
     content: string;
     mime: string;
+    readMode: ReadMode;
   } | null>(null);
+
+  const [mode, setMode] = useState<ViewMode>("preview");
+  // Source-text kept separate from preview.content because the preview
+  // content may be rendered HTML while the editor always operates on
+  // raw text.
+  const [editorSource, setEditorSource] = useState<string>("");
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [saveToast, setSaveToast] = useState<string | null>(null);
+  const pendingNavigation = useRef<{ path: string } | null>(null);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -31,34 +76,57 @@ export function FilesView({ active }: Props) {
         setEntries(msg.entries as FileEntry[]);
         if (msg.path) setCurrentPath(msg.path as string);
       } else if (msg.type === "file_content") {
+        const incomingReadMode: ReadMode =
+          (msg.mode as ReadMode) ?? "preview";
         setPreview({
           path: msg.path as string,
           content: msg.content as string,
           mime: msg.mime as string,
+          readMode: incomingReadMode,
         });
+        if (incomingReadMode === "source") {
+          setEditorSource(msg.content as string);
+          setEditorDirty(false);
+        }
+      } else if (msg.type === "file_written") {
+        const ok = msg.ok as boolean;
+        const err = msg.error as string | null | undefined;
+        if (ok) {
+          setEditorDirty(false);
+          setSaveToast("saved");
+          // If the user had queued another file to open, do it now.
+          if (pendingNavigation.current) {
+            const p = pendingNavigation.current.path;
+            pendingNavigation.current = null;
+            openFile(p);
+          }
+        } else {
+          setSaveToast(err ? `save failed: ${err}` : "save failed");
+        }
+        setTimeout(() => setSaveToast(null), 2500);
       }
     });
     send({ type: "file_list", path: "." });
     return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-refresh the directory listing + current preview while the Files tab
-  // is active, so Write/Edit tool calls that land in the working directory
-  // show up without the user having to navigate away and back. We don't have
-  // an IPC hook for "tool finished" in the GUI (the REPL runs in a PTY child
-  // and tool calls are in-process inside it), so polling at a slow cadence is
-  // the pragmatic choice.
+  // Auto-refresh directory listing + preview while tab active.
+  // Never auto-refresh when user is editing — we'd clobber their work.
   useEffect(() => {
     if (!active) return;
-    // Refresh immediately when the tab becomes active too.
     send({ type: "file_list", path: currentPath });
-    if (preview) send({ type: "file_read", path: preview.path });
+    if (preview && mode === "preview") {
+      send({ type: "file_read", path: preview.path, mode: "preview" });
+    }
     const interval = setInterval(() => {
       send({ type: "file_list", path: currentPath });
-      if (preview) send({ type: "file_read", path: preview.path });
+      if (preview && mode === "preview") {
+        send({ type: "file_read", path: preview.path, mode: "preview" });
+      }
     }, 2000);
     return () => clearInterval(interval);
-  }, [active, currentPath, preview?.path]);
+  }, [active, currentPath, preview?.path, mode]);
 
   const navigate = (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
@@ -72,14 +140,78 @@ export function FilesView({ active }: Props) {
     send({ type: "file_list", path: parent || "." });
   };
 
-  const openFile = (name: string) => {
+  const openFile = useCallback((path: string) => {
+    setMode("preview");
+    send({ type: "file_read", path, mode: "preview" });
+  }, []);
+
+  const onSidebarClick = (name: string) => {
     const path = currentPath === "." ? name : `${currentPath}/${name}`;
-    send({ type: "file_read", path });
+    if (mode === "edit" && editorDirty) {
+      // Queue the file open for after a successful save, ask the user.
+      const proceed = window.confirm(
+        "You have unsaved changes. Discard and open the new file?"
+      );
+      if (!proceed) return;
+      setEditorDirty(false);
+    }
+    openFile(path);
   };
+
+  const enterEditMode = () => {
+    if (!preview) return;
+    setMode("edit");
+    send({ type: "file_read", path: preview.path, mode: "source" });
+  };
+
+  const exitEditMode = () => {
+    if (editorDirty) {
+      const proceed = window.confirm(
+        "Discard unsaved changes and return to preview?"
+      );
+      if (!proceed) return;
+    }
+    setMode("preview");
+    setEditorDirty(false);
+    if (preview) {
+      send({ type: "file_read", path: preview.path, mode: "preview" });
+    }
+  };
+
+  const save = useCallback(() => {
+    if (!preview || !editorDirty) return;
+    send({ type: "file_write", path: preview.path, content: editorSource });
+  }, [preview, editorDirty, editorSource]);
+
+  // Global Cmd/Ctrl-S when Files tab is active + in edit mode.
+  useEffect(() => {
+    if (!active || mode !== "edit") return;
+    const handler = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        save();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [active, mode, save]);
+
+  // Warn on tab close / navigation when dirty.
+  useEffect(() => {
+    if (!editorDirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [editorDirty]);
 
   const isHtml = preview?.mime === "text/html";
   const isImage = preview?.mime.startsWith("image/");
   const isPdf = preview?.mime === "application/pdf";
+  const canEdit = preview && isTextEditable(preview.path);
 
   return (
     <div className="flex h-full" style={{ background: "var(--bg-primary)" }}>
@@ -88,7 +220,6 @@ export function FilesView({ active }: Props) {
         className="w-64 overflow-y-auto border-r shrink-0 flex flex-col"
         style={{ borderColor: "var(--border)" }}
       >
-        {/* Current path + up button */}
         <div
           className="flex items-center gap-1 px-2 py-1.5 border-b text-[10px] font-mono shrink-0"
           style={{
@@ -107,13 +238,9 @@ export function FilesView({ active }: Props) {
           <span className="truncate">{currentPath}</span>
         </div>
 
-        {/* File list */}
         <div className="overflow-y-auto flex-1 p-1">
           {entries.length === 0 ? (
-            <div
-              className="text-xs p-2"
-              style={{ color: "var(--text-secondary)" }}
-            >
+            <div className="text-xs p-2" style={{ color: "var(--text-secondary)" }}>
               Empty directory
             </div>
           ) : (
@@ -123,19 +250,13 @@ export function FilesView({ active }: Props) {
                 className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-white/5 text-left"
                 style={{ color: "var(--text-primary)" }}
                 onClick={() =>
-                  entry.is_dir ? navigate(entry.name) : openFile(entry.name)
+                  entry.is_dir ? navigate(entry.name) : onSidebarClick(entry.name)
                 }
               >
                 {entry.is_dir ? (
-                  <Folder
-                    size={13}
-                    style={{ color: "var(--accent)", flexShrink: 0 }}
-                  />
+                  <Folder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
                 ) : (
-                  <File
-                    size={13}
-                    style={{ color: "var(--text-secondary)", flexShrink: 0 }}
-                  />
+                  <File size={13} style={{ color: "var(--text-secondary)", flexShrink: 0 }} />
                 )}
                 <span className="truncate">{entry.name}</span>
               </button>
@@ -144,17 +265,97 @@ export function FilesView({ active }: Props) {
         </div>
       </div>
 
-      {/* Preview panel */}
+      {/* Preview / editor panel */}
       <div className="flex-1 min-h-0 flex flex-col p-4">
         {preview ? (
           <div className="flex flex-col flex-1 min-h-0">
-            <div
-              className="text-xs mb-3 font-mono shrink-0"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              {preview.path}
+            <div className="flex items-center justify-between mb-3 shrink-0 gap-2">
+              <div
+                className="text-xs font-mono truncate"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                {preview.path}
+                {editorDirty && (
+                  <span style={{ color: "var(--accent)" }} title="unsaved changes">
+                    {" "}●
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {saveToast && (
+                  <span
+                    className="text-[10px] font-mono px-2 py-0.5 rounded"
+                    style={{
+                      background: saveToast.startsWith("save failed")
+                        ? "rgba(220,80,80,0.15)"
+                        : "rgba(100,180,100,0.15)",
+                      color: saveToast.startsWith("save failed")
+                        ? "#e06060"
+                        : "#6fbf6f",
+                    }}
+                  >
+                    {saveToast}
+                  </span>
+                )}
+                {canEdit && mode === "preview" && (
+                  <button
+                    onClick={enterEditMode}
+                    className="flex items-center gap-1 text-[11px] px-2 py-1 rounded hover:bg-white/5"
+                    style={{ color: "var(--text-primary)" }}
+                    title="Edit this file"
+                  >
+                    <Pencil size={12} />
+                    Edit
+                  </button>
+                )}
+                {mode === "edit" && (
+                  <>
+                    <button
+                      onClick={save}
+                      disabled={!editorDirty}
+                      className="flex items-center gap-1 text-[11px] px-2 py-1 rounded hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ color: "var(--accent)" }}
+                      title="Save (Cmd/Ctrl-S)"
+                    >
+                      <Save size={12} />
+                      Save
+                    </button>
+                    <button
+                      onClick={exitEditMode}
+                      className="flex items-center gap-1 text-[11px] px-2 py-1 rounded hover:bg-white/5"
+                      style={{ color: "var(--text-secondary)" }}
+                      title="Back to preview"
+                    >
+                      {editorDirty ? <X size={12} /> : <Eye size={12} />}
+                      {editorDirty ? "Discard" : "Preview"}
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
-            {isImage ? (
+
+            {/* Body: preview or editor */}
+            {mode === "edit" ? (
+              isMarkdownPath(preview.path) ? (
+                <MarkdownEditor
+                  source={editorSource}
+                  onChange={(md) => {
+                    setEditorSource(md);
+                    setEditorDirty(true);
+                  }}
+                />
+              ) : (
+                <CodeEditor
+                  source={editorSource}
+                  path={preview.path}
+                  onChange={(text) => {
+                    setEditorSource(text);
+                    setEditorDirty(true);
+                  }}
+                  onSave={save}
+                />
+              )
+            ) : isImage ? (
               <div className="flex-1 min-h-0 overflow-auto">
                 <img
                   src={`data:${preview.mime};base64,${preview.content}`}
