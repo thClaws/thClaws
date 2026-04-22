@@ -334,6 +334,7 @@ mod tests {
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         prev_home: Option<String>,
+        prev_userprofile: Option<String>,
         prev_cwd: std::path::PathBuf,
         _home_dir: tempfile::TempDir,
     }
@@ -347,22 +348,30 @@ mod tests {
                 Some(h) => std::env::set_var("HOME", h),
                 None => std::env::remove_var("HOME"),
             }
+            match &self.prev_userprofile {
+                Some(h) => std::env::set_var("USERPROFILE", h),
+                None => std::env::remove_var("USERPROFILE"),
+            }
         }
     }
 
     /// Acquire exclusive access to the process env + cwd for this
-    /// test, set HOME to a fresh tempdir, leave cwd pointing at that
-    /// tempdir. Dropped at end of test to restore.
+    /// test, set HOME (+ USERPROFILE on Windows) to a fresh tempdir,
+    /// leave cwd pointing at that tempdir. Dropped at end of test to
+    /// restore.
     fn scoped_home() -> EnvGuard {
         let lock = test_env_lock();
         let prev_home = std::env::var("HOME").ok();
+        let prev_userprofile = std::env::var("USERPROFILE").ok();
         let prev_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
+        std::env::set_var("USERPROFILE", dir.path());
         std::env::set_current_dir(dir.path()).unwrap();
         EnvGuard {
             _lock: lock,
             prev_home,
+            prev_userprofile,
             prev_cwd,
             _home_dir: dir,
         }
@@ -453,6 +462,7 @@ mod tests {
         assert!(k.page_path("ok-page").is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn page_path_rejects_symlink_to_outside() {
         use std::os::unix::fs::symlink;
@@ -477,6 +487,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_rejects_symlink_kms_dir() {
         use std::os::unix::fs::symlink;

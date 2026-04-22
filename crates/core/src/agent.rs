@@ -545,7 +545,7 @@ mod tests {
         let path = dir.path().join("note.txt");
         std::fs::write(&path, "the contents\n").unwrap();
 
-        let args = format!(r#"{{"path":"{}"}}"#, path.to_string_lossy());
+        let args = serde_json::json!({ "path": path.to_string_lossy() }).to_string();
         let provider = ScriptedProvider::new(vec![
             tool_script("toolu_1", "Read", &args),
             text_script(&["I read: the contents."]),
@@ -617,10 +617,11 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("out.txt");
-        let args = format!(
-            r#"{{"path":"{}","content":"hello"}}"#,
-            path.to_string_lossy()
-        );
+        let args = serde_json::json!({
+            "path": path.to_string_lossy(),
+            "content": "hello",
+        })
+        .to_string();
 
         let provider = ScriptedProvider::new(vec![
             tool_script("toolu_1", "Write", &args),
@@ -647,10 +648,11 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("out.txt");
-        let args = format!(
-            r#"{{"path":"{}","content":"hello"}}"#,
-            path.to_string_lossy()
-        );
+        let args = serde_json::json!({
+            "path": path.to_string_lossy(),
+            "content": "hello",
+        })
+        .to_string();
 
         let provider = ScriptedProvider::new(vec![
             tool_script("toolu_1", "Write", &args),
@@ -693,7 +695,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("x.txt");
         std::fs::write(&path, "payload").unwrap();
-        let args = format!(r#"{{"path":"{}"}}"#, path.to_string_lossy());
+        let args = serde_json::json!({ "path": path.to_string_lossy() }).to_string();
 
         // DenyApprover would deny any tool that requires approval, but Read
         // is read-only so the approver should never be consulted.
@@ -719,7 +721,11 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("auto.txt");
-        let args = format!(r#"{{"path":"{}","content":"ok"}}"#, path.to_string_lossy());
+        let args = serde_json::json!({
+            "path": path.to_string_lossy(),
+            "content": "ok",
+        })
+        .to_string();
         let provider = ScriptedProvider::new(vec![
             tool_script("toolu_1", "Write", &args),
             text_script(&["done"]),

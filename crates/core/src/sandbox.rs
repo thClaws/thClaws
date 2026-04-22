@@ -171,7 +171,11 @@ mod tests {
     fn absolute_path_outside_denied() {
         with_sandbox(|root| {
             let err = Sandbox::validate_against(root, "/etc/passwd").unwrap_err();
-            assert!(format!("{err}").contains("access denied"));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("access denied") || msg.contains("not accessible"),
+                "got: {msg}"
+            );
         });
     }
 

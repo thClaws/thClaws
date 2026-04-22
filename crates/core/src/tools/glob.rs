@@ -83,7 +83,8 @@ mod tests {
             }))
             .await
             .unwrap();
-        let lines: Vec<&str> = out.lines().collect();
+        let normalized = out.replace('\\', "/");
+        let lines: Vec<&str> = normalized.lines().collect();
         assert_eq!(lines.len(), 4, "expected 4 .rs files, got: {out}");
         assert!(lines.iter().any(|l| l.ends_with("src/main.rs")));
         assert!(lines.iter().any(|l| l.ends_with("src/lib.rs")));
@@ -101,7 +102,8 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(out.ends_with("src/main.rs"), "got: {out}");
+        let normalized = out.replace('\\', "/");
+        assert!(normalized.ends_with("src/main.rs"), "got: {out}");
     }
 
     #[tokio::test]
