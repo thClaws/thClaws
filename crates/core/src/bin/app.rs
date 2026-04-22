@@ -4,6 +4,15 @@
 //! `--cli`: interactive REPL in the terminal (same as thclaws-cli).
 //! `--print`: non-interactive single-prompt mode (implies --cli).
 
+//! To create a Rust GUI application that runs without spawning a command-line (terminal) window, 
+//! add this attribute to the very top of your main.rs file: 
+//! 
+//! #![windows_subsystem = "windows"]
+//! 
+//! macOS and Linux? 
+//! Unlike Windows, macOS and Linux do not automatically spawn a terminal for every executable.
+#![windows_subsystem = "windows"]
+
 use clap::Parser;
 use thclaws_core::config::AppConfig;
 use thclaws_core::dotenv::load_dotenv;
