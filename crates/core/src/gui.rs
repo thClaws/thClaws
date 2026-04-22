@@ -781,11 +781,11 @@ pub fn run_gui() {
     let (win_w, win_h) = crate::config::ProjectConfig::load()
         .map(|c| {
             (
-                c.window_width.unwrap_or(1760.0),
-                c.window_height.unwrap_or(962.0),
+                c.window_width.unwrap_or(1200.0),
+                c.window_height.unwrap_or(800.0),
             )
         })
-        .unwrap_or((1760.0, 962.0));
+        .unwrap_or((1200.0, 800.0));
     let window = WindowBuilder::new()
         .with_title("thClaws")
         .with_inner_size(LogicalSize::new(win_w, win_h))
