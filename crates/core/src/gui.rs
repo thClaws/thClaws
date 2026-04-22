@@ -1,12 +1,15 @@
 //! Desktop GUI mode: wry webview serving the embedded React frontend.
 //!
 //! The React dist/ is embedded at compile time via `include_str!` and
-//! served via wry's `with_html`. A single `SharedSession` (in
-//! `crate::shared_session`) owns one Agent and one Session that both
-//! the Terminal and Chat tabs render. Both tabs send user input via
-//! the `shell_input` IPC; both subscribe to a broadcast event stream
-//! that this module fans out to chat-shaped and terminal-shaped
-//! frontend dispatches.
+//! served via a wry custom protocol (`thclaws://`). We intentionally
+//! avoid `with_html` because WebView2's `NavigateToString` caps payloads
+//! at 2 MB on Windows and our inlined bundle is ~3 MB — it would panic
+//! at build-time with `HRESULT(0x80070057) "parameter is incorrect"`.
+//! A single `SharedSession` (in `crate::shared_session`) owns one Agent
+//! and one Session that both the Terminal and Chat tabs render. Both
+//! tabs send user input via the `shell_input` IPC; both subscribe to a
+//! broadcast event stream that this module fans out to chat-shaped and
+//! terminal-shaped frontend dispatches.
 //!
 //! Only compiled when the `gui` feature is enabled.
 
@@ -16,11 +19,13 @@ use crate::config::AppConfig;
 use crate::session::SessionStore;
 use crate::shared_session::{ShellInput, SharedSessionHandle, ViewEvent};
 use base64::Engine;
+use std::borrow::Cow;
 use std::sync::Arc;
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::window::WindowBuilder;
+use wry::http::Response;
 use wry::WebViewBuilder;
 
 /// Embed the single-file React frontend (JS+CSS inlined by vite-plugin-singlefile).
@@ -804,8 +809,21 @@ pub fn run_gui() {
     let devtools_on = std::env::var("THCLAWS_DEVTOOLS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    // Windows (WebView2) exposes custom protocols as `http://<scheme>.<host>`;
+    // mac/Linux use the raw `<scheme>://<host>` form.
+    #[cfg(windows)]
+    let start_url = "http://thclaws.localhost/";
+    #[cfg(not(windows))]
+    let start_url = "thclaws://localhost/";
+
     let webview = WebViewBuilder::new()
-        .with_html(FRONTEND_HTML)
+        .with_url(start_url)
+        .with_custom_protocol("thclaws".into(), |_webview_id, _request| {
+            Response::builder()
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(Cow::Borrowed(FRONTEND_HTML.as_bytes()))
+                .expect("build frontend response")
+        })
         .with_devtools(devtools_on)
         .with_ipc_handler(move |req| {
             let body = req.body();
