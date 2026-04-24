@@ -31,6 +31,9 @@ use wry::WebViewBuilder;
 /// use native cross-platform crates like rfd (Rust Native File Dialog) rather than spawn shell script
 use rfd::FileDialog;
 
+/// use native cross-platform Crate native_dialog rather than spawn shell script
+use native_dialog::{DialogBuilder, MessageLevel};
+
 /// Embed the single-file React frontend (JS+CSS inlined by vite-plugin-singlefile).
 const FRONTEND_HTML: &str = include_str!("../../../frontend/dist/index.html");
 
@@ -570,29 +573,22 @@ fn native_confirm(title: &str, message: &str, yes_label: &str, no_label: &str) -
         // message string has to carry the yes/no semantics. Prefix the
         // user's label onto the message so they know which button does
         // what.
-        let esc = |s: &str| s.replace('\'', "''");
         let prompt = format!(
             "{}\n\nYes = {}   No = {}",
-            esc(message),
-            esc(yes_label),
-            esc(no_label),
+            message,
+            yes_label,
+            no_label,
         );
-        let ps = format!(
-            "Add-Type -AssemblyName PresentationCore,PresentationFramework | Out-Null; \
-             [System.Windows.MessageBox]::Show('{}', '{}', 'YesNo', 'Question').ToString()",
-            prompt,
-            esc(title),
-        );
-        match std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps])
-            .output()
-        {
-            Ok(out) => {
-                let s = String::from_utf8_lossy(&out.stdout);
-                s.trim().eq_ignore_ascii_case("Yes")
-            }
-            Err(_) => false,
-        }
+
+        let result = DialogBuilder::message()
+          .set_level(MessageLevel::Info)
+          .set_title(title)
+          .set_text(prompt)
+          .confirm() // This returns a boolean directly, no .show() needed
+          .show()
+          .unwrap();
+
+        return result;
     }
 }
 
