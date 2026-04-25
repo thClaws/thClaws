@@ -60,7 +60,7 @@ Supported: macOS (Apple Silicon & Intel), Windows (x86_64 & ARM64), Linux (x86_6
 
 ### Build from source
 
-**Prerequisites:** Rust 1.78+, Node.js 20+, pnpm 9+.
+**Prerequisites:** Rust 1.85+, Node.js 20+, pnpm 9+.
 
 ```sh
 git clone https://github.com/thClaws/thClaws.git

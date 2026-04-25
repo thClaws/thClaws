@@ -12,7 +12,7 @@ Thanks for your interest — we welcome contributions from everyone. Please read
 
 ## Development setup
 
-**Prerequisites:** Rust 1.78+, Node.js 20+, pnpm 9+.
+**Prerequisites:** Rust 1.85+, Node.js 20+, pnpm 9+.
 
 ```sh
 git clone https://github.com/thClaws/thClaws.git
