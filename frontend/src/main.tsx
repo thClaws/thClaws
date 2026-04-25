@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App";
-import { ThemeProvider } from "./hooks/useTheme";
+import { ThemeProvider } from "./components/ThemeProvider";
 
 // Apply the OS-preferred theme synchronously before React mounts, so the
 // first paint of the startup modal already honours the user's light/dark
