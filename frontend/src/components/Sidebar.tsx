@@ -85,8 +85,6 @@ export function Sidebar() {
         if (msg.kmss) {
           setKmss(msg.kmss as KmsInfo[]);
         }
-      } else if (msg.type === "sessions_list") {
-        setSessions(msg.sessions as SessionInfo[]);
       } else if (msg.type === "mcp_update") {
         setMcpServers(msg.servers as { name: string; tools: number }[]);
       } else if (msg.type === "kms_update") {
