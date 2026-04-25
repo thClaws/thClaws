@@ -73,9 +73,9 @@ cd frontend && pnpm install && pnpm build && cd ..
 cargo build --release --features gui --bin thclaws
 
 # Run
-./crates/core/target/release/thclaws          # GUI
-./crates/core/target/release/thclaws --cli    # CLI
-./crates/core/target/release/thclaws -p "what does src/main.rs do?"  # one-shot
+./target/release/thclaws          # GUI
+./target/release/thclaws --cli    # CLI
+./target/release/thclaws -p "what does src/main.rs do?"  # one-shot
 ```
 
 ---
