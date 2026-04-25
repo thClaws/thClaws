@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal, MessageSquare, FolderTree, Users, FolderOpen, Folder, Settings } from "lucide-react";
 import { TerminalView } from "./components/TerminalView";
 import { ChatView } from "./components/ChatView";
@@ -294,6 +294,7 @@ export default function App() {
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [instructionsScope, setInstructionsScope] =
     useState<"global" | "folder" | null>(null);
+  const closeInstructions = useCallback(() => setInstructionsScope(null), []);
   // Secrets-backend gate: we ask once at first launch so the app
   // never touches the OS keychain behind the user's back. `null` ==
   // not picked yet → show the chooser before the main UI.
@@ -483,7 +484,7 @@ export default function App() {
       {instructionsScope && (
         <InstructionsEditorModal
           scope={instructionsScope}
-          onClose={() => setInstructionsScope(null)}
+          onClose={closeInstructions}
         />
       )}
       <ApprovalModal />

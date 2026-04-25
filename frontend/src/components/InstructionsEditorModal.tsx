@@ -178,7 +178,7 @@ export function InstructionsEditorModal({
     });
     send({ type: "instructions_get", scope });
     return unsub;
-  }, [scope, editor]);
+  }, [scope, editor, onClose]);
 
   const handleSave = () => {
     if (!editor) return;

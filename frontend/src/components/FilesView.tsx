@@ -186,6 +186,10 @@ export function FilesView({ active }: Props) {
       }
     }, 2000);
     return () => clearInterval(interval);
+  // `preview?.path` is intentional — using the full `preview` object
+  // would re-run on every polling cycle (setPreview creates a new
+  // reference each time), resetting the interval unnecessarily.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, currentPath, preview?.path, mode, themeMode]);
 
   const navigate = (name: string) => {
