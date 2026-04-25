@@ -15,8 +15,8 @@ export type IPCMessage = {
 
 // Send a message to Rust
 export function send(msg: IPCMessage) {
-  if ((window as any).ipc) {
-    (window as any).ipc.postMessage(JSON.stringify(msg));
+  if (window.ipc) {
+    window.ipc.postMessage(JSON.stringify(msg));
   } else {
     console.warn("[ipc] no backend — running in browser dev mode?", msg);
   }
@@ -32,7 +32,7 @@ export function subscribe(handler: Handler): () => void {
 }
 
 // Called by Rust via evaluate_script
-(window as any).__thclaws_dispatch = (json: string) => {
+window.__thclaws_dispatch = (json: string) => {
   try {
     const msg: IPCMessage = JSON.parse(json);
     handlers.forEach((h) => h(msg));

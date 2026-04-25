@@ -27,6 +27,7 @@ const ANSI_PALETTES: Record<ResolvedTheme, Record<number, string>> = {
 // line sits flush with its neighbours. Errors (`✗`) are never collapsed —
 // they're worth seeing individually.
 function collapseToolRuns(lines: string[]): string[] {
+  // eslint-disable-next-line no-control-regex
   const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
   const okRe = /\[tool:\s*(\w+)\][^\n]*?✓/;
 
@@ -74,6 +75,7 @@ function ansiToHtml(text: string, palette: Record<number, string>): string {
   // Parse ANSI escape sequences into balanced <span> tags.
   let out = "";
   let open = 0;
+  // eslint-disable-next-line no-control-regex
   const re = /\x1b\[([0-9;]*)m/g;
   let last = 0;
   let m: RegExpExecArray | null;
@@ -117,11 +119,11 @@ export function TeamView() {
     const unsub = subscribe((msg) => {
       if (msg.type === "team_status" && Array.isArray(msg.agents)) {
         setAgents(
-          msg.agents.map((a: any) => ({
-            name: a.name || a.agent || "?",
-            status: a.status || "unknown",
-            task: a.task || a.current_task || null,
-            output: a.output || [],
+          msg.agents.map((a: Record<string, unknown>): AgentInfo => ({
+            name: String(a.name || a.agent || "?"),
+            status: String(a.status || "unknown"),
+            task: a.task ? String(a.task) : a.current_task ? String(a.current_task) : null,
+            output: Array.isArray(a.output) ? a.output as string[] : [],
           }))
         );
       } else if (
