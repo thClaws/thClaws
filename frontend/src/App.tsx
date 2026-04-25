@@ -332,9 +332,7 @@ export default function App() {
     return unsub;
   }, []);
 
-  useEffect(() => {
-    if (!teamEnabled && activeTab === "team") setActiveTab("chat");
-  }, [teamEnabled, activeTab]);
+  const effectiveTab = (!teamEnabled && activeTab === "team") ? "chat" as Tab : activeTab;
 
   const TABS = teamEnabled ? ALL_TABS : ALL_TABS.filter((t) => t.id !== "team");
 
@@ -380,13 +378,13 @@ export default function App() {
             className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium transition-colors"
             style={{
               color:
-                activeTab === tab.id
+                effectiveTab === tab.id
                   ? "var(--text-primary)"
                   : "var(--text-secondary)",
               background:
-                activeTab === tab.id ? "var(--bg-primary)" : "transparent",
+                effectiveTab === tab.id ? "var(--bg-primary)" : "transparent",
               borderBottom:
-                activeTab === tab.id
+                effectiveTab === tab.id
                   ? "2px solid var(--accent)"
                   : "2px solid transparent",
             }}
@@ -414,7 +412,7 @@ export default function App() {
               `display: none` — which zeroes xterm's grid and kills focus,
               making the terminal un-typeable after a tab switch. */}
           {TABS.map(({ id }) => {
-            const isActive = activeTab === id;
+            const isActive = effectiveTab === id;
             const cls = `absolute inset-0 ${isActive ? "" : "invisible pointer-events-none"}`;
             return (
               <div key={id} className={cls}>

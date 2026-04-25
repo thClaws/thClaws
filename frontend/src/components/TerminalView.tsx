@@ -50,7 +50,7 @@ export function TerminalView({ active }: Props) {
   const fitRef = useRef<FitAddon | null>(null);
   const { resolved: themeMode } = useTheme();
   const themeModeRef = useRef(themeMode);
-  themeModeRef.current = themeMode;
+  useEffect(() => { themeModeRef.current = themeMode; }, [themeMode]);
 
   useEffect(() => {
     if (!ref.current || termRef.current) return;
@@ -386,7 +386,7 @@ export function TerminalView({ active }: Props) {
       if (!e || e.contentRect.width === 0 || e.contentRect.height === 0) return;
       try {
         fit.fit();
-      } catch {}
+      } catch { /* fit() may throw on zero-size or disposed container */ }
     });
     ro.observe(ref.current);
 
@@ -406,7 +406,7 @@ export function TerminalView({ active }: Props) {
     const f = fitRef.current;
     if (!t) return;
     requestAnimationFrame(() => {
-      try { f?.fit(); } catch {}
+      try { f?.fit(); } catch { /* fit() may throw on zero-size or disposed container */ }
       t.focus();
     });
   }, [active]);
