@@ -482,6 +482,68 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
     }
 }
 
+/// One built-in slash command, surfaced to the GUI's `/` popup so it can
+/// render an autocomplete list grouped by `category`.
+///
+/// Keep this list in lock-step with the `parse_slash` arms in this file
+/// and the dispatch arms in `shell_dispatch.rs`. Help text is the
+/// single-line summary shown next to the name in the popup; longer
+/// usage syntax (e.g. flags, sub-commands) goes in `usage` so the
+/// popup can render it as dim trailing text.
+pub struct BuiltInCommand {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub category: &'static str,
+    /// Optional argument hint, e.g. `"NAME"` for `/model NAME`. Empty
+    /// when the command takes no arguments.
+    pub usage: &'static str,
+}
+
+pub fn built_in_commands() -> &'static [BuiltInCommand] {
+    &[
+        // Session
+        BuiltInCommand { name: "clear",    description: "Clear conversation history",                 category: "Session", usage: "" },
+        BuiltInCommand { name: "compact",  description: "Compact history (drop oldest, keep recent)", category: "Session", usage: "" },
+        BuiltInCommand { name: "fork",     description: "Save + start a new session seeded with a summary", category: "Session", usage: "" },
+        BuiltInCommand { name: "save",     description: "Force-save the current session",             category: "Session", usage: "" },
+        BuiltInCommand { name: "load",     description: "Load a saved session by id or name",         category: "Session", usage: "ID|NAME" },
+        BuiltInCommand { name: "sessions", description: "List saved sessions",                        category: "Session", usage: "" },
+        BuiltInCommand { name: "rename",   description: "Rename the current session",                 category: "Session", usage: "NAME" },
+        BuiltInCommand { name: "history",  description: "Print message-history summary",              category: "Session", usage: "" },
+
+        // Model
+        BuiltInCommand { name: "model",     description: "Show or switch the current model",          category: "Model", usage: "[NAME]" },
+        BuiltInCommand { name: "models",    description: "List models from the current provider",     category: "Model", usage: "" },
+        BuiltInCommand { name: "provider",  description: "Switch provider to its default model",      category: "Model", usage: "NAME" },
+        BuiltInCommand { name: "providers", description: "List all supported providers",              category: "Model", usage: "" },
+        BuiltInCommand { name: "thinking",  description: "Set extended-thinking token budget",        category: "Model", usage: "BUDGET" },
+        BuiltInCommand { name: "permissions", description: "Show or set the permission mode",         category: "Model", usage: "[auto|ask]" },
+
+        // Context / memory / knowledge
+        BuiltInCommand { name: "context",  description: "Show context-window usage breakdown",        category: "Context", usage: "" },
+        BuiltInCommand { name: "memory",   description: "List memory entries",                        category: "Context", usage: "" },
+        BuiltInCommand { name: "kms",      description: "List knowledge bases",                       category: "Context", usage: "" },
+
+        // Skills, plugins, MCP
+        BuiltInCommand { name: "skills",   description: "List installed skills",                      category: "Extensions", usage: "" },
+        BuiltInCommand { name: "plugins",  description: "List installed plugins",                     category: "Extensions", usage: "" },
+        BuiltInCommand { name: "mcp",      description: "List active MCP servers and their tools",    category: "Extensions", usage: "" },
+
+        // Team
+        BuiltInCommand { name: "team",     description: "Show team agent status",                     category: "Team", usage: "" },
+        BuiltInCommand { name: "tasks",    description: "List current tasks/todos",                   category: "Team", usage: "" },
+
+        // System
+        BuiltInCommand { name: "help",     description: "Show this help",                             category: "System", usage: "" },
+        BuiltInCommand { name: "version",  description: "Show version",                               category: "System", usage: "" },
+        BuiltInCommand { name: "cwd",      description: "Show current working directory",             category: "System", usage: "" },
+        BuiltInCommand { name: "usage",    description: "Show token usage by provider and model",     category: "System", usage: "" },
+        BuiltInCommand { name: "doctor",   description: "Run diagnostics",                            category: "System", usage: "" },
+        BuiltInCommand { name: "config",   description: "Set a config value (session-only)",          category: "System", usage: "key=value" },
+        BuiltInCommand { name: "quit",     description: "Exit",                                       category: "System", usage: "" },
+    ]
+}
+
 pub fn render_help() -> &'static str {
     "Slash commands:\n  \
      /help             Show this help\n  \

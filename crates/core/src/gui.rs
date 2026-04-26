@@ -1086,6 +1086,60 @@ pub fn run_gui() {
                         let _ = responder.send(text);
                     }
                 }
+                "slash_commands_list" => {
+                    // Build the autocomplete catalogue for the chat-tab
+                    // `/` popup. Three sources:
+                    //   1. built-in commands (hard-coded in repl.rs so
+                    //      the parser and the popup stay in lock-step),
+                    //   2. user commands from .claude/commands/ etc.,
+                    //   3. installed skills (also reachable as /<name>).
+                    let mut entries: Vec<serde_json::Value> = Vec::new();
+                    for c in crate::repl::built_in_commands() {
+                        entries.push(serde_json::json!({
+                            "name": c.name,
+                            "description": c.description,
+                            "category": c.category,
+                            "usage": c.usage,
+                            "source": "builtin",
+                        }));
+                    }
+                    let user_cmds = crate::commands::CommandStore::discover();
+                    let mut user_names: Vec<&str> = user_cmds.commands.keys()
+                        .map(String::as_str)
+                        .collect();
+                    user_names.sort();
+                    for name in user_names {
+                        if let Some(cmd) = user_cmds.get(name) {
+                            entries.push(serde_json::json!({
+                                "name": cmd.name,
+                                "description": cmd.description,
+                                "category": "Custom",
+                                "usage": "",
+                                "source": "user",
+                            }));
+                        }
+                    }
+                    let skill_store = crate::skills::SkillStore::discover();
+                    let mut skill_entries: Vec<&crate::skills::SkillDef> =
+                        skill_store.skills.values().collect();
+                    skill_entries.sort_by(|a, b| a.name.cmp(&b.name));
+                    for s in skill_entries {
+                        entries.push(serde_json::json!({
+                            "name": s.name,
+                            "description": s.description,
+                            "category": "Skills",
+                            "usage": "",
+                            "source": "skill",
+                        }));
+                    }
+                    let payload = serde_json::json!({
+                        "type": "slash_commands",
+                        "commands": entries,
+                    });
+                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
+                        payload.to_string(),
+                    ));
+                }
                 "get_cwd" => {
                     let cwd = std::env::current_dir()
                         .map(|p| p.to_string_lossy().to_string())

@@ -7,6 +7,11 @@ import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
 import logoDark from "../assets/thClaws-logo-dark.png";
 import logoLight from "../assets/thClaws-logo-light.png";
+import {
+  SlashCommandPopup,
+  filterCommands,
+  type SlashCommandInfo,
+} from "./SlashCommandPopup";
 
 type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system";
@@ -69,10 +74,24 @@ export function ChatView() {
     null,
   );
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
+  const [slashIndex, setSlashIndex] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const copiedTimerRef = useRef<number | null>(null);
   const errorTimerRef = useRef<number | null>(null);
   const { resolved: themeMode } = useTheme();
+
+  // Show the slash popup whenever the input begins with `/` and the
+  // user isn't mid-prompt for an `ask_user_question`. Hidden during a
+  // streaming turn — slash commands fire instantly so there's nothing
+  // useful to autocomplete while the model is still talking.
+  const slashOpen =
+    !askPrompt && !streaming && input.startsWith("/");
+  const slashQuery = slashOpen ? input.slice(1).split(/\s/)[0] : "";
+  const slashFiltered = slashOpen
+    ? filterCommands(slashCommands, slashQuery)
+    : [];
 
   const showAttachmentError = (msg: string) => {
     setAttachmentError(msg);
@@ -255,6 +274,11 @@ export function ChatView() {
           setStreaming(false);
           setAskPrompt(null);
           break;
+        case "slash_commands":
+          if (Array.isArray(msg.commands)) {
+            setSlashCommands(msg.commands as SlashCommandInfo[]);
+          }
+          break;
         case "chat_history_replaced":
           if (msg.messages && Array.isArray(msg.messages)) {
             setMessages(
@@ -290,8 +314,21 @@ export function ChatView() {
           break;
       }
     });
+    // Ask the backend for the slash command catalogue once on mount.
+    // The backend returns a `slash_commands` event the subscriber above
+    // catches; new user commands / installed skills will only be picked
+    // up on next mount, which matches the rest of the GUI's
+    // discover-once-per-session behavior.
+    send({ type: "slash_commands_list" });
     return unsub;
   }, []);
+
+  useEffect(() => {
+    // Reset the highlighted item whenever the filtered list changes
+    // shape — keeping a stale index past the end of the new list would
+    // either render off-screen or wrap unexpectedly.
+    setSlashIndex(0);
+  }, [slashQuery, slashOpen]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -349,6 +386,47 @@ export function ChatView() {
         data: a.data,
       })),
     });
+  };
+
+  const acceptSlashCommand = (cmd: SlashCommandInfo) => {
+    // Commands with required args (usage non-empty and not optional)
+    // get the slash + name + trailing space inserted so the user can
+    // immediately type the argument. Zero-arg commands fire on enter.
+    const needsArg = cmd.usage && !cmd.usage.startsWith("[");
+    setInput(`/${cmd.name}${needsArg ? " " : ""}`);
+    setSlashIndex(0);
+    inputRef.current?.focus();
+  };
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!slashOpen || slashFiltered.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSlashIndex((i) => (i + 1) % slashFiltered.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSlashIndex(
+        (i) => (i - 1 + slashFiltered.length) % slashFiltered.length,
+      );
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      const cmd = slashFiltered[slashIndex];
+      if (cmd) acceptSlashCommand(cmd);
+    } else if (e.key === "Enter") {
+      // Only intercept Enter when the user is still composing the
+      // command name itself ("/cl" → fill in "/clear"). Once they've
+      // typed past the name into args ("/model gpt-5"), Enter should
+      // submit normally so they don't have to dismiss the popup first.
+      const composingName = !input.slice(1).includes(" ");
+      if (composingName) {
+        e.preventDefault();
+        const cmd = slashFiltered[slashIndex];
+        if (cmd) acceptSlashCommand(cmd);
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setInput("");
+    }
   };
 
   const awaitingUserAnswer = askPrompt !== null;
@@ -564,11 +642,22 @@ export function ChatView() {
             ))}
           </div>
         )}
+        {slashOpen && slashFiltered.length > 0 && (
+          <SlashCommandPopup
+            query={slashQuery}
+            commands={slashCommands}
+            selectedIndex={slashIndex}
+            onHoverIndex={setSlashIndex}
+            onSelect={acceptSlashCommand}
+          />
+        )}
         <div className="flex gap-2">
           <input
+            ref={inputRef}
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleInputKeyDown}
             onPaste={onPaste}
             placeholder={inputPlaceholder}
             disabled={inputDisabled}

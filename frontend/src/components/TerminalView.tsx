@@ -1,10 +1,29 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
+import {
+  SlashCommandPopup,
+  filterCommands,
+  type SlashCommandInfo,
+} from "./SlashCommandPopup";
 import bannerText from "../../../banner.txt?raw";
+
+type SlashView = {
+  open: boolean;
+  query: string;
+  index: number;
+  filtered: SlashCommandInfo[];
+};
+
+const SLASH_VIEW_CLOSED: SlashView = {
+  open: false,
+  query: "",
+  index: 0,
+  filtered: [],
+};
 
 // xterm needs CRLF; the shared banner file uses plain LF so the Rust REPL
 // can println! it unchanged.
@@ -51,6 +70,31 @@ export function TerminalView({ active }: Props) {
   const { resolved: themeMode } = useTheme();
   const themeModeRef = useRef(themeMode);
   useEffect(() => { themeModeRef.current = themeMode; }, [themeMode]);
+
+  // Slash-command catalogue mirrored from the backend, plus the live
+  // popup state. The xterm closure keeps the line buffer locally; we
+  // bridge to React via refs so `attachCustomKeyEventHandler` and
+  // `onData` can read/update the popup view without re-mounting xterm.
+  const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
+  const slashCommandsRef = useRef<SlashCommandInfo[]>([]);
+  const [slashView, setSlashView] = useState<SlashView>(SLASH_VIEW_CLOSED);
+  const slashViewRef = useRef(slashView);
+  useEffect(() => { slashViewRef.current = slashView; }, [slashView]);
+  // Bridge React clicks back into the xterm closure where lineBuffer
+  // lives. Set inside the mount effect; called from the popup's onSelect.
+  const acceptSlashRef = useRef<(cmd: SlashCommandInfo) => void>(() => {});
+
+  useEffect(() => {
+    send({ type: "slash_commands_list" });
+    const unsub = subscribe((msg) => {
+      if (msg.type === "slash_commands" && Array.isArray(msg.commands)) {
+        const list = msg.commands as SlashCommandInfo[];
+        slashCommandsRef.current = list;
+        setSlashCommands(list);
+      }
+    });
+    return unsub;
+  }, []);
 
   useEffect(() => {
     if (!ref.current || termRef.current) return;
@@ -99,7 +143,41 @@ export function TerminalView({ active }: Props) {
       writePrompt();
       lineBuffer = next;
       if (next.length > 0) term.write(next);
+      recomputeSlash();
     };
+
+    // Recompute the slash-popup state from the current `lineBuffer`.
+    // The popup is open iff the buffer starts with `/` AND the user
+    // hasn't typed a space yet (once we hit "/model gpt-5", we're past
+    // composing the name). Index is preserved across keystrokes so the
+    // user's selection doesn't jump back to the top on every char.
+    const recomputeSlash = () => {
+      const open = lineBuffer.startsWith("/") && !lineBuffer.includes(" ");
+      if (!open) {
+        if (slashViewRef.current.open) setSlashView(SLASH_VIEW_CLOSED);
+        return;
+      }
+      const query = lineBuffer.slice(1);
+      const filtered = filterCommands(slashCommandsRef.current, query);
+      const prev = slashViewRef.current;
+      let index = prev.open && prev.query === query ? prev.index : 0;
+      if (index >= filtered.length) index = 0;
+      setSlashView({ open: true, query, index, filtered });
+    };
+
+    // Accept a command into the line buffer + visible terminal. Args-
+    // required commands (e.g. /model NAME) get a trailing space so the
+    // user can keep typing; zero-arg commands stop at the name.
+    const acceptSlashCommand = (cmd: SlashCommandInfo) => {
+      const needsArg = cmd.usage && !cmd.usage.startsWith("[");
+      const next = `/${cmd.name}${needsArg ? " " : ""}`;
+      term.write("\x1b[2K\r");
+      writePrompt();
+      lineBuffer = next;
+      term.write(next);
+      recomputeSlash();
+    };
+    acceptSlashRef.current = acceptSlashCommand;
 
     // Record a successfully-submitted prompt in the recall ring.
     // Skips exact duplicates of the most recent entry (Ctrl+↑ in bash
@@ -140,6 +218,52 @@ export function TerminalView({ active }: Props) {
       const isMac = navigator.platform.startsWith("Mac");
       const mod = isMac ? e.metaKey : e.ctrlKey && e.shiftKey;
 
+      // Slash-command popup: when open, intercept navigation/accept/
+      // dismiss keys so xterm doesn't also process them as input. Only
+      // fires on keydown and only when no modifiers are held — Cmd+↑
+      // / Ctrl+Tab / etc. should pass through unchanged.
+      if (
+        e.type === "keydown" &&
+        !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+      ) {
+        const sv = slashViewRef.current;
+        if (sv.open && sv.filtered.length > 0) {
+          if (e.key === "ArrowDown") {
+            const next = (sv.index + 1) % sv.filtered.length;
+            setSlashView({ ...sv, index: next });
+            return false;
+          }
+          if (e.key === "ArrowUp") {
+            const next = (sv.index - 1 + sv.filtered.length) % sv.filtered.length;
+            setSlashView({ ...sv, index: next });
+            return false;
+          }
+          if (e.key === "Tab") {
+            const cmd = sv.filtered[sv.index];
+            if (cmd) acceptSlashCommand(cmd);
+            return false;
+          }
+          if (e.key === "Escape") {
+            term.write("\x1b[2K\r");
+            writePrompt();
+            lineBuffer = "";
+            recomputeSlash();
+            return false;
+          }
+          if (e.key === "Enter") {
+            // While the user is still composing the name (no space yet),
+            // Enter accepts the highlighted item — same UX as the chat
+            // tab. Once they've typed past the name into args, Enter
+            // falls through and the existing onData path submits.
+            if (!lineBuffer.includes(" ")) {
+              const cmd = sv.filtered[sv.index];
+              if (cmd) acceptSlashCommand(cmd);
+              return false;
+            }
+          }
+        }
+      }
+
       // Plain Ctrl+C:
       //  - non-empty input line → clear the line (same as bash)
       //  - empty line → request abort of the in-flight turn via the
@@ -154,6 +278,7 @@ export function TerminalView({ active }: Props) {
           term.write("\x1b[2K\r");
           lineBuffer = "";
           writePrompt(); // also flips promptShowing back on
+          recomputeSlash();
         } else {
           send({ type: "shell_cancel" });
         }
@@ -232,6 +357,7 @@ export function TerminalView({ active }: Props) {
                 // Enter.
                 lineBuffer += text;
                 term.write(text);
+                recomputeSlash();
               }
             }
           }
@@ -306,6 +432,7 @@ export function TerminalView({ active }: Props) {
 
       // xterm hands us each keystroke as a string; classify and either
       // mutate the buffer + echo, or submit on Enter.
+      let bufferMutated = false;
       for (const ch of data) {
         if (ch === "\r" || ch === "\n") {
           if (lineBuffer.trim().length > 0) {
@@ -322,18 +449,22 @@ export function TerminalView({ active }: Props) {
             writePrompt();
           }
           lineBuffer = "";
+          bufferMutated = true;
         } else if (ch === "\x7f" || ch === "\b") {
           if (lineBuffer.length > 0) {
             lineBuffer = lineBuffer.slice(0, -1);
             // Move cursor back, overwrite with space, move back again.
             term.write("\b \b");
+            bufferMutated = true;
           }
         } else if (ch >= " " && ch !== "\x7f") {
           lineBuffer += ch;
           term.write(ch);
+          bufferMutated = true;
         }
         // Other control bytes are dropped.
       }
+      if (bufferMutated) recomputeSlash();
     });
 
     // Note: no resize IPC — the shared session doesn't care about
@@ -437,9 +568,26 @@ export function TerminalView({ active }: Props) {
 
   return (
     <div
-      ref={ref}
-      className="h-full w-full p-1.5"
+      className="relative h-full w-full"
       style={{ background: "var(--terminal-bg)" }}
-    />
+    >
+      <div ref={ref} className="h-full w-full p-1.5" />
+      {slashView.open && slashView.filtered.length > 0 && (
+        <div
+          className="absolute left-3 right-3 bottom-3"
+          style={{ pointerEvents: "auto" }}
+        >
+          <SlashCommandPopup
+            query={slashView.query}
+            commands={slashCommands}
+            selectedIndex={slashView.index}
+            onHoverIndex={(i) =>
+              setSlashView((prev) => ({ ...prev, index: i }))
+            }
+            onSelect={(cmd) => acceptSlashRef.current(cmd)}
+          />
+        </div>
+      )}
+    </div>
   );
 }
