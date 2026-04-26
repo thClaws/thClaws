@@ -41,6 +41,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   dashscope: "Alibaba DashScope",
   ollama: "Ollama",
   "ollama-anthropic": "Ollama (Anthropic-compatible)",
+  azure: "Azure AI Foundry",
 };
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {

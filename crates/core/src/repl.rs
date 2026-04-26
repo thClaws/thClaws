@@ -725,6 +725,19 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("zai/"),
             ))
         }
+        ProviderKind::AzureAIFoundry => {
+            let endpoint = std::env::var("AZURE_AI_FOUNDRY_ENDPOINT").map_err(|_| {
+                Error::Config(
+                    "AZURE_AI_FOUNDRY_ENDPOINT not set — add it in Settings or export the env var"
+                        .into(),
+                )
+            })?;
+            let base = endpoint.trim_end_matches('/');
+            let messages_url = format!("{base}/anthropic/v1/messages");
+            Ok(Arc::new(
+                AnthropicProvider::new(api_key).with_base_url(messages_url),
+            ))
+        }
         ProviderKind::Ollama
         | ProviderKind::OllamaAnthropic
         | ProviderKind::LMStudio

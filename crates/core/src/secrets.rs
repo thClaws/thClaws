@@ -98,6 +98,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::Gemini,
     ProviderKind::DashScope,
     ProviderKind::ZAi,
+    ProviderKind::AzureAIFoundry,
 ];
 
 fn entry(provider: &str) -> Result<keyring::Entry> {
