@@ -36,6 +36,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # libdbus-1-dev + pkg-config are required by the keychain crate
+      # (libdbus-sys) on Linux. Without them, even the CLI build fails
+      # with "pkg_config failed: ..." before CodeQL extraction starts.
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -50,8 +58,9 @@ jobs:
         with:
           languages: rust
 
-      # Build the CLI binary (no GUI deps — webkit2gtk/wry not needed
-      # for CodeQL extraction; GUI surface analyzed via JS/TS path).
+      # Build the CLI binary (no webkit2gtk/wry deps — the GUI surface
+      # is covered by the JS/TS CodeQL path). Keychain via libdbus-sys
+      # still requires libdbus-1-dev, installed above.
       - name: Cargo build (CLI)
         run: cargo build --bin thclaws-cli
 

@@ -14,6 +14,13 @@ env:
   # once Node 24 is the runner default.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
+# Least privilege: CI only needs to read the repo + download the
+# frontend-dist artifact between jobs. Override per-job if a future
+# step needs more (e.g. caching a coverage upload).
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   # Formatting check — fast, runs on every PR
   fmt:
