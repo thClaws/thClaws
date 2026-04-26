@@ -339,6 +339,12 @@ pub fn parse_line(line: &str, state: &mut ParseState) -> Result<Vec<ProviderEven
         }
     }
 
+    // Ollama Cloud uses a sibling `thinking` field on the message.
+    if let Some(thinking) = v.pointer("/message/thinking").and_then(Value::as_str) {
+        if !thinking.is_empty() {
+            out.push(ProviderEvent::ThinkingDelta(thinking.to_string()));
+        }
+    }
     // Tool calls (non-streamed — entire call arrives in one message payload).
     if let Some(tool_calls) = v.pointer("/message/tool_calls").and_then(Value::as_array) {
         for (i, tc) in tool_calls.iter().enumerate() {

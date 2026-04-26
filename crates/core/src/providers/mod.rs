@@ -13,6 +13,7 @@ pub mod anthropic;
 pub mod assemble;
 pub mod gemini;
 pub mod ollama;
+pub mod ollama_cloud;
 pub mod openai;
 pub mod openai_responses;
 
@@ -30,6 +31,7 @@ pub enum ProviderKind {
     Gemini,
     Ollama,
     OllamaAnthropic,
+    OllamaCloud,
     DashScope,
     ZAi,
     LMStudio,
@@ -46,6 +48,7 @@ impl ProviderKind {
         Self::Gemini,
         Self::Ollama,
         Self::OllamaAnthropic,
+        Self::OllamaCloud,
         Self::DashScope,
         Self::ZAi,
         Self::LMStudio,
@@ -62,6 +65,7 @@ impl ProviderKind {
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
             Self::OllamaAnthropic => "ollama-anthropic",
+            Self::OllamaCloud => "ollama-cloud",
             Self::DashScope => "dashscope",
             Self::ZAi => "zai",
             Self::LMStudio => "lmstudio",
@@ -79,6 +83,7 @@ impl ProviderKind {
             Self::Gemini => "gemini-2.0-flash",
             Self::Ollama => "ollama/llama3.2",
             Self::OllamaAnthropic => "oa/qwen3-coder",
+            Self::OllamaCloud => "ollama-cloud/deepseek-v4-flash",
             Self::DashScope => "qwen-max",
             Self::ZAi => "zai/glm-4.6",
             // Most LMStudio installs change models constantly; this is a
@@ -149,6 +154,7 @@ impl ProviderKind {
             Self::Gemini => Some("GEMINI_API_KEY"),
             Self::Ollama => None,
             Self::OllamaAnthropic => None,
+            Self::OllamaCloud => Some("OLLAMA_CLOUD_API_KEY"),
             Self::DashScope => Some("DASHSCOPE_API_KEY"),
             Self::ZAi => Some("ZAI_API_KEY"),
             Self::LMStudio => None, // Local runtime, no auth.
@@ -224,6 +230,7 @@ impl ProviderKind {
             | Self::AgentSdk
             | Self::Ollama
             | Self::OllamaAnthropic
+            | Self::OllamaCloud
             | Self::DashScope
             | Self::ZAi
             | Self::LMStudio => None,
@@ -275,6 +282,8 @@ impl ProviderKind {
             Some(Self::OllamaAnthropic)
         } else if model.starts_with("ollama/") {
             Some(Self::Ollama)
+        } else if model.starts_with("ollama-cloud/") {
+            Some(Self::OllamaCloud)
         } else {
             None
         }
