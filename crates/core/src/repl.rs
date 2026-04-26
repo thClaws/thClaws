@@ -499,6 +499,10 @@ pub struct BuiltInCommand {
     pub usage: &'static str,
 }
 
+// Hand-aligned struct-literal table — keeping the columns reads well at a
+// glance and rustfmt's exploded form (~6 lines per row) bloats the function
+// to >180 lines for the same content. Skip for the table only.
+#[rustfmt::skip]
 pub fn built_in_commands() -> &'static [BuiltInCommand] {
     &[
         // Session
