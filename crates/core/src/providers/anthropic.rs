@@ -23,6 +23,9 @@ pub struct AnthropicProvider {
     client: Client,
     api_key: String,
     base_url: String,
+    /// Optional override for the auth header name. `None` → `x-api-key`
+    /// (the standard Anthropic header, also accepted by Azure AI Foundry).
+    api_key_header: Option<String>,
 }
 
 impl AnthropicProvider {
@@ -31,6 +34,7 @@ impl AnthropicProvider {
             client: Client::new(),
             api_key: api_key.into(),
             base_url: DEFAULT_API_URL.to_string(),
+            api_key_header: None,
         }
     }
 
@@ -38,6 +42,15 @@ impl AnthropicProvider {
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
         self
+    }
+
+    pub fn with_api_key_header(mut self, name: impl Into<String>) -> Self {
+        self.api_key_header = Some(name.into());
+        self
+    }
+
+    fn auth_header_name(&self) -> &str {
+        self.api_key_header.as_deref().unwrap_or("x-api-key")
     }
 
     fn build_body(req: &StreamRequest) -> Value {
@@ -57,9 +70,12 @@ impl AnthropicProvider {
             })
             .collect();
 
-        // Strip provider prefixes (oa/) so the model name matches what
-        // Ollama or other backends expect.
-        let model = req.model.strip_prefix("oa/").unwrap_or(&req.model);
+        // Strip provider prefixes so the model name matches what the backend expects.
+        let model = req
+            .model
+            .strip_prefix("oa/")
+            .or_else(|| req.model.strip_prefix("azure/"))
+            .unwrap_or(&req.model);
 
         let mut body = json!({
             "model": model,
@@ -115,7 +131,7 @@ impl Provider for AnthropicProvider {
         let resp = self
             .client
             .get(&models_url)
-            .header("x-api-key", &self.api_key)
+            .header(self.auth_header_name(), &self.api_key)
             .header("anthropic-version", API_VERSION)
             .send()
             .await
@@ -157,7 +173,7 @@ impl Provider for AnthropicProvider {
         let resp = self
             .client
             .post(&self.base_url)
-            .header("x-api-key", &self.api_key)
+            .header(self.auth_header_name(), &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json")
             .json(&body)

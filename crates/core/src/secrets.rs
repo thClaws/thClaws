@@ -97,7 +97,9 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::OpenRouter,
     ProviderKind::Gemini,
     ProviderKind::DashScope,
+    ProviderKind::OllamaCloud,
     ProviderKind::ZAi,
+    ProviderKind::AzureAIFoundry,
 ];
 
 fn entry(provider: &str) -> Result<keyring::Entry> {
