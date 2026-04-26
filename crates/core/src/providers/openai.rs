@@ -36,6 +36,14 @@ pub struct OpenAIProvider {
     /// `gemma4-12b`) where the prefix exists only to route `detect()` on
     /// our side.
     strip_model_prefix: Option<String>,
+    /// Override the auth header name. `None` → `Authorization: Bearer {key}`.
+    /// Azure AI Foundry uses `api-key: {key}` instead.
+    api_key_header: Option<String>,
+    /// Explicit URL for GET /models. When `None` the URL is derived from
+    /// `base_url` by replacing `/chat/completions` with `/models`.
+    /// Azure's models path differs from the completions path, so it needs
+    /// an explicit override.
+    list_models_url: Option<String>,
 }
 
 impl OpenAIProvider {
@@ -45,6 +53,8 @@ impl OpenAIProvider {
             api_key: api_key.into(),
             base_url: DEFAULT_API_URL.to_string(),
             strip_model_prefix: None,
+            api_key_header: None,
+            list_models_url: None,
         }
     }
 
@@ -56,6 +66,27 @@ impl OpenAIProvider {
     pub fn with_strip_model_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.strip_model_prefix = Some(prefix.into());
         self
+    }
+
+    pub fn with_api_key_header(mut self, name: impl Into<String>) -> Self {
+        self.api_key_header = Some(name.into());
+        self
+    }
+
+    pub fn with_list_models_url(mut self, url: impl Into<String>) -> Self {
+        self.list_models_url = Some(url.into());
+        self
+    }
+
+    fn auth_header_name(&self) -> &str {
+        self.api_key_header.as_deref().unwrap_or("authorization")
+    }
+
+    fn auth_header_value(&self) -> String {
+        match &self.api_key_header {
+            Some(_) => self.api_key.clone(),
+            None => format!("Bearer {}", self.api_key),
+        }
     }
 
     /// Convert canonical `Message`s → OpenAI chat/completions messages array.
@@ -300,17 +331,18 @@ fn extract_images(content: &ToolResultContent) -> Vec<(String, String)> {
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        // /v1/chat/completions → /v1/models
-        let models_url = self
-            .base_url
-            .rsplit_once("/chat/completions")
-            .map(|(base, _)| format!("{base}/models"))
-            .unwrap_or_else(|| format!("{}/models", self.base_url.trim_end_matches('/')));
+        let models_url = self.list_models_url.clone().unwrap_or_else(|| {
+            // Derive from base_url: /v1/chat/completions → /v1/models
+            self.base_url
+                .rsplit_once("/chat/completions")
+                .map(|(base, _)| format!("{base}/models"))
+                .unwrap_or_else(|| format!("{}/models", self.base_url.trim_end_matches('/')))
+        });
 
         let resp = self
             .client
             .get(&models_url)
-            .header("authorization", format!("Bearer {}", self.api_key))
+            .header(self.auth_header_name(), self.auth_header_value())
             .send()
             .await
             .map_err(|e| Error::Provider(format!("http: {e}")))?;
@@ -365,7 +397,7 @@ impl Provider for OpenAIProvider {
         let resp = self
             .client
             .post(&self.base_url)
-            .header("authorization", format!("Bearer {}", self.api_key))
+            .header(self.auth_header_name(), self.auth_header_value())
             .header("content-type", "application/json")
             .json(&body)
             .send()

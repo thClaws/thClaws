@@ -308,6 +308,7 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
         ProviderKind::AgenticPress => "agentic-press",
         ProviderKind::ZAi => "zai",
         ProviderKind::LMStudio => "lmstudio",
+        ProviderKind::AzureAIFoundry => "azure",
     }
 }
 
