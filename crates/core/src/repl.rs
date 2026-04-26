@@ -1910,7 +1910,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         continue;
                     }
                     // Resolve short aliases ("sonnet" → "claude-sonnet-4-6",
-                    // "flash" → "gemini-2.0-flash", etc.) to the canonical
+                    // "flash" → "gemini-2.5-flash", etc.) to the canonical
                     // model id. Otherwise we'd persist "sonnet" and hand it
                     // straight to the Anthropic API, which replies
                     // `not_found_error: model: sonnet`.
@@ -3672,7 +3672,7 @@ mod tests {
         assert_eq!(default_model_for_provider("openai"), Some("gpt-4o"));
         assert_eq!(
             default_model_for_provider("gemini"),
-            Some("gemini-2.0-flash")
+            Some("gemini-2.5-flash")
         );
         assert_eq!(
             default_model_for_provider("ollama"),

@@ -76,7 +76,7 @@ impl ProviderKind {
             Self::OpenAI => "gpt-4o",
             Self::OpenAIResponses => "codex/gpt-5.2-codex",
             Self::OpenRouter => "openrouter/anthropic/claude-sonnet-4-6",
-            Self::Gemini => "gemini-2.0-flash",
+            Self::Gemini => "gemini-2.5-flash",
             Self::Ollama => "ollama/llama3.2",
             Self::OllamaAnthropic => "oa/qwen3-coder",
             Self::DashScope => "qwen-max",
