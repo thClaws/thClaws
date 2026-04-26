@@ -287,6 +287,20 @@ export default function App() {
   // to paste.
   useEditingShortcuts();
 
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!navigator.platform.startsWith("Mac")) return;
+      if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      const key = e.key.toLowerCase();
+      if (key !== "q" && key !== "w") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      send({ type: "app_close" });
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, []);
+
   const [started, setStarted] = useState(false);
   const [currentCwd, setCurrentCwd] = useState("");
   const [activeTab, setActiveTab] = useState<Tab>("terminal");

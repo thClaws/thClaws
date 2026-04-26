@@ -1454,6 +1454,13 @@ fn format_tool_label(name: &str, input: &serde_json::Value) -> String {
             .get("query")
             .and_then(|v| v.as_str())
             .map(|q| format!("({q})")),
+        "AskUserQuestion" => input.get("question").and_then(|v| v.as_str()).map(|q| {
+            let first: String = q.chars().take(60).collect();
+            format!(
+                "({first}{})",
+                if q.chars().count() > 60 { "..." } else { "" }
+            )
+        }),
         _ => None,
     }
     .unwrap_or_default();

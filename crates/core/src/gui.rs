@@ -22,8 +22,12 @@ use base64::Engine;
 use std::borrow::Cow;
 use std::sync::Arc;
 use tao::dpi::LogicalSize;
+#[cfg(target_os = "macos")]
+use tao::event::ElementState;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+#[cfg(target_os = "macos")]
+use tao::keyboard::{Key, ModifiersState};
 use tao::window::WindowBuilder;
 use wry::http::Response;
 use wry::WebViewBuilder;
@@ -65,6 +69,7 @@ enum UserEvent {
     SessionListRefresh(String),
     FileTree(String),
     FileContent(String),
+    QuitRequested,
 }
 
 const MAX_RECENT_DIRS: usize = 3;
@@ -794,6 +799,26 @@ fn escape_for_js(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
+#[cfg(target_os = "macos")]
+fn is_macos_close_shortcut(event: &tao::event::KeyEvent, modifiers: ModifiersState) -> bool {
+    if event.state != ElementState::Pressed || !modifiers.super_key() {
+        return false;
+    }
+    match event.key_without_modifiers() {
+        Key::Character(ch) => ch.eq_ignore_ascii_case("q") || ch.eq_ignore_ascii_case("w"),
+        _ => false,
+    }
+}
+
+fn request_gui_shutdown(shared: &SharedSessionHandle, control_flow: &mut ControlFlow) {
+    let _ = shared.input_tx.send(ShellInput::SaveAndQuit);
+    // Kill any spawned teammate processes.
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "team-agent"])
+        .status();
+    *control_flow = ControlFlow::Exit;
+}
+
 pub fn run_gui() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -830,6 +855,39 @@ pub fn run_gui() {
     spawn_event_translator(&shared, proxy.clone());
     let shared_for_ipc = shared.clone();
     let shared_for_events = shared.clone();
+    let (ask_tx, mut ask_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::tools::AskUserRequest>();
+    crate::tools::set_gui_ask_sender(Some(ask_tx));
+    let pending_asks = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+        u64,
+        tokio::sync::oneshot::Sender<String>,
+    >::new()));
+    let pending_asks_for_ipc = pending_asks.clone();
+
+    // Forwarder: AskUserQuestion tool calls -> frontend composer handoff.
+    let proxy_for_ask = proxy.clone();
+    let pending_asks_for_forwarder = pending_asks.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("ask-user forwarder runtime");
+        rt.block_on(async move {
+            while let Some(req) = ask_rx.recv().await {
+                let id = req.id;
+                let question = req.question.clone();
+                if let Ok(mut pending) = pending_asks_for_forwarder.lock() {
+                    pending.insert(id, req.response);
+                }
+                let payload = serde_json::json!({
+                    "type": "ask_user_question",
+                    "id": id,
+                    "question": question,
+                });
+                let _ = proxy_for_ask.send_event(UserEvent::Dispatch(payload.to_string()));
+            }
+        });
+    });
 
     // Forwarder: approval requests → frontend dispatches. Spawned on a
     // dedicated tokio runtime thread so we can `await` the mpsc without
@@ -967,6 +1025,24 @@ pub fn run_gui() {
             let ty = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
             match ty {
+                "app_close" => {
+                    let _ = proxy_for_ipc.send_event(UserEvent::QuitRequested);
+                }
+                "ask_user_response" => {
+                    let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let text = msg
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let responder = pending_asks_for_ipc
+                        .lock()
+                        .ok()
+                        .and_then(|mut pending| pending.remove(&id));
+                    if let Some(responder) = responder {
+                        let _ = responder.send(text);
+                    }
+                }
                 "get_cwd" => {
                     let cwd = std::env::current_dir()
                         .map(|p| p.to_string_lossy().to_string())
@@ -2037,6 +2113,9 @@ pub fn run_gui() {
         .build_gtk(window.default_vbox().unwrap())
         .expect("webview build (gtk)");
 
+    #[cfg(target_os = "macos")]
+    let mut macos_modifiers = ModifiersState::empty();
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -2107,17 +2186,28 @@ pub fn run_gui() {
                 );
                 let _ = webview.evaluate_script(&js);
             }
+            Event::UserEvent(UserEvent::QuitRequested) => {
+                request_gui_shutdown(&shared_for_events, control_flow);
+            }
+            #[cfg(target_os = "macos")]
+            Event::WindowEvent {
+                event: WindowEvent::ModifiersChanged(modifiers),
+                ..
+            } => {
+                macos_modifiers = modifiers;
+            }
+            #[cfg(target_os = "macos")]
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { event, .. },
+                ..
+            } if is_macos_close_shortcut(&event, macos_modifiers) => {
+                request_gui_shutdown(&shared_for_events, control_flow);
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                // Save the shared session before exit.
-                let _ = shared_for_events.input_tx.send(ShellInput::SaveAndQuit);
-                // Kill any spawned teammate processes.
-                let _ = std::process::Command::new("pkill")
-                    .args(["-f", "team-agent"])
-                    .status();
-                *control_flow = ControlFlow::Exit;
+                request_gui_shutdown(&shared_for_events, control_flow);
             }
             _ => {}
         }

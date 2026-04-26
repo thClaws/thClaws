@@ -29,6 +29,11 @@ type Attachment = {
   previewUrl: string;
 };
 
+type AskPrompt = {
+  id: number;
+  question: string;
+};
+
 const SUPPORTED_IMAGE_MIME = /^image\/(png|jpeg|jpg|webp|gif)$/;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB per attachment
 
@@ -57,6 +62,7 @@ export function ChatView() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [askPrompt, setAskPrompt] = useState<AskPrompt | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(
@@ -123,6 +129,7 @@ export function ChatView() {
   };
 
   const onPaste = (e: React.ClipboardEvent) => {
+    if (askPrompt) return;
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of Array.from(items)) {
@@ -138,6 +145,7 @@ export function ChatView() {
 
   const onDragOver = (e: React.DragEvent) => {
     e.preventDefault();
+    if (askPrompt) return;
     if (!dragActive) setDragActive(true);
   };
 
@@ -149,6 +157,7 @@ export function ChatView() {
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragActive(false);
+    if (askPrompt) return;
     const files = e.dataTransfer?.files;
     if (!files) return;
     for (const file of Array.from(files)) {
@@ -208,9 +217,15 @@ export function ChatView() {
           // bubbles via chat_text_delta-like paths; that's separate
           // from normal tool completion.)
           setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.role === "tool") {
-              return [...prev.slice(0, -1), { ...last, toolDone: true }];
+            for (let i = prev.length - 1; i >= 0; i--) {
+              const candidate = prev[i];
+              if (candidate.role === "tool" && !candidate.toolDone) {
+                return [
+                  ...prev.slice(0, i),
+                  { ...candidate, toolDone: true },
+                  ...prev.slice(i + 1),
+                ];
+              }
             }
             return prev;
           });
@@ -223,10 +238,22 @@ export function ChatView() {
           break;
         case "chat_done":
           setStreaming(false);
+          setAskPrompt(null);
           break;
+        case "ask_user_question": {
+          const id = typeof msg.id === "number" ? msg.id : null;
+          const question = typeof msg.question === "string" ? msg.question : "";
+          if (id !== null) {
+            setAskPrompt({ id, question });
+            setStreaming(true);
+            setAttachments([]);
+          }
+          break;
+        }
         case "new_session_ack":
           setMessages([]);
           setStreaming(false);
+          setAskPrompt(null);
           break;
         case "chat_history_replaced":
           if (msg.messages && Array.isArray(msg.messages)) {
@@ -258,6 +285,7 @@ export function ChatView() {
               ),
             );
             setStreaming(false);
+            setAskPrompt(null);
           }
           break;
       }
@@ -283,6 +311,14 @@ export function ChatView() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
+    if (askPrompt) {
+      if (!text) return;
+      setInput("");
+      send({ type: "ask_user_response", id: askPrompt.id, text });
+      setMessages((prev) => [...prev, { role: "user", content: text }]);
+      setAskPrompt(null);
+      return;
+    }
     // Allow send when EITHER text or attachments are present —
     // "describe this image" with no text is a valid use case.
     if ((!text && attachments.length === 0) || streaming) return;
@@ -290,15 +326,14 @@ export function ChatView() {
     const pendingAttachments = attachments;
     setAttachments([]);
 
-    // /exit and /quit close the window — handle locally so we get the
-    // window.close after the backend save round-trip. Everything else
+    // /exit and /quit close the app through the backend so it can save
+    // the shared session before the tao event loop exits. Everything else
     // (including /clear, /help, every other slash command) goes to the
     // shared session, which dispatches it and broadcasts the response
     // back as a `chat_slash_output` system bubble.
     const lower = text.toLowerCase();
     if (lower === "/exit" || lower === "/quit" || lower === "/q") {
-      send({ type: "new_session" });
-      setTimeout(() => window.close(), 200);
+      send({ type: "app_close" });
       return;
     }
 
@@ -315,6 +350,21 @@ export function ChatView() {
       })),
     });
   };
+
+  const awaitingUserAnswer = askPrompt !== null;
+  const inputDisabled = streaming && !awaitingUserAnswer;
+  const submitDisabled = awaitingUserAnswer
+    ? !input.trim()
+    : streaming || (!input.trim() && attachments.length === 0);
+  const inputPlaceholder = awaitingUserAnswer
+    ? askPrompt.question
+      ? `Answer: ${askPrompt.question}`
+      : "Answer the assistant..."
+    : streaming
+      ? "Waiting for response..."
+      : attachments.length > 0
+        ? "Add a prompt (or send as-is)..."
+        : "Type a message — paste or drop an image to attach...";
 
   return (
     <div className="flex flex-col h-full">
@@ -520,14 +570,8 @@ export function ChatView() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onPaste={onPaste}
-            placeholder={
-              streaming
-                ? "Waiting for response..."
-                : attachments.length > 0
-                  ? "Add a prompt (or send as-is)..."
-                  : "Type a message — paste or drop an image to attach..."
-            }
-            disabled={streaming}
+            placeholder={inputPlaceholder}
+            disabled={inputDisabled}
             className="flex-1 px-3 py-2 rounded text-sm outline-none"
             style={{
               background: "var(--bg-tertiary)",
@@ -537,15 +581,15 @@ export function ChatView() {
           />
           <button
             type="submit"
-            disabled={streaming || (!input.trim() && attachments.length === 0)}
+            disabled={submitDisabled}
             className="px-4 py-2 rounded text-sm font-medium transition-colors"
             style={{
-              background: streaming ? "var(--bg-tertiary)" : "var(--accent)",
-              color: streaming ? "var(--text-secondary)" : "var(--accent-fg)",
-              cursor: streaming ? "not-allowed" : "pointer",
+              background: submitDisabled ? "var(--bg-tertiary)" : "var(--accent)",
+              color: submitDisabled ? "var(--text-secondary)" : "var(--accent-fg)",
+              cursor: submitDisabled ? "not-allowed" : "pointer",
             }}
           >
-            Send
+            {awaitingUserAnswer ? "Reply" : "Send"}
           </button>
         </div>
       </form>

@@ -27,7 +27,7 @@ pub mod todo;
 pub mod web;
 pub mod write;
 
-pub use ask::AskUserTool;
+pub use ask::{set_gui_ask_sender, AskUserRequest, AskUserTool};
 pub use bash::BashTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
