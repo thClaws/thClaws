@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import { Check, Copy } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
 import logoDark from "../assets/thClaws-logo-dark.png";
@@ -57,8 +58,25 @@ export function ChatView() {
   const [streaming, setStreaming] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
+  const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(
+    null,
+  );
   const bottomRef = useRef<HTMLDivElement>(null);
+  const copiedTimerRef = useRef<number | null>(null);
   const { resolved: themeMode } = useTheme();
+
+  const copyMessage = (msg: ChatMessage, index: number) => {
+    if (!msg.content) return;
+    send({ type: "clipboard_write", text: msg.content });
+    setCopiedMessageIndex(index);
+    if (copiedTimerRef.current !== null) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+    copiedTimerRef.current = window.setTimeout(() => {
+      setCopiedMessageIndex((current) => (current === index ? null : current));
+      copiedTimerRef.current = null;
+    }, 1200);
+  };
 
   /// Add an image File/Blob to the pending-attachments list. Skips any
   /// MIME type the providers don't accept (anything outside
@@ -226,6 +244,14 @@ export function ChatView() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+    };
+  }, []);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
@@ -291,10 +317,11 @@ export function ChatView() {
           // the Terminal tab.
           if (msg.role === "tool") {
             const glyph = msg.toolDone ? "✓" : "▸";
+            const copied = copiedMessageIndex === i;
             return (
               <div key={i} className="flex justify-start">
                 <div
-                  className="text-xs"
+                  className="group inline-flex max-w-[80%] items-center gap-1 text-xs"
                   style={{
                     color: "var(--text-secondary)",
                     fontFamily: "Menlo, Monaco, monospace",
@@ -302,7 +329,14 @@ export function ChatView() {
                     opacity: msg.toolDone ? 0.7 : 1,
                   }}
                 >
-                  {glyph} {msg.toolName ?? msg.content}
+                  <span className="truncate">
+                    {glyph} {msg.toolName ?? msg.content}
+                  </span>
+                  <CopyMessageButton
+                    copied={copied}
+                    compact
+                    onCopy={() => copyMessage(msg, i)}
+                  />
                 </div>
               </div>
             );
@@ -310,13 +344,14 @@ export function ChatView() {
 
           const isAssistant = msg.role === "assistant";
           const isSystem = msg.role === "system";
+          const copied = copiedMessageIndex === i;
           return (
             <div
               key={i}
               className={`flex ${msg.role === "user" ? "justify-end" : isSystem ? "justify-center" : "justify-start"}`}
             >
               <div
-                className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${isAssistant ? "" : "whitespace-pre-wrap"}`}
+                className={`group relative max-w-[80%] rounded-lg py-2 pl-3 pr-9 text-sm ${isAssistant ? "" : "whitespace-pre-wrap"}`}
                 style={{
                   background:
                     msg.role === "user"
@@ -354,6 +389,10 @@ export function ChatView() {
                 ) : (
                   msg.content
                 )}
+                <CopyMessageButton
+                  copied={copied}
+                  onCopy={() => copyMessage(msg, i)}
+                />
               </div>
             </div>
           );
@@ -459,5 +498,40 @@ export function ChatView() {
         </div>
       </form>
     </div>
+  );
+}
+
+function CopyMessageButton({
+  copied,
+  compact,
+  onCopy,
+}: {
+  copied: boolean;
+  compact?: boolean;
+  onCopy: () => void;
+}) {
+  const size = compact ? 20 : 24;
+  const iconSize = compact ? 12 : 13;
+
+  return (
+    <button
+      type="button"
+      aria-label={copied ? "Message copied" : "Copy message"}
+      title={copied ? "Copied" : "Copy message"}
+      onClick={onCopy}
+      className={`${
+        compact ? "shrink-0" : "absolute right-1.5 top-1.5"
+      } flex items-center justify-center rounded opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100`}
+      style={{
+        width: size,
+        height: size,
+        background: copied ? "var(--accent)" : "var(--bg-tertiary)",
+        color: copied ? "var(--accent-fg)" : "var(--text-secondary)",
+        border: copied ? "1px solid transparent" : "1px solid var(--border)",
+        cursor: "pointer",
+      }}
+    >
+      {copied ? <Check size={iconSize} /> : <Copy size={iconSize} />}
+    </button>
   );
 }
