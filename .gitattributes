@@ -1,0 +1,7 @@
+# Force LF on shell scripts so they remain executable on Linux/macOS even when
+# checked out on Windows with core.autocrlf=true. PowerShell scripts and Windows
+# batch files get CRLF since native Windows tooling expects it.
+*.sh        text eol=lf
+*.ps1       text eol=crlf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf

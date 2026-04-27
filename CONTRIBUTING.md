@@ -18,10 +18,24 @@ Thanks for your interest — we welcome contributions from everyone. Please read
 git clone https://github.com/thClaws/thClaws.git
 cd thClaws
 
-# Build frontend
-cd frontend && pnpm install && pnpm build && cd ..
+# One-shot: build frontend then cargo build --features gui
+./scripts/build.sh           # macOS / Linux
+./scripts/build.ps1          # Windows PowerShell
 
-# Build + test Rust
+# Verification suite (cargo fmt --check, clippy, tsc, cargo test)
+./scripts/build.sh --check
+./scripts/build.ps1 -Check
+```
+
+The helper enforces frontend-before-cargo order — the GUI build embeds
+`frontend/dist/index.html` at compile time via `include_str!`, so a bare
+`cargo build --features gui` without prior `pnpm build` fails with a
+confusing missing-file error.
+
+If you prefer the underlying commands directly:
+
+```sh
+cd frontend && pnpm install && pnpm build && cd ..
 cargo build --features gui
 cargo test --features gui
 ```
