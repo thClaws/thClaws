@@ -114,6 +114,15 @@ local ล้วน ๆ" ด้านล่าง
 
 ### Windows
 
+> **`%LOCALAPPDATA%` คืออะไร** — เป็น environment variable ของ Windows
+> ที่ expand เป็น `C:\Users\<username>\AppData\Local` ดังนั้น
+> `%LOCALAPPDATA%\Programs\thclaws` จะกลายเป็น
+> `C:\Users\<คุณ>\AppData\Local\Programs\thclaws` — เป็น path
+> per-user ไม่ต้องใช้สิทธิ์ admin (ที่เดียวกับ GitHub Desktop, VS Code,
+> Cursor ลงเข้า) File Explorer address bar expand ให้อัตโนมัติเมื่อกด
+> Enter; ใน CMD ใช้ `%LOCALAPPDATA%\...`, ใน PowerShell ใช้
+> `$env:LOCALAPPDATA\...`
+
 1. ดาวน์โหลด `thclaws-<version>-<arch>-pc-windows-msvc.zip`
 2. แตกไฟล์ไปที่ `%LOCALAPPDATA%\Programs\thclaws` (สร้าง folder ถ้า
    ยังไม่มี)

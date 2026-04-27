@@ -97,6 +97,14 @@ below for those numbers.
 
 ### Windows
 
+> **What `%LOCALAPPDATA%` means** — it's a Windows environment variable
+> that expands to `C:\Users\<your-username>\AppData\Local`. So
+> `%LOCALAPPDATA%\Programs\thclaws` becomes
+> `C:\Users\<you>\AppData\Local\Programs\thclaws`. Per-user, no admin
+> rights needed (same place GitHub Desktop, VS Code, Cursor install).
+> File Explorer's address bar expands it on Enter; in CMD use
+> `%LOCALAPPDATA%\...`, in PowerShell use `$env:LOCALAPPDATA\...`.
+
 1. Download `thclaws-<version>-<arch>-pc-windows-msvc.zip`.
 2. Extract to `%LOCALAPPDATA%\Programs\thclaws` (create the folder if
    it doesn't exist).
