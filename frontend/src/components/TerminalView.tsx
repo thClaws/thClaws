@@ -185,9 +185,9 @@ export function TerminalView({ active }: Props) {
       setSlashView({ open: true, query, index, filtered });
     };
 
-    // Accept a command into the line buffer + visible terminal. Args-
-    // required commands (e.g. /model NAME) get a trailing space so the
-    // user can keep typing; zero-arg commands stop at the name.
+    // Accept a command into the line buffer + visible terminal. Always
+    // appends a trailing space so the popup closes and the user can
+    // immediately type args or press Enter.
     const acceptSlashCommand = (cmd: SlashCommandInfo) => {
       const next = `/${cmd.name} `;
       term.write("\x1b[2K\r");
