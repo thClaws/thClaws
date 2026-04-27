@@ -883,6 +883,25 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                 AnthropicProvider::new(api_key).with_base_url(messages_url),
             ))
         }
+        ProviderKind::OpenAICompat => {
+            // Generic OpenAI-compatible endpoint (SML Gateway, LiteLLM,
+            // Portkey, Helicone, vLLM, internal corporate proxies, etc.).
+            // Models use `oai/<id>` form (e.g. oai/gpt-4o-mini); the
+            // "oai/" prefix is stripped before the request reaches the
+            // upstream. Auth is `Bearer $OPENAI_COMPAT_API_KEY`.
+            let base = std::env::var("OPENAI_COMPAT_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
+            let url = if base.ends_with("/chat/completions") {
+                base
+            } else {
+                format!("{}/chat/completions", base.trim_end_matches('/'))
+            };
+            Ok(Arc::new(
+                OpenAIProvider::new(api_key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("oai/"),
+            ))
+        }
         ProviderKind::Ollama
         | ProviderKind::OllamaAnthropic
         | ProviderKind::LMStudio

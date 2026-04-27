@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `OpenAICompat` provider
+
+A first-class slot for generic OpenAI-compatible HTTP endpoints — LLM
+gateways like LiteLLM, Portkey, Helicone, internal corporate proxies,
+self-hosted inference servers (vLLM, text-generation-inference,
+lm-deploy), and any other service that speaks OpenAI's
+`/v1/chat/completions` wire format with a Bearer token.
+
+Mirrors the existing `LMStudio` / `DashScope` / `ZAi` /
+`AzureAIFoundry` template — a configurable base URL (`OPENAI_COMPAT_BASE_URL`
+or Settings UI), Bearer token from `OPENAI_COMPAT_API_KEY`, and a
+`oai/<id>` model prefix that is stripped before the request reaches
+the upstream. Real OpenAI (`OPENAI_API_KEY` + `gpt-*` / `o*` models)
+is unaffected — there is no env-var collision and no slot shadowing.
+
+- `crates/core/src/providers/mod.rs` — new `ProviderKind::OpenAICompat`
+  variant with full method coverage (`name`, `default_model`,
+  `endpoint_env`, `endpoint_user_configurable`, `default_endpoint`,
+  `api_key_env`, `resolve_alias_for_provider`, `detect`, `ALL`).
+  Detect prefix is `oai/`, name is `openai-compat`.
+- `crates/core/src/repl.rs` — `build_provider()` arm constructs an
+  `OpenAIProvider` with `with_base_url(...)` and
+  `with_strip_model_prefix("oai/")`.
+- `crates/core/src/secrets.rs` — added to the `MANAGED` keychain
+  bundle list so the API key is stored alongside other auth-required
+  providers (one keychain prompt, not N).
+- `crates/core/src/model_catalogue.rs` — `provider_kind_name()`
+  mapping so `/models refresh` dedicates a `openai-compat` block.
+- `frontend/src/components/SettingsModal.tsx` — `PROVIDER_LABELS`
+  entry; the existing generic `endpoint_status` / `endpoint_set` IPC
+  handlers automatically render a Base URL + API Key card because
+  `endpoint_user_configurable()` is true.
+- New test `config::tests::detect_provider_covers_openai_compat`
+  plus an extended assertion in `secrets::tests::status_lists_known_providers`.
+  502 lib tests pass.
+
+Usage:
+
+```sh
+# .env or shell
+export OPENAI_COMPAT_BASE_URL=http://localhost:8000/v1
+export OPENAI_COMPAT_API_KEY=...
+
+# in REPL or via --model flag
+/model oai/<upstream-model-id>
+```
+
+The `oai/` prefix is stripped before the wire payload, so an upstream
+model named `meta-llama/Llama-3.1-70B-Instruct` is reached via
+`/model oai/meta-llama/Llama-3.1-70B-Instruct`.
+
 ## [0.6.0] — 2026-04-27
 
 Minor release — Enterprise Edition Phase 4 (OIDC SSO) + admin

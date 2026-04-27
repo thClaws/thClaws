@@ -1,6 +1,6 @@
 # Chapter 6 — Providers, models & API keys
 
-thClaws talks to **ten providers**, auto-detected from the model name.
+thClaws talks to **eleven providers**, auto-detected from the model name.
 Switch any time with `/model` or `/provider`.
 
 ## Provider overview
@@ -12,6 +12,7 @@ Switch any time with `/model` or `/provider`.
 | Anthropic Agent SDK | `agent/*` | — (uses Claude Code's own auth) | Drives the `claude` CLI under your Claude Pro / Max subscription instead of API billing. ⚠ thClaws's tool registry doesn't cross the subprocess boundary — the model only sees Claude Code's built-in toolset. KMS / MCP / Agent Teams tools are unreachable from this provider; switch to `claude-*` for those. |
 | OpenAI | `gpt-*`, `o1-*`, `o3*`, `o4-*` | `OPENAI_API_KEY` | Chat Completions; automatic prompt caching |
 | OpenAI Responses | `codex/*` | `OPENAI_API_KEY` | Responses API — newer agentic-native shape |
+| OpenAI-Compatible | `oai/*` | `OPENAI_COMPAT_API_KEY` (+ `OPENAI_COMPAT_BASE_URL`) | Generic OAI-compat endpoint — point at any LiteLLM/Portkey/Helicone/vLLM/internal-proxy that speaks `/v1/chat/completions`; `oai/` prefix stripped before forwarding |
 | OpenRouter | `openrouter/*` | `OPENROUTER_API_KEY` | Unified gateway to 300+ models across every major LLM vendor |
 | Gemini | `gemini-*`, `gemma-*` | `GEMINI_API_KEY` | Gemma served via Google AI Studio |
 | Ollama | `ollama/*` | — (local) | NDJSON streaming; no auth |
@@ -248,6 +249,8 @@ GEMINI_API_KEY=AI...
 AGENTIC_PRESS_LLM_API_KEY=llm_v1_...
 DASHSCOPE_API_KEY=sk-...
 OLLAMA_BASE_URL=http://localhost:11434   # defaults to this anyway
+OPENAI_COMPAT_BASE_URL=http://localhost:8000/v1   # any OAI-compat gateway
+OPENAI_COMPAT_API_KEY=...
 ```
 
 > ⚠️ **If you use git, add `.env` to `.gitignore` immediately** — before
@@ -315,3 +318,57 @@ Good for:
 
 Note: OpenRouter adds a small markup on top of each vendor's cost.
 For high-volume production use, go direct to the source provider.
+
+## Using a generic OpenAI-compatible endpoint (`oai/*`)
+
+The `OpenAICompat` provider is a single configurable slot for **any
+service that speaks OpenAI's `/v1/chat/completions` wire format with
+a Bearer token**. Common targets:
+
+- LLM gateways: LiteLLM, Portkey, Helicone, internal corporate
+  proxies that consolidate vendor billing and apply org-wide policy.
+- Self-hosted inference: vLLM, text-generation-inference, lm-deploy,
+  llama.cpp's `server` binary in OpenAI-compat mode, MLX-LM, etc.
+- Aggregator services other than OpenRouter that follow the same
+  shape but live on a private URL.
+
+Two env vars (or the matching Settings modal card):
+
+```sh
+OPENAI_COMPAT_BASE_URL=http://localhost:8000/v1
+OPENAI_COMPAT_API_KEY=...
+```
+
+Then pick a model:
+
+```
+/model oai/<upstream-model-id>
+```
+
+The `oai/` prefix is **stripped** before the request reaches the
+upstream — pass any model id the gateway accepts. Examples:
+
+- `/model oai/gpt-4o-mini` → wire payload `model: "gpt-4o-mini"`
+- `/model oai/meta-llama/Llama-3.1-70B-Instruct` → wire payload
+  `model: "meta-llama/Llama-3.1-70B-Instruct"`
+- `/model oai/anthropic/claude-sonnet-4-6` → wire payload
+  `model: "anthropic/claude-sonnet-4-6"`
+
+This is intentionally separate from `ProviderKind::OpenAI` so real
+OpenAI usage (`OPENAI_API_KEY` + `gpt-*` / `o*` models) is
+unaffected. Both can coexist — set both env vars and switch with
+`/model gpt-4o` (real OpenAI) vs `/model oai/<id>` (your gateway).
+
+The Base URL accepts either form:
+
+- Ending in `/v1` — `/chat/completions` is appended automatically.
+- Ending in `/v1/chat/completions` — used as-is.
+
+Authentication is a standard `Authorization: Bearer
+$OPENAI_COMPAT_API_KEY` header. Gateways with non-Bearer auth (custom
+header names, mTLS, etc.) are out of scope — file an issue or use
+the EE Phase 3 org-policy `gateway` route.
+
+If your endpoint also implements `/v1/models`, `/models refresh`
+will populate the catalogue automatically. If it doesn't, the
+refresh fails silently and chat continues to work.

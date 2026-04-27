@@ -760,6 +760,15 @@ mod tests {
     }
 
     #[test]
+    fn detect_provider_covers_openai_compat() {
+        let mut c = AppConfig::default();
+        c.model = "oai/gpt-4o-mini".into();
+        assert_eq!(c.detect_provider().unwrap(), "openai-compat");
+        c.model = "oai/llama-3.1-70b".into();
+        assert_eq!(c.detect_provider().unwrap(), "openai-compat");
+    }
+
+    #[test]
     fn null_team_enabled_upgrades_to_false_on_load() {
         let loaded: ProjectConfig = serde_json::from_str(r#"{"teamEnabled": null}"#).unwrap();
         assert_eq!(loaded.team_enabled, Some(false));

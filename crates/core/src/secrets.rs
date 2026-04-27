@@ -100,6 +100,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::OllamaCloud,
     ProviderKind::ZAi,
     ProviderKind::AzureAIFoundry,
+    ProviderKind::OpenAICompat,
 ];
 
 fn entry(provider: &str) -> Result<keyring::Entry> {
@@ -341,5 +342,6 @@ mod tests {
         assert!(names.contains(&"openai"));
         assert!(names.contains(&"gemini"));
         assert!(names.contains(&"dashscope"));
+        assert!(names.contains(&"openai-compat"));
     }
 }
