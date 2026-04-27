@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-04-27
+
+Patch release. Two open-issue fixes plus a routine catalogue refresh.
+
+### Fixed
+
+- **Terminal slash-command popup cursor desync** ([#31](https://github.com/thClaws/thClaws/issues/31),
+  [@mrpokx5](https://github.com/mrpokx5)). After accepting a command via Tab
+  or mouse click, the JS-side `cursorPos` stayed at its pre-accept value
+  while the visible terminal cursor jumped to the end of the rewritten
+  command. Subsequent keystrokes used the stale `cursorPos` to slice +
+  splice `lineBuffer`, mangling the command name (the user's reported
+  "selected but can do nothing" + "cursor misplaced on mouse click").
+  Fix: assign `cursorPos = next.length;` after the buffer rewrite.
+  Single line, three accept paths covered (Tab key, Enter when name
+  still being composed, popup mouse onClick).
+
+- **Retired Gemini models in catalogue** ([#32](https://github.com/thClaws/thClaws/issues/32),
+  [@jubbyy](https://github.com/jubbyy)). Reporter hit 404 on
+  `gemini-2.0-flash`. Cross-checked against
+  [Google's official deprecations page](https://ai.google.dev/gemini-api/docs/deprecations) —
+  the model is in "existing-customer-only" since 2026-03-06 with hard
+  shutdown 2026-06-01. Removed 7 retired rows from the catalogue:
+  - `gemini-1.5-flash`, `gemini-1.5-pro` (1.x family fully shut down 2025)
+  - `gemini-2.0-flash`, `-001`, `-lite`, `-lite-001` (shutdown 2026-06-01)
+  - `gemini-3-pro-preview` (already shut down 2026-03-09; replaced by `gemini-3.1-pro-preview`)
+
+  Added `is_retired_gemini` filter in `catalogue-seed` so future
+  `make catalogue` runs won't re-add them even though Google's upstream
+  `/v1beta/models` still lists them for backward-compat. Verified the
+  filter held against a live refresh — Gemini stayed at 10 rows. Comment
+  in the filter points at Google's deprecations page so the next
+  maintainer knows where to update.
+
+### Catalogue
+
+Routine refresh added 6 new model rows:
+
+- **OpenRouter** — 5 new Qwen entries: `qwen/qwen3.5-plus-20260420`,
+  `qwen/qwen3.6-{27b,35b-a3b,flash,max-preview}`.
+- **Ollama Cloud** — `ollama-cloud/deepseek-v4-pro`.
+
+Catalogue total now 589 rows (down 1 from v0.6.1's 590, net of the 7
+retirements minus 6 additions).
+
+### Default model — no change
+
+The default Gemini model stays at `gemini-2.5-flash`. Considered switching
+to Google's `gemini-flash-latest` rolling alias for auto-tracking, but
+rejected — `-latest` could promote a higher-tier model into the alias
+without warning, surprising users with unexpected cost. Convention
+matches Anthropic / OpenAI defaults (pinned versioned IDs). Next bump
+deadline: **2026-06-17** when `gemini-2.5-flash` retires per Google's
+schedule. Comment near the default points at the deprecations page so
+the next maintainer knows when to bump.
+
 ## [0.6.1] — 2026-04-27
 
 Patch release. Three community PRs landed in quick succession after
