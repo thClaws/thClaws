@@ -189,19 +189,13 @@ export function TerminalView({ active }: Props) {
     // required commands (e.g. /model NAME) get a trailing space so the
     // user can keep typing; zero-arg commands stop at the name.
     const acceptSlashCommand = (cmd: SlashCommandInfo) => {
-      const needsArg = cmd.usage && !cmd.usage.startsWith("[");
-      const next = `/${cmd.name}${needsArg ? " " : ""}`;
+      const next = `/${cmd.name} `;
       term.write("\x1b[2K\r");
       writePrompt();
       lineBuffer = next;
-      // Keep cursorPos in lockstep with the visible xterm cursor.
-      // Without this the user's next keystroke inserts mid-command
-      // (closes #31): Tab/mouse "selects" the command, but cursorPos
-      // stays at the pre-accept position (e.g. 2 after typing "/s"),
-      // so typing arguments mangles the command name.
       cursorPos = next.length;
       term.write(next);
-      recomputeSlash();
+      setSlashView(SLASH_VIEW_CLOSED);
     };
     acceptSlashRef.current = acceptSlashCommand;
 
@@ -265,6 +259,7 @@ export function TerminalView({ active }: Props) {
             return false;
           }
           if (e.key === "Tab") {
+            e.preventDefault();
             const cmd = sv.filtered[sv.index];
             if (cmd) acceptSlashCommand(cmd);
             return false;
