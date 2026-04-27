@@ -54,6 +54,7 @@ const PROMPT = "\x1b[32m❯ \x1b[0m";
 
 interface Props {
   active: boolean;
+  modalOpen: boolean;
 }
 
 function b64decode(s: string): Uint8Array {
@@ -63,7 +64,7 @@ function b64decode(s: string): Uint8Array {
   return out;
 }
 
-export function TerminalView({ active }: Props) {
+export function TerminalView({ active, modalOpen }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -653,9 +654,9 @@ export function TerminalView({ active }: Props) {
     };
   }, []);
 
-  // Refit + focus when the tab becomes active.
+  // Refit + focus when the tab becomes active or a modal closes.
   useEffect(() => {
-    if (!active) return;
+    if (!active || modalOpen) return;
     const t = termRef.current;
     const f = fitRef.current;
     if (!t) return;
@@ -663,7 +664,7 @@ export function TerminalView({ active }: Props) {
       try { f?.fit(); } catch { /* fit() may throw on zero-size or disposed container */ }
       t.focus();
     });
-  }, [active]);
+  }, [active, modalOpen]);
 
   // Live theme swap.
   useEffect(() => {

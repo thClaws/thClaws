@@ -63,7 +63,12 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-export function ChatView() {
+type Props = {
+  active: boolean;
+  modalOpen: boolean;
+};
+
+export function ChatView({ active, modalOpen }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -329,6 +334,11 @@ export function ChatView() {
     // either render off-screen or wrap unexpectedly.
     setSlashIndex(0);
   }, [slashQuery, slashOpen]);
+
+  // Focus the input when the tab becomes active or a modal closes.
+  useEffect(() => {
+    if (active && !modalOpen) inputRef.current?.focus();
+  }, [active, modalOpen]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

@@ -372,6 +372,7 @@ export default function App() {
     return unsub;
   }, []);
 
+  const modalOpen = showSettings || instructionsScope !== null || modelPicker !== null;
   const effectiveTab = (!teamEnabled && activeTab === "team") ? "chat" as Tab : activeTab;
 
   const TABS = teamEnabled ? ALL_TABS : ALL_TABS.filter((t) => t.id !== "team");
@@ -456,8 +457,8 @@ export default function App() {
             const cls = `absolute inset-0 ${isActive ? "" : "invisible pointer-events-none"}`;
             return (
               <div key={id} className={cls}>
-                {id === "terminal" && <TerminalView active={isActive} />}
-                {id === "chat" && <ChatView />}
+                {id === "terminal" && <TerminalView active={isActive} modalOpen={modalOpen} />}
+                {id === "chat" && <ChatView active={isActive} modalOpen={modalOpen} />}
                 {id === "files" && <FilesView active={isActive} />}
                 {id === "team" && <TeamView />}
               </div>
