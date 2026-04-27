@@ -54,7 +54,7 @@ impl AnthropicProvider {
     }
 
     fn build_body(req: &StreamRequest) -> Value {
-        let msgs: Vec<Value> = req
+        let mut msgs: Vec<Value> = req
             .messages
             .iter()
             .filter(|m| !matches!(m.role, Role::System))
@@ -69,6 +69,31 @@ impl AnthropicProvider {
                 })
             })
             .collect();
+
+        // Third cache breakpoint: tag the last content block of the
+        // second-to-last message so the rolling conversation history
+        // becomes a cached prefix on subsequent turns. The newest
+        // message is the live user turn (uncached by definition); the
+        // one before it is byte-stable across the next call. Skip
+        // when the history is too short — Anthropic's minimum
+        // cacheable prefix is 1024 tokens, so 1–2 messages rarely
+        // qualify and the breakpoint slot is better preserved for
+        // later turns. Anthropic allows up to 4 cache_control markers
+        // per request; this is the third (system + last tool are the
+        // other two).
+        if msgs.len() >= 3 {
+            let target_idx = msgs.len() - 2;
+            if let Some(content) = msgs[target_idx]
+                .get_mut("content")
+                .and_then(Value::as_array_mut)
+            {
+                if let Some(last_block) = content.last_mut() {
+                    if let Some(obj) = last_block.as_object_mut() {
+                        obj.insert("cache_control".into(), json!({"type": "ephemeral"}));
+                    }
+                }
+            }
+        }
 
         // Strip provider prefixes so the model name matches what the backend expects.
         let model = req
@@ -428,6 +453,88 @@ mod tests {
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["role"], "user");
+    }
+
+    #[test]
+    fn build_body_caches_second_to_last_message_when_history_long_enough() {
+        // Three-message rolling history: user/assistant/user. The
+        // assistant turn (index 1) is second-to-last and should carry
+        // the cache_control marker so its tail becomes a cached prefix
+        // on the next call. The newest user turn (index 2) must stay
+        // uncached.
+        let req = StreamRequest {
+            model: "claude-sonnet-4-5".into(),
+            system: Some("you are helpful".into()),
+            messages: vec![
+                Message::user("first"),
+                Message::assistant("reply"),
+                Message::user("second"),
+            ],
+            tools: vec![],
+            max_tokens: 1024,
+            thinking_budget: None,
+        };
+        let body = AnthropicProvider::build_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        let second_to_last_last_block = msgs[1]["content"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            second_to_last_last_block["cache_control"]["type"],
+            "ephemeral"
+        );
+        for block in msgs[2]["content"].as_array().unwrap() {
+            assert!(
+                block.get("cache_control").is_none(),
+                "newest message must not carry cache_control"
+            );
+        }
+    }
+
+    #[test]
+    fn build_body_skips_message_cache_when_history_too_short() {
+        // Two-message history: the breakpoint slot is preserved for
+        // later turns. System + tools breakpoints still apply.
+        let req = StreamRequest {
+            model: "claude-sonnet-4-5".into(),
+            system: Some("sys".into()),
+            messages: vec![Message::user("first"), Message::assistant("reply")],
+            tools: vec![],
+            max_tokens: 1024,
+            thinking_budget: None,
+        };
+        let body = AnthropicProvider::build_body(&req);
+        for msg in body["messages"].as_array().unwrap() {
+            for block in msg["content"].as_array().unwrap() {
+                assert!(
+                    block.get("cache_control").is_none(),
+                    "no message cache_control when history < 3"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_body_message_cache_is_byte_stable_across_calls() {
+        // Same input twice → identical body. Guards against silent
+        // cache busts from non-deterministic field ordering.
+        let req = StreamRequest {
+            model: "claude-sonnet-4-5".into(),
+            system: Some("sys".into()),
+            messages: vec![
+                Message::user("a"),
+                Message::assistant("b"),
+                Message::user("c"),
+            ],
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+        };
+        let a = AnthropicProvider::build_body(&req);
+        let b = AnthropicProvider::build_body(&req);
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap()
+        );
     }
 
     #[test]
