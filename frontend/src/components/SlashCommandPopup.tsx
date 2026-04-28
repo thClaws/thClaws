@@ -37,9 +37,9 @@ export function SlashCommandPopup({
     if (el) el.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
-  if (filtered.length === 0) return null;
+  const grouped = useMemo(() => groupByCategory(filtered), [filtered]);
 
-  const grouped = groupByCategory(filtered);
+  if (filtered.length === 0) return null;
   let runningIndex = -1;
 
   return (
