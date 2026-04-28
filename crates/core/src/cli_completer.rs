@@ -37,12 +37,7 @@ impl SlashCompleter {
 impl Completer for SlashCompleter {
     type Candidate = Pair;
 
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
-    ) -> Result<(usize, Vec<Pair>)> {
+    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Result<(usize, Vec<Pair>)> {
         let Some(typed) = Self::slash_prefix(line, pos) else {
             return Ok((pos, Vec::new()));
         };
