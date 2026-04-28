@@ -46,12 +46,137 @@ pub struct TurnResult {
 enum BlockState {
     None,
     Text,
-    Thinking,
     ToolUse {
         id: String,
         name: String,
         buf: String,
     },
+}
+
+/// Returns true for model families known to emit *implicit* reasoning —
+/// they start streaming chain-of-thought text with no opening `<think>`,
+/// then close it with `</think>` before the actual answer. We use this to
+/// gate the lookahead-buffer hack in `assemble`. Be conservative: only the
+/// specific families that need it. Other families (qwen2.5-coder, qwen-vl,
+/// generic *r1 finetunes) must NOT match or every turn pays a 1KB delay.
+fn is_implicit_thinking_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    // Qwen3 thinking variants. Plain "qwen" / "qwen2" must not match.
+    if m.contains("qwen3") || m.contains("qwq") {
+        return true;
+    }
+    // DeepSeek R1 family (and OpenRouter prefix form).
+    if m.contains("deepseek-r1") || m.contains("deepseek/deepseek-r1") {
+        return true;
+    }
+    false
+}
+
+/// Streaming state for `split_think_text`. Persists across SSE chunks so
+/// tags split on chunk boundaries — and the blank lines Qwen3-style models
+/// emit between `</think>` and the answer — are handled correctly.
+#[derive(Default)]
+struct ThinkState {
+    in_block: bool,
+    tag_buf: String,
+    /// Set right after a `</think>` is consumed. Strips leading newlines
+    /// from the next text the model emits, in case `</think>\n\n` straddles
+    /// two SSE chunks.
+    trim_leading_newlines: bool,
+}
+
+/// Split a text chunk that may contain `<think>…</think>` blocks into the
+/// appropriate `AssembledEvent`s. Any text inside the tags becomes
+/// `Thinking`; text outside becomes `Text`.
+fn split_think_text(chunk: &str, state: &mut ThinkState) -> Vec<AssembledEvent> {
+    let mut out = Vec::new();
+    let mut combined = if state.tag_buf.is_empty() {
+        chunk.to_string()
+    } else {
+        format!("{}{}", std::mem::take(&mut state.tag_buf), chunk)
+    };
+    if state.trim_leading_newlines && !state.in_block {
+        let trimmed = combined.trim_start_matches('\n');
+        if trimmed.len() < combined.len() {
+            combined = trimmed.to_string();
+        }
+        if !combined.is_empty() {
+            state.trim_leading_newlines = false;
+        }
+    }
+    let mut s = combined.as_str();
+    loop {
+        if s.is_empty() {
+            break;
+        }
+        if state.in_block {
+            const CLOSE: &str = "</think>";
+            if let Some(pos) = s.find(CLOSE) {
+                if pos > 0 {
+                    out.push(AssembledEvent::Thinking(s[..pos].to_string()));
+                }
+                state.in_block = false;
+                let after = &s[pos + CLOSE.len()..];
+                let trimmed = after.trim_start_matches('\n');
+                // If nothing remains after stripping newlines in this chunk,
+                // remember to strip leading newlines from the next chunk too.
+                state.trim_leading_newlines = trimmed.is_empty();
+                s = trimmed;
+            } else {
+                let keep = longest_tag_prefix(s, CLOSE);
+                if s.len() > keep {
+                    out.push(AssembledEvent::Thinking(s[..s.len() - keep].to_string()));
+                }
+                if keep > 0 {
+                    state.tag_buf.push_str(&s[s.len() - keep..]);
+                }
+                break;
+            }
+        } else {
+            const OPEN: &str = "<think>";
+            const CLOSE: &str = "</think>";
+            if let Some(pos) = s.find(OPEN) {
+                if pos > 0 {
+                    out.push(AssembledEvent::Text(s[..pos].to_string()));
+                }
+                state.in_block = true;
+                s = s[pos + OPEN.len()..].trim_start_matches('\n');
+            } else if let Some(pos) = s.find(CLOSE) {
+                // Found </think> but we weren't in a think block. This happens
+                // with models (like Qwen3) where the opening <think> is pre-filled
+                // in the prompt. Treat preceding text in this chunk as thinking.
+                if pos > 0 {
+                    out.push(AssembledEvent::Thinking(s[..pos].to_string()));
+                }
+                let after = &s[pos + CLOSE.len()..];
+                let trimmed = after.trim_start_matches('\n');
+                state.trim_leading_newlines = trimmed.is_empty();
+                s = trimmed;
+            } else {
+                let keep = longest_tag_prefix(s, OPEN);
+                if s.len() > keep {
+                    out.push(AssembledEvent::Text(s[..s.len() - keep].to_string()));
+                }
+                if keep > 0 {
+                    state.tag_buf.push_str(&s[s.len() - keep..]);
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn longest_tag_prefix(haystack: &str, needle: &str) -> usize {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    let max = h.len().min(n.len() - 1);
+    for len in (1..=max).rev() {
+        if h[h.len() - len..] == n[..len] {
+            return len;
+        }
+    }
+    0
 }
 
 pub fn assemble<S>(inner: S) -> impl Stream<Item = Result<AssembledEvent>> + Send + 'static
@@ -60,17 +185,30 @@ where
 {
     try_stream! {
         let mut state = BlockState::None;
+        // For implicit-thinking models (Qwen3, DeepSeek-R1) the stream begins
+        // with reasoning that has no opening `<think>` tag — only a closing
+        // `</think>` before the answer. Pre-seed `in_block = true` so
+        // `split_think_text` emits the prefix as Thinking until it finds
+        // `</think>`. If the closing tag never arrives, the whole stream
+        // stays in Thinking and no chain-of-thought leaks as Text.
+        let mut think = ThinkState::default();
+
         let mut inner = Box::pin(inner);
         while let Some(ev) = inner.next().await {
             let ev = ev?;
             match ev {
-                ProviderEvent::MessageStart { .. } => {}
+                ProviderEvent::MessageStart { model } => {
+                    if is_implicit_thinking_model(&model) {
+                        think.in_block = true;
+                    }
+                }
                 ProviderEvent::TextDelta(s) => {
                     state = BlockState::Text;
-                    yield AssembledEvent::Text(s);
+                    for ev in split_think_text(&s, &mut think) {
+                        yield ev;
+                    }
                 }
                 ProviderEvent::ThinkingDelta(s) => {
-                    state = BlockState::Thinking;
                     yield AssembledEvent::Thinking(s);
                 }
                 ProviderEvent::ToolUseStart { id, name } => {
@@ -292,6 +430,123 @@ mod tests {
         } else {
             panic!("expected ToolUse");
         }
+    }
+
+    #[test]
+    fn implicit_thinking_detection_is_specific() {
+        // Should match: qwen3 family, qwq, deepseek-r1 family.
+        assert!(is_implicit_thinking_model("qwen3-30b-a3b-thinking"));
+        assert!(is_implicit_thinking_model("qwen/qwen3-235b"));
+        assert!(is_implicit_thinking_model("qwq-32b-preview"));
+        assert!(is_implicit_thinking_model("deepseek-r1"));
+        assert!(is_implicit_thinking_model("deepseek/deepseek-r1-distill"));
+
+        // Must NOT match: non-thinking qwen variants and unrelated -r1 ids.
+        assert!(!is_implicit_thinking_model("qwen2.5-coder-32b"));
+        assert!(!is_implicit_thinking_model("qwen-vl-plus"));
+        assert!(!is_implicit_thinking_model("qwen-turbo"));
+        assert!(!is_implicit_thinking_model("gpt-4o"));
+        assert!(!is_implicit_thinking_model("anthropic/claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn split_think_text_handles_lone_closing_tag() {
+        let mut state = ThinkState::default();
+
+        // Case: starts with reasoning (no <think>) and ends with </think>
+        let ev = split_think_text("reasoning here </think>actual answer", &mut state);
+        assert!(!state.in_block);
+        let thinking: Vec<_> = ev.iter().filter_map(|e| if let AssembledEvent::Thinking(s) = e { Some(s.as_str()) } else { None }).collect();
+        let text: Vec<_> = ev.iter().filter_map(|e| if let AssembledEvent::Text(s) = e { Some(s.as_str()) } else { None }).collect();
+
+        assert_eq!(thinking.join(""), "reasoning here ");
+        assert_eq!(text.join(""), "actual answer");
+    }
+
+    #[test]
+    fn split_think_text_strips_newlines_across_chunk_boundary() {
+        // Real Qwen3 / vLLM behavior: `</think>` ends one SSE chunk and the
+        // next chunk starts with `\n\n`. The blank lines must not leak into
+        // the rendered Text.
+        let mut state = ThinkState {
+            in_block: true,
+            ..Default::default()
+        };
+        let ev1 = split_think_text("</think>", &mut state);
+        let ev2 = split_think_text("\n\nHi.", &mut state);
+
+        let text: String = ev1
+            .iter()
+            .chain(ev2.iter())
+            .filter_map(|e| {
+                if let AssembledEvent::Text(s) = e {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(text, "Hi.");
+    }
+
+    #[tokio::test]
+    async fn implicit_thinking_routes_prefix_to_thinking() {
+        // Qwen3 streams reasoning then `</think>` then answer, with no
+        // opening tag. Reasoning must land in `thinking`, not `text`.
+        let r = collected(vec![
+            ProviderEvent::MessageStart {
+                model: "qwen3.6-35b-a3b-fp8".into(),
+            },
+            ProviderEvent::TextDelta("let me think about this".into()),
+            ProviderEvent::TextDelta(" carefully</think>".into()),
+            ProviderEvent::TextDelta("Final answer.".into()),
+            ProviderEvent::ContentBlockStop,
+            ProviderEvent::MessageStop {
+                stop_reason: Some("end_turn".into()),
+                usage: None,
+            },
+        ])
+        .await;
+        assert_eq!(r.thinking, "let me think about this carefully");
+        assert_eq!(r.text, "Final answer.");
+    }
+
+    #[tokio::test]
+    async fn implicit_thinking_without_close_stays_in_thinking() {
+        // Degenerate case: stream ends mid-reasoning. The chain-of-thought
+        // must NOT leak as `text` — keep it in `thinking`.
+        let r = collected(vec![
+            ProviderEvent::MessageStart {
+                model: "qwen3-30b".into(),
+            },
+            ProviderEvent::TextDelta("step 1, step 2, step 3".into()),
+            ProviderEvent::MessageStop {
+                stop_reason: Some("end_turn".into()),
+                usage: None,
+            },
+        ])
+        .await;
+        assert_eq!(r.text, "");
+        assert_eq!(r.thinking, "step 1, step 2, step 3");
+    }
+
+    #[tokio::test]
+    async fn non_thinking_model_passes_text_through() {
+        // qwen2.5-coder must not be detected as implicit-thinking — its
+        // output is plain text and should not be re-routed.
+        let r = collected(vec![
+            ProviderEvent::MessageStart {
+                model: "qwen2.5-coder-32b".into(),
+            },
+            ProviderEvent::TextDelta("hello world".into()),
+            ProviderEvent::MessageStop {
+                stop_reason: Some("end_turn".into()),
+                usage: None,
+            },
+        ])
+        .await;
+        assert_eq!(r.text, "hello world");
+        assert_eq!(r.thinking, "");
     }
 
     #[tokio::test]
