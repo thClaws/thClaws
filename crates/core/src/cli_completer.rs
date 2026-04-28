@@ -71,6 +71,18 @@ impl Hinter for SlashCompleter {
 }
 
 impl Highlighter for SlashCompleter {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> Cow<'b, str> {
+        if prompt == "❯ " {
+            Cow::Owned(format!("\x1b[36m{prompt}\x1b[0m"))
+        } else {
+            Cow::Borrowed(prompt)
+        }
+    }
+
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
         // ANSI dim so the ghost-text reads as a suggestion, not real input.
         Cow::Owned(format!("\x1b[2m{hint}\x1b[0m"))

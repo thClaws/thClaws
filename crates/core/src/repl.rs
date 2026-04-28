@@ -29,6 +29,7 @@ const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_CYAN: &str = "\x1b[36m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_BOLD: &str = "\x1b[1m";
+const REPL_PROMPT: &str = "❯ ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
@@ -2055,7 +2056,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         let rl_clone = rl_mutex.clone();
         let readline_task = tokio::task::spawn_blocking(move || {
             let mut rl = rl_clone.lock().unwrap();
-            match rl.readline(&format!("{COLOR_CYAN}❯ {COLOR_RESET}")) {
+            match rl.readline(REPL_PROMPT) {
                 Ok(line) => {
                     let trimmed = line.trim().to_string();
                     if !trimmed.is_empty() {
@@ -2087,7 +2088,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 Some(msgs) = inbox_rx.recv() => {
                     process_team_messages!(msgs);
                     // Reprint prompt hint since our output pushed it up.
-                    print!("{COLOR_CYAN}❯ {COLOR_RESET}");
+                    print!("{COLOR_CYAN}{REPL_PROMPT}{COLOR_RESET}");
                     let _ = std::io::stdout().flush();
                 }
             }
