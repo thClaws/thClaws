@@ -1909,10 +1909,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         });
     }
 
-    // Shared readline editor for spawn_blocking calls.
-    let rl_mutex = std::sync::Arc::new(std::sync::Mutex::new(
-        rustyline::DefaultEditor::new().map_err(|e| Error::Agent(format!("readline init: {e}")))?,
-    ));
+    // Shared readline editor for spawn_blocking calls. Helper enables
+    // Tab-completion of slash commands plus inline ghost-text hints
+    // (see `crate::cli_completer`). Default Circular completion: Tab
+    // cycles through matches; the Hinter shows a dim suggestion after
+    // the cursor that Right-arrow accepts.
+    let mut rl: rustyline::Editor<
+        crate::cli_completer::SlashCompleter,
+        rustyline::history::DefaultHistory,
+    > = rustyline::Editor::new().map_err(|e| Error::Agent(format!("readline init: {e}")))?;
+    rl.set_helper(Some(crate::cli_completer::SlashCompleter));
+    let rl_mutex = std::sync::Arc::new(std::sync::Mutex::new(rl));
 
     // Helper: process team inbox messages and run agent turn.
     macro_rules! process_team_messages {
@@ -4243,6 +4250,108 @@ mod tests {
         }
         if let Some(v) = saved_g {
             std::env::set_var("GEMINI_API_KEY", v);
+        }
+    }
+
+    // --- SlashCompleter tests ---------------------------------------------
+    //
+    // Exercise `crate::cli_completer::SlashCompleter` directly so we don't
+    // need a real terminal. The candidate set is sourced from
+    // `built_in_commands()`, so these double as a regression guard against
+    // accidentally dropping a command from the public list.
+    mod completer_tests {
+        use crate::cli_completer::SlashCompleter;
+        use rustyline::completion::Completer;
+        use rustyline::hint::Hinter;
+        use rustyline::history::DefaultHistory;
+        use rustyline::Context;
+
+        fn complete(line: &str, pos: usize) -> Vec<(String, String)> {
+            let history = DefaultHistory::new();
+            let ctx = Context::new(&history);
+            let (_start, pairs) = SlashCompleter
+                .complete(line, pos, &ctx)
+                .expect("completer ok");
+            pairs
+                .into_iter()
+                .map(|p| (p.display, p.replacement))
+                .collect()
+        }
+
+        fn hint(line: &str, pos: usize) -> Option<String> {
+            let history = DefaultHistory::new();
+            let ctx = Context::new(&history);
+            SlashCompleter.hint(line, pos, &ctx)
+        }
+
+        #[test]
+        fn slash_completer_lists_all_on_just_slash() {
+            let pairs = complete("/", 1);
+            assert_eq!(pairs.len(), super::built_in_commands().len());
+        }
+
+        #[test]
+        fn slash_completer_filters_by_prefix() {
+            let pairs = complete("/he", 3);
+            assert_eq!(pairs.len(), 1, "only /help should match: {pairs:?}");
+            assert!(pairs[0].1.starts_with("/help"));
+        }
+
+        #[test]
+        fn slash_completer_multiple_matches() {
+            let pairs = complete("/m", 2);
+            let names: Vec<&str> = pairs.iter().map(|(_, r)| r.trim()).collect();
+            for expected in ["/mcp", "/memory", "/model", "/models"] {
+                assert!(
+                    names.contains(&expected),
+                    "expected {expected} in {names:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn slash_completer_no_match_for_non_slash() {
+            assert!(complete("hello", 5).is_empty());
+        }
+
+        #[test]
+        fn slash_completer_no_match_after_first_word() {
+            // v1 only completes the leading slash-token; once the user types
+            // a space, the completer bows out.
+            assert!(complete("/model ", 7).is_empty());
+        }
+
+        #[test]
+        fn hinter_returns_remainder_for_unique_prefix() {
+            // `/he` → only `/help` matches → hint shows `lp`.
+            assert_eq!(hint("/he", 3).as_deref(), Some("lp"));
+        }
+
+        #[test]
+        fn hinter_returns_remainder_for_first_match_when_ambiguous() {
+            // `/m` matches several commands; we show the first one's
+            // remainder so the user still sees *something*. Tab cycles
+            // through the rest.
+            let h = hint("/m", 2).expect("expected a hint");
+            assert!(!h.is_empty());
+            // First match in the catalogue starting with `m` must be one of
+            // the known commands; we just guard against an empty/garbled
+            // hint.
+            assert!(
+                ["cp", "emory", "odel", "odels"].contains(&h.as_str()),
+                "unexpected hint: {h:?}"
+            );
+        }
+
+        #[test]
+        fn hinter_silent_for_bare_slash() {
+            // No char after `/` → don't pick an arbitrary command.
+            assert_eq!(hint("/", 1), None);
+        }
+
+        #[test]
+        fn hinter_silent_for_non_slash() {
+            assert_eq!(hint("hello", 5), None);
         }
     }
 }

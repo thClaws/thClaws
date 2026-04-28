@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod agent_defs;
 pub mod branding;
+mod cli_completer;
 pub mod commands;
 pub mod compaction;
 pub mod config;
