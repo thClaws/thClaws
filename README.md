@@ -78,30 +78,37 @@ Three tabs, one binary — captured from a live thClaws session looking at its o
 
 ## Installation
 
+### One-command setup
+
+**Windows (PowerShell):**
+```powershell
+.\scripts\install-one.ps1
+```
+
+**macOS/Linux (Bash):**
+```bash
+bash scripts/install-one.sh
+```
+
+That's it. It checks prerequisites, downloads (if needed), builds, and installs.
+
 ### Pre-built binaries
 
-Download the latest release for your platform from the [Releases page](https://github.com/thClaws/thClaws/releases) or from [thclaws.ai/downloads](https://thclaws.ai/downloads).
+Just want to run without building? Download from:
+- [Releases page](https://github.com/thClaws/thClaws/releases)
+- [thclaws.ai/downloads](https://thclaws.ai/downloads)
 
-Supported: macOS (Apple Silicon & Intel), Windows (x86_64 & ARM64), Linux (x86_64 & ARM64).
+Supported: macOS, Windows, Linux (ARM64 & x86_64)
 
-### Build from source
+### Manual build
 
-**Prerequisites:** Rust 1.85+, Node.js 20+, pnpm 9+.
-
-```sh
+```bash
 git clone https://github.com/thClaws/thClaws.git
 cd thClaws
-
-# Build frontend (React + Vite, bundled as a single HTML file)
 cd frontend && pnpm install && pnpm build && cd ..
-
-# Build Rust (CLI + GUI)
 cargo build --release --features gui --bin thclaws
-
-# Run
 ./target/release/thclaws          # GUI
 ./target/release/thclaws --cli    # CLI
-./target/release/thclaws -p "what does src/main.rs do?"  # one-shot
 ```
 
 ---
@@ -182,8 +189,7 @@ Auto-generated from the [contributors graph](https://github.com/thClaws/thClaws/
 
 Dual-licensed under either:
 
-- [MIT License](LICENSE-MIT)
-- [Apache License 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE)
 
 at your option. Contributions are accepted under the same dual license.
 
