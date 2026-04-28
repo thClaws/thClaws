@@ -170,7 +170,7 @@ For books, training, and commercial deployment, see [agentic-press.com](https://
 
 ## Contributors
 
-13 contributors and counting. Every avatar below has a merged commit in this repo — the roadmap is theirs.
+Every avatar below has a merged commit in this repo. The roadmap is theirs.
 
 [![Contributors](https://contrib.rocks/image?repo=thClaws/thClaws&refresh=2026-04-29)](https://github.com/thClaws/thClaws/graphs/contributors)
 
