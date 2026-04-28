@@ -49,7 +49,7 @@ html, body, #root {
   height: 100%;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans Thai", "Sarabun", "Loma", "Garuda", "Tahoma", sans-serif;
   overflow: hidden;
 }
 
@@ -106,7 +106,7 @@ html, body, #root {
   background: var(--bg-tertiary);
   padding: 0.12em 0.32em;
   border-radius: 3px;
-  font-family: Menlo, Monaco, "Courier New", monospace;
+  font-family: Menlo, Monaco, "Courier New", "Noto Sans Mono", "Tlwg Mono", "Loma", "Noto Sans Thai", monospace;
   font-size: 0.9em;
 }
 .markdown-body pre {

@@ -50,6 +50,17 @@ function dataUrlToBase64(dataUrl: string): string {
   return idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl;
 }
 
+/// Remove `<think>...</think>` blocks from rendered text. The backend's
+/// assembler now routes thinking into a separate ContentBlock, but old
+/// persisted sessions may still have the tags embedded — strip them here.
+/// Only paired tags are removed (no lazy "swallow up to next </think>"
+/// that could eat ordinary user content containing a literal tag).
+const THINK_BLOCK = /<think>[\s\S]*?<\/think>\n?/gi;
+const ORPHAN_CLOSE = /^[ \t\r\n]*<\/think>\n?/i;
+function stripThinkBlocks(content: string): string {
+  return content.replace(THINK_BLOCK, "").replace(ORPHAN_CLOSE, "");
+}
+
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -408,6 +419,12 @@ export function ChatView({ active, modalOpen }: Props) {
   };
 
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Prevent form submit while IME is composing (Thai, Japanese, Chinese, etc.).
+    // Enter during composition should commit the character, not send the message.
+    if (e.key === "Enter" && e.nativeEvent.isComposing) {
+      e.preventDefault();
+      return;
+    }
     if (!slashOpen || slashFiltered.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -489,7 +506,8 @@ export function ChatView({ active, modalOpen }: Props) {
                   className="group inline-flex max-w-[80%] items-center gap-1 text-xs"
                   style={{
                     color: "var(--text-secondary)",
-                    fontFamily: "Menlo, Monaco, monospace",
+                    fontFamily:
+                      "Menlo, Monaco, 'Courier New', 'Noto Sans Mono', 'Tlwg Mono', 'Loma', 'Noto Sans Thai', monospace",
                     paddingLeft: 2,
                     opacity: msg.toolDone ? 0.7 : 1,
                   }}
@@ -531,7 +549,9 @@ export function ChatView({ active, modalOpen }: Props) {
                         ? "var(--text-secondary)"
                         : "var(--text-primary)",
                   border: isSystem ? "1px solid var(--border)" : "none",
-                  fontFamily: isSystem ? "Menlo, Monaco, monospace" : "inherit",
+                  fontFamily: isSystem
+                    ? "Menlo, Monaco, 'Courier New', 'Noto Sans Mono', 'Tlwg Mono', 'Loma', 'Noto Sans Thai', monospace"
+                    : "inherit",
                   fontSize: isSystem ? "12px" : "14px",
                 }}
               >
@@ -557,7 +577,7 @@ export function ChatView({ active, modalOpen }: Props) {
                       remarkPlugins={[remarkGfm]}
                       rehypePlugins={[rehypeHighlight]}
                     >
-                      {msg.content}
+                      {stripThinkBlocks(msg.content)}
                     </ReactMarkdown>
                   </div>
                 ) : (

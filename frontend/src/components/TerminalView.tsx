@@ -101,7 +101,7 @@ export function TerminalView({ active, modalOpen }: Props) {
     if (!ref.current || termRef.current) return;
 
     const term = new Terminal({
-      fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+      fontFamily: "Menlo, Monaco, 'Courier New', 'Noto Sans Mono', 'Noto Sans Thai', monospace",
       fontSize: 13,
       cursorBlink: true,
       scrollback: 10000,
