@@ -456,8 +456,26 @@ mod tests {
         // Case: starts with reasoning (no <think>) and ends with </think>
         let ev = split_think_text("reasoning here </think>actual answer", &mut state);
         assert!(!state.in_block);
-        let thinking: Vec<_> = ev.iter().filter_map(|e| if let AssembledEvent::Thinking(s) = e { Some(s.as_str()) } else { None }).collect();
-        let text: Vec<_> = ev.iter().filter_map(|e| if let AssembledEvent::Text(s) = e { Some(s.as_str()) } else { None }).collect();
+        let thinking: Vec<_> = ev
+            .iter()
+            .filter_map(|e| {
+                if let AssembledEvent::Thinking(s) = e {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let text: Vec<_> = ev
+            .iter()
+            .filter_map(|e| {
+                if let AssembledEvent::Text(s) = e {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         assert_eq!(thinking.join(""), "reasoning here ");
         assert_eq!(text.join(""), "actual answer");

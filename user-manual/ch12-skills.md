@@ -23,18 +23,103 @@ thClaws looks in these dirs on startup (in order):
 `/skills` lists what's loaded. `/skill show <name>` prints the full
 SKILL.md content + resolved path.
 
+## Marketplace
+
+The thClaws marketplace is a curated, license-vetted catalog of skills
+maintained at [thClaws/marketplace](https://github.com/thClaws/marketplace).
+The client fetches the catalog from `thclaws.ai/api/marketplace.json`
+and exposes three discovery commands:
+
+```
+❯ /skill marketplace
+marketplace (baseline 2026-04-29, 1 skill(s))
+── development ──
+  skill-creator            — Create new skills, optimize triggering, run evals
+install with: /skill install <name>   |   detail: /skill info <name>
+```
+
+```
+❯ /skill search creator
+1 match(es) for 'creator':
+  skill-creator            — Create new skills, optimize triggering, run evals
+```
+
+```
+❯ /skill info skill-creator
+name:        skill-creator
+description: Create new skills, modify and improve existing skills, and measure skill performance...
+category:    development
+license:     Apache-2.0 (open)
+source:      thClaws/marketplace (skills/skill-creator)
+homepage:    https://github.com/thClaws/marketplace/tree/main/skills/skill-creator
+install:     /skill install skill-creator (resolves to https://github.com/thClaws/marketplace.git#main:skills/skill-creator)
+```
+
+`/skill marketplace --refresh` fetches the latest catalog from
+`thclaws.ai` (default cadence is on-demand; the embedded baseline
+covers offline use). Search is case-insensitive and ranks name matches
+above description matches.
+
+### License tiers
+
+Each entry carries a `license_tier`:
+
+- **`open`** — Apache-2.0 / MIT / similar. `/skill install <name>`
+  installs directly.
+- **`linked-only`** — source-available; cannot be redistributed.
+  Visible in the catalog (so you know it exists) but
+  `/skill install <name>` refuses with the upstream homepage URL —
+  install from the upstream repo manually if you want it.
+
 ## Installing a skill
+
+### From the marketplace (recommended)
+
+If the skill is in the marketplace catalog, install it by name — no
+URL needed:
+
+```
+❯ /skill install skill-creator
+  cloned https://github.com/thClaws/marketplace.git (subpath: skills/skill-creator) → .thclaws/skills/skill-creator
+  installed skill 'skill-creator' (single)
+(skill available in this session — no restart needed)
+```
+
+Behind the scenes, thClaws resolves the marketplace name to the entry's
+`install_url`, clones just that subpath out of the registry repo
+(see "From a git repo" below for the subpath syntax), and lands the
+result at `.thclaws/skills/<name>/`. The skill becomes available in
+the same session.
 
 ### From a git repo
 
+For skills not in the marketplace, pass any git URL:
+
 ```
-❯ /skill install https://github.com/anthropics/skills.git
-  cloned https://github.com/anthropics/skills.git → .thclaws/skills/skills
-  bundle detected; installed 20 skill(s): canvas-design, docx, pdf, ...
+❯ /skill install https://github.com/some-user/some-skill.git
+  cloned https://github.com/some-user/some-skill.git → .thclaws/skills/some-skill
+  installed skill 'some-skill' (single)
 ```
 
-thClaws auto-detects bundles (repos with many skills under
-subdirectories) and promotes each sub-skill to a sibling.
+If the repo is a **bundle** (multiple skills under subdirectories),
+thClaws auto-detects and promotes each sub-skill to a sibling at
+`.thclaws/skills/<sub-name>/`.
+
+#### Subpath syntax (one skill from a multi-skill repo)
+
+To install just one directory out of a larger repo, use the
+`#<branch>:<subpath>` extension:
+
+```
+❯ /skill install https://github.com/anthropics/skills.git#main:skills/canvas-design
+  cloned https://github.com/anthropics/skills.git (subpath: skills/canvas-design) → .thclaws/skills/canvas-design
+  installed skill 'canvas-design' (single)
+```
+
+The repo is cloned to a staging dir, only the requested subpath is
+moved into place, and the rest is discarded. The derived skill name
+comes from the subpath's last segment (`canvas-design` here), not the
+repo URL.
 
 ### From a `.zip` URL
 
@@ -52,7 +137,12 @@ subdirectories) and promotes each sub-skill to a sibling.
 ### Scope
 
 `--user` installs into `~/.config/thclaws/skills/` instead of the
-project's `.thclaws/skills/`. Default is project.
+project's `.thclaws/skills/`. Default is project. The marketplace
+respects this flag too:
+
+```
+❯ /skill install --user skill-creator
+```
 
 ### Override the derived name
 

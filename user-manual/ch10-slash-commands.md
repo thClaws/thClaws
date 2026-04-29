@@ -61,7 +61,10 @@ tried first.
 |---|---|
 | `/skills` | List loaded skills |
 | `/skill show NAME` | Full description + path for a skill |
-| `/skill install [--user] <url> [name]` | Install a skill from git or `.zip` URL |
+| `/skill marketplace [--refresh]` | Browse the catalog at thclaws.ai/api/marketplace.json |
+| `/skill search QUERY` | Substring-search the marketplace catalog |
+| `/skill info NAME` | Marketplace detail for one skill (license, source, install URL) |
+| `/skill install [--user] <name-or-url> [name]` | Install a skill — bare slug → marketplace lookup, otherwise git or `.zip` URL |
 | `/<skill-name> [args]` | Invoke an installed skill directly |
 | `/<command-name> [args]` | Invoke a legacy prompt command (template) |
 | `/plugins` | List installed plugins (enabled + disabled) |

@@ -19,6 +19,7 @@ pub mod error;
 pub mod gui;
 pub mod hooks;
 pub mod kms;
+pub mod marketplace;
 pub mod mcp;
 pub mod memory;
 pub mod model_catalogue;

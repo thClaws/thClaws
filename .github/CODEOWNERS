@@ -1,0 +1,48 @@
+# CODEOWNERS for thClaws — paths that require the listed reviewer's approval
+# before a PR can merge. GitHub auto-requests review from these owners on any
+# PR touching the matching paths.
+#
+# This file exists primarily as a security gate, not as a contribution
+# bottleneck — most paths in the repo have no owner and accept community PRs
+# normally. The handful of paths below carry trust beyond the local file:
+# they ship inside the binary as the source of truth that other code
+# decisions key off (model context windows, marketplace catalog, signed-
+# policy public keys), so a tampered entry would propagate to every user.
+#
+# How GitHub enforces this: when a PR modifies a listed path, branch
+# protection rules require the owner's explicit approval. Without that
+# approval, the merge button stays disabled — even for repo admins (when
+# "Include administrators" is enabled in branch protection settings).
+
+# ── Marketplace catalog (baseline shipped with every binary) ──────────────
+#
+# `resources/marketplace.json` is the offline-fallback list of skills the
+# marketplace serves when the user is offline or before the first remote
+# refresh. A malicious entry here would auto-install on every binary.
+crates/core/resources/marketplace.json    @mozeal
+crates/core/src/marketplace.rs            @mozeal
+
+# ── Model catalogue (compiled-in context-window data) ─────────────────────
+#
+# Same trust shape as marketplace.json — every binary embeds this and uses
+# it to decide compaction thresholds. A wrong row could over- or under-
+# compact silently.
+crates/core/resources/model_catalogue.json    @mozeal
+crates/core/src/model_catalogue.rs            @mozeal
+
+# ── Enterprise policy infrastructure ──────────────────────────────────────
+#
+# The policy verification path is what gates EE features (allow-lists,
+# gateway routing, OIDC SSO). A weakening here would silently disable org
+# policies for paying customers.
+crates/core/src/policy/                       @mozeal
+crates/core/src/sso/                          @mozeal
+crates/core/build.rs                          @mozeal
+
+# ── Release / sync infrastructure ─────────────────────────────────────────
+#
+# build.rs embeds git metadata + EE pubkey at compile time. The release
+# workflow signs and uploads release artifacts. Changes here can affect
+# what every user downloads.
+.github/workflows/release.yml                 @mozeal
+.github/workflows/ci.yml                      @mozeal

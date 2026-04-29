@@ -62,7 +62,10 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 |---|---|
 | `/skills` | แสดงรายการ skill ที่โหลดไว้ |
 | `/skill show NAME` | แสดงคำอธิบายเต็มพร้อม path ของ skill |
-| `/skill install [--user] <url> [name]` | ติดตั้ง skill จาก git หรือ URL `.zip` |
+| `/skill marketplace [--refresh]` | เปิดดู catalog จาก thclaws.ai/api/marketplace.json |
+| `/skill search QUERY` | ค้น marketplace catalog แบบ substring |
+| `/skill info NAME` | รายละเอียด marketplace ของ skill (license, source, install URL) |
+| `/skill install [--user] <name-or-url> [name]` | ติดตั้ง skill — slug ตรง ๆ จะ lookup จาก marketplace, หรือใช้ URL git/`.zip` |
 | `/<skill-name> [args]` | เรียกใช้ skill ที่ติดตั้งไว้โดยตรง |
 | `/<command-name> [args]` | เรียกใช้ legacy prompt command (template) |
 | `/plugins` | แสดงรายการ plugin ที่ติดตั้งไว้ (ทั้งเปิดและปิด) |

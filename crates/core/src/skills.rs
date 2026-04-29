@@ -467,6 +467,12 @@ pub fn install_from_git(
     std::fs::create_dir_all(&target_root)
         .map_err(|e| Error::Tool(format!("mkdir {}: {e}", target_root.display())))?;
 
+    // Parse the marketplace `#<branch>:<subpath>` extension out of the
+    // URL. Plain URLs (no fragment) get `(url, None, None)` and behave
+    // exactly as before; subpath URLs trigger the single-skill-from-
+    // monorepo path further down.
+    let (base_url, branch, subpath) = parse_git_subpath(git_url);
+
     let derived = override_name
         .map(String::from)
         .unwrap_or_else(|| derive_name_from_url(git_url));
@@ -483,22 +489,70 @@ pub fn install_from_git(
         )));
     }
 
+    // When a subpath is requested, clone into a staging dir so we can
+    // extract just the subdirectory and discard the rest of the repo.
+    // Plain installs clone directly into the final `clone_dir`.
+    let stage_dir = if subpath.is_some() {
+        target_root.join(format!(
+            ".thclaws-install-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    } else {
+        clone_dir.clone()
+    };
+
+    let mut clone_args: Vec<String> = vec!["clone".into(), "--depth".into(), "1".into()];
+    if let Some(b) = &branch {
+        clone_args.push("--branch".into());
+        clone_args.push(b.clone());
+    }
+    clone_args.push(base_url.clone());
+    clone_args.push(stage_dir.to_string_lossy().into_owned());
+
     let out = std::process::Command::new("git")
-        .args([
-            "clone",
-            "--depth",
-            "1",
-            git_url,
-            &clone_dir.to_string_lossy(),
-        ])
+        .args(&clone_args)
         .output()
         .map_err(|e| Error::Tool(format!("spawn git: {e}")))?;
     if !out.status.success() {
-        let _ = std::fs::remove_dir_all(&clone_dir);
+        let _ = std::fs::remove_dir_all(&stage_dir);
         return Err(Error::Tool(format!(
             "git clone failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
+    }
+
+    // Subpath install: move just the requested subdirectory to clone_dir.
+    if let Some(sub) = &subpath {
+        let src = stage_dir.join(sub);
+        if !src.is_dir() {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(Error::Tool(format!(
+                "subpath '{sub}' not found in cloned repo (or is not a directory)"
+            )));
+        }
+        if !src.join("SKILL.md").exists() {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(Error::Tool(format!(
+                "subpath '{sub}' has no SKILL.md — not a valid skill directory"
+            )));
+        }
+        if let Err(e) = enforce_scripts_policy(&src) {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(e);
+        }
+        std::fs::rename(&src, &clone_dir).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            Error::Tool(format!("move subpath into place: {e}"))
+        })?;
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Ok(vec![
+            format!(
+                "cloned {} (subpath: {sub}) → {}",
+                base_url,
+                clone_dir.display()
+            ),
+            format!("installed skill '{derived}' (single)"),
+        ]);
     }
 
     let mut report = vec![format!("cloned {} → {}", git_url, clone_dir.display())];
@@ -604,7 +658,22 @@ fn walk_for_skills(dir: &Path, out: &mut Vec<PathBuf>) {
 ///   https://github.com/anthropics/skills.git → skills
 ///   git@github.com:user/my-skill.git         → my-skill
 ///   /local/path/foo                          → foo
+///   `<repo>#main:skills/skill-creator`       → skill-creator (subpath wins)
 fn derive_name_from_url(url: &str) -> String {
+    // If the URL carries our `#<branch>:<subpath>` extension, the
+    // subpath's last segment is the skill name (otherwise every
+    // marketplace install of an `anthropics/skills/skills/<name>` URL
+    // would derive to "skills").
+    if let (_base, _branch, Some(subpath)) = parse_git_subpath(url) {
+        let tail = subpath
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("");
+        if !tail.is_empty() {
+            return tail.to_string();
+        }
+    }
     // Strip query/fragment first so a URL like `.../pack.zip?token=xyz`
     // derives `pack`, not `pack.zip?token=xyz`.
     let without_query = url.split(['?', '#']).next().unwrap_or(url);
@@ -618,6 +687,37 @@ fn derive_name_from_url(url: &str) -> String {
         .next()
         .unwrap_or("");
     tail.to_string()
+}
+
+/// Parse the optional `#<branch>:<subpath>` suffix from a marketplace
+/// install URL. Returns `(base_url, branch_opt, subpath_opt)`. Examples:
+///   `https://x.com/r.git`                  → (`...`, None, None)
+///   `https://x.com/r.git#main`             → (`...`, Some("main"), None)
+///   `https://x.com/r.git#main:sub/leaf`    → (`...`, Some("main"), Some("sub/leaf"))
+pub(crate) fn parse_git_subpath(url: &str) -> (String, Option<String>, Option<String>) {
+    if let Some((base, frag)) = url.split_once('#') {
+        let (branch, subpath) = match frag.split_once(':') {
+            Some((b, p)) if !p.is_empty() => (
+                if b.is_empty() {
+                    None
+                } else {
+                    Some(b.to_string())
+                },
+                Some(p.to_string()),
+            ),
+            _ => (
+                if frag.is_empty() {
+                    None
+                } else {
+                    Some(frag.to_string())
+                },
+                None,
+            ),
+        };
+        (base.to_string(), branch, subpath)
+    } else {
+        (url.to_string(), None, None)
+    }
 }
 
 #[cfg(test)]
@@ -659,6 +759,58 @@ mod install_tests {
         assert_eq!(
             derive_name_from_url("https://example.com/skills/my.zip?token=abc"),
             "my"
+        );
+    }
+
+    #[test]
+    fn parse_git_subpath_extracts_branch_and_subpath() {
+        // Plain URL: passes through unchanged.
+        assert_eq!(
+            parse_git_subpath("https://github.com/x/y.git"),
+            ("https://github.com/x/y.git".into(), None, None)
+        );
+        // Branch only.
+        assert_eq!(
+            parse_git_subpath("https://github.com/x/y.git#main"),
+            (
+                "https://github.com/x/y.git".into(),
+                Some("main".into()),
+                None
+            )
+        );
+        // Branch + subpath.
+        assert_eq!(
+            parse_git_subpath("https://github.com/anthropics/skills.git#main:skills/skill-creator"),
+            (
+                "https://github.com/anthropics/skills.git".into(),
+                Some("main".into()),
+                Some("skills/skill-creator".into())
+            )
+        );
+        // Empty branch with subpath (`#:path`) — both fields populated as expected.
+        assert_eq!(
+            parse_git_subpath("https://github.com/x/y.git#:sub"),
+            (
+                "https://github.com/x/y.git".into(),
+                None,
+                Some("sub".into())
+            )
+        );
+    }
+
+    #[test]
+    fn derive_name_uses_subpath_leaf() {
+        assert_eq!(
+            derive_name_from_url(
+                "https://github.com/anthropics/skills.git#main:skills/skill-creator"
+            ),
+            "skill-creator"
+        );
+        assert_eq!(
+            derive_name_from_url(
+                "https://github.com/anthropics/skills.git#main:skills/webapp-testing/"
+            ),
+            "webapp-testing"
         );
     }
 }

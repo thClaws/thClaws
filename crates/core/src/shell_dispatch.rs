@@ -844,7 +844,22 @@ pub async fn dispatch(
             name,
             project,
         } => {
-            match crate::skills::install_from_url(&git_url, name.as_deref(), project).await {
+            // Resolve marketplace name → install_url (or fall through
+            // for a URL). See `repl::resolve_skill_install_target` for
+            // the same logic in the CLI surface.
+            let (effective_url, effective_name, abort_msg) =
+                resolve_skill_install_target_gui(&git_url, name.as_deref());
+            if let Some(msg) = abort_msg {
+                emit(events_tx, msg);
+                return;
+            }
+            match crate::skills::install_from_url(
+                &effective_url,
+                effective_name.as_deref(),
+                project,
+            )
+            .await
+            {
                 Ok(report) => {
                     // Live refresh: replace the SkillTool's store
                     // contents + recompute the system prompt so the
@@ -863,6 +878,113 @@ pub async fn dispatch(
                     emit(events_tx, out);
                 }
                 Err(e) => emit(events_tx, format!("skill install failed: {e}")),
+            }
+        }
+        SlashCommand::SkillMarketplace { refresh } => {
+            if refresh {
+                match crate::marketplace::refresh_from_remote().await {
+                    Ok(out) => emit(
+                        events_tx,
+                        format!(
+                            "refreshed marketplace from {} — {} skill(s)",
+                            crate::marketplace::REMOTE_URL,
+                            out.skill_count
+                        ),
+                    ),
+                    Err(e) => emit(
+                        events_tx,
+                        format!("refresh failed ({e}); using cached/baseline catalogue"),
+                    ),
+                }
+            }
+            let mp = crate::marketplace::load();
+            let mut out = format!(
+                "marketplace ({}, {} skill(s))\n",
+                mp.source,
+                mp.skills.len()
+            );
+            let mut by_cat: std::collections::BTreeMap<
+                String,
+                Vec<&crate::marketplace::MarketplaceSkill>,
+            > = std::collections::BTreeMap::new();
+            for s in &mp.skills {
+                let cat = if s.category.is_empty() {
+                    "other".to_string()
+                } else {
+                    s.category.clone()
+                };
+                by_cat.entry(cat).or_default().push(s);
+            }
+            for (cat, skills) in by_cat {
+                out.push_str(&format!("── {cat} ──\n"));
+                for s in skills {
+                    let tier_tag = match s.license_tier.as_str() {
+                        "linked-only" => " [linked-only]",
+                        _ => "",
+                    };
+                    out.push_str(&format!(
+                        "  {:<24}{tier_tag} — {}\n",
+                        s.name,
+                        s.short_line()
+                    ));
+                }
+            }
+            out.push_str("install with: /skill install <name>   |   detail: /skill info <name>");
+            emit(events_tx, out);
+        }
+        SlashCommand::SkillSearch(query) => {
+            let mp = crate::marketplace::load();
+            let hits = mp.search(&query);
+            if hits.is_empty() {
+                emit(
+                    events_tx,
+                    format!("no matches for '{query}' — try /skill marketplace"),
+                );
+            } else {
+                let mut out = format!("{} match(es) for '{query}':\n", hits.len());
+                for s in hits {
+                    out.push_str(&format!("  {:<24} — {}\n", s.name, s.short_line()));
+                }
+                emit(events_tx, out);
+            }
+        }
+        SlashCommand::SkillInfo(name) => {
+            let mp = crate::marketplace::load();
+            match mp.find(&name) {
+                Some(s) => {
+                    let mut out = format!("name:        {}\n", s.name);
+                    out.push_str(&format!("description: {}\n", s.description));
+                    if !s.category.is_empty() {
+                        out.push_str(&format!("category:    {}\n", s.category));
+                    }
+                    out.push_str(&format!(
+                        "license:     {} ({})\n",
+                        s.license, s.license_tier
+                    ));
+                    if !s.homepage.is_empty() {
+                        out.push_str(&format!("homepage:    {}\n", s.homepage));
+                    }
+                    match (s.license_tier.as_str(), s.install_url.as_ref()) {
+                        ("linked-only", _) => out.push_str(&format!(
+                            "install:     not redistributable — install from {}",
+                            if s.homepage.is_empty() {
+                                "the upstream repo"
+                            } else {
+                                &s.homepage
+                            }
+                        )),
+                        (_, Some(url)) => out.push_str(&format!(
+                            "install:     /skill install {} (resolves to {url})",
+                            s.name
+                        )),
+                        (_, None) => out.push_str("install:     no install_url in catalogue"),
+                    }
+                    emit(events_tx, out);
+                }
+                None => emit(
+                    events_tx,
+                    format!("no skill named '{name}' in marketplace — try /skill search <query>"),
+                ),
             }
         }
 
@@ -1548,6 +1670,69 @@ fn doctor_report(state: &WorkerState) -> String {
 
 fn emit(events_tx: &broadcast::Sender<ViewEvent>, text: String) {
     let _ = events_tx.send(ViewEvent::SlashOutput(text));
+}
+
+/// GUI-side mirror of `repl::resolve_skill_install_target` so the Chat
+/// tab's `/skill install <name>` resolves a marketplace slug the same
+/// way the CLI does. Inlined here (rather than reaching into `repl::`)
+/// to keep the GUI's shell_dispatch module self-contained.
+fn resolve_skill_install_target_gui(
+    arg: &str,
+    explicit_name: Option<&str>,
+) -> (String, Option<String>, Option<String>) {
+    let looks_like_url = arg.contains("://")
+        || arg.starts_with("git@")
+        || arg.starts_with('/')
+        || arg.starts_with("./")
+        || arg.starts_with("../")
+        || arg.to_ascii_lowercase().ends_with(".zip");
+    if looks_like_url {
+        return (arg.to_string(), explicit_name.map(String::from), None);
+    }
+    let mp = crate::marketplace::load();
+    match mp.find(arg) {
+        Some(entry) if entry.license_tier == "linked-only" => {
+            let homepage = if entry.homepage.is_empty() {
+                "the upstream repo".to_string()
+            } else {
+                entry.homepage.clone()
+            };
+            (
+                String::new(),
+                None,
+                Some(format!(
+                    "'{}' is source-available and cannot be redistributed — install directly from {}",
+                    entry.name, homepage
+                )),
+            )
+        }
+        Some(entry) => match &entry.install_url {
+            Some(url) => (
+                url.clone(),
+                Some(
+                    explicit_name
+                        .map(String::from)
+                        .unwrap_or_else(|| entry.name.clone()),
+                ),
+                None,
+            ),
+            None => (
+                String::new(),
+                None,
+                Some(format!(
+                    "'{}' has no install_url in the marketplace catalogue",
+                    entry.name
+                )),
+            ),
+        },
+        None => (
+            String::new(),
+            None,
+            Some(format!(
+                "no skill named '{arg}' in marketplace and not a URL — try /skill search <query> or pass a git URL"
+            )),
+        ),
+    }
 }
 
 /// Push the latest KMS list to the sidebar after a /kms mutation so
