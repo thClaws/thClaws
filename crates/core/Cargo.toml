@@ -57,6 +57,12 @@ quick-xml = "0.39"
 # JSON 2D-array input is also accepted (typed cells); CSV is the more
 # common form so reusing a vetted parser beats hand-rolling quote/escape.
 csv = "1"
+# XLSX/XLS/XLSB/ODS reader used by XlsxRead. Mature MIT/Apache crate
+# with broad real-world format coverage. We only consume the read API
+# (no formula evaluation) — values are pulled per-cell as their raw
+# Excel-typed form (Number / String / Bool / DateTime) and serialized
+# to CSV or JSON depending on the tool's `format` argument.
+calamine = "0.34"
 tao = { version = "0.34", optional = true }
 wry = { version = "0.54", optional = true }
 # Markdown → HTML for the Files-tab preview. GFM tables, strikethrough,

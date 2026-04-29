@@ -15,6 +15,7 @@ use std::sync::Arc;
 pub mod ask;
 pub mod bash;
 pub mod docx_create;
+pub mod docx_read;
 pub mod edit;
 pub mod glob;
 pub mod grep;
@@ -24,6 +25,7 @@ pub mod pdf_create;
 pub mod pdf_read;
 pub mod plan;
 pub mod pptx_create;
+pub mod pptx_read;
 pub mod read;
 pub mod search;
 pub mod tasks;
@@ -31,10 +33,12 @@ pub mod todo;
 pub mod web;
 pub mod write;
 pub mod xlsx_create;
+pub mod xlsx_read;
 
 pub use ask::{set_gui_ask_sender, AskUserRequest, AskUserTool};
 pub use bash::BashTool;
 pub use docx_create::DocxCreateTool;
+pub use docx_read::DocxReadTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
@@ -44,12 +48,14 @@ pub use pdf_create::PdfCreateTool;
 pub use pdf_read::PdfReadTool;
 pub use plan::{EnterPlanModeTool, ExitPlanModeTool};
 pub use pptx_create::PptxCreateTool;
+pub use pptx_read::PptxReadTool;
 pub use read::ReadTool;
 pub use search::WebSearchTool;
 pub use todo::TodoWriteTool;
 pub use web::WebFetchTool;
 pub use write::WriteTool;
 pub use xlsx_create::XlsxCreateTool;
+pub use xlsx_read::XlsxReadTool;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -97,8 +103,11 @@ impl ToolRegistry {
         r.register(Arc::new(GrepTool));
         r.register(Arc::new(BashTool));
         r.register(Arc::new(DocxCreateTool));
+        r.register(Arc::new(DocxReadTool));
         r.register(Arc::new(XlsxCreateTool));
+        r.register(Arc::new(XlsxReadTool));
         r.register(Arc::new(PptxCreateTool));
+        r.register(Arc::new(PptxReadTool));
         r.register(Arc::new(PdfCreateTool));
         r.register(Arc::new(PdfReadTool));
         r.register(Arc::new(WebFetchTool::new()));
@@ -192,6 +201,7 @@ mod tests {
                 "AskUserQuestion",
                 "Bash",
                 "DocxCreate",
+                "DocxRead",
                 "Edit",
                 "EnterPlanMode",
                 "ExitPlanMode",
@@ -201,12 +211,14 @@ mod tests {
                 "PdfCreate",
                 "PdfRead",
                 "PptxCreate",
+                "PptxRead",
                 "Read",
                 "TodoWrite",
                 "WebFetch",
                 "WebSearch",
                 "Write",
-                "XlsxCreate"
+                "XlsxCreate",
+                "XlsxRead"
             ]
         );
         for def in &defs {
