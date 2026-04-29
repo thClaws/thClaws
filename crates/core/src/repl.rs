@@ -3101,10 +3101,34 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 summary,
                                 plugin.path.display()
                             );
-                            println!(
-                                "{COLOR_YELLOW}restart {} to activate the plugin's skills / commands / MCP servers{COLOR_RESET}",
-                                crate::branding::current().name
-                            );
+                            // Refresh the skill store + name set so the
+                            // plugin's contributed skills are callable
+                            // as `/<skill-name>` immediately, without
+                            // a restart. SkillStore::discover() picks
+                            // up plugin-contributed dirs by default.
+                            let refreshed = crate::skills::SkillStore::discover();
+                            skill_names = refreshed.skills.keys().cloned().collect();
+                            if let Some(handle) = &skill_store_handle {
+                                if let Ok(mut store) = handle.lock() {
+                                    *store = refreshed;
+                                }
+                            }
+                            // MCP servers / commands still need a restart
+                            // (the live tool registry doesn't track per-
+                            // plugin contributions). Be honest about it
+                            // when the manifest declares those.
+                            if let Some(m) = manifest.as_ref() {
+                                if !m.commands.is_empty() || !m.mcp_servers.is_empty() {
+                                    println!(
+                                        "{COLOR_YELLOW}restart {} to activate the plugin's commands / MCP servers (skills already callable in this session){COLOR_RESET}",
+                                        crate::branding::current().name
+                                    );
+                                } else {
+                                    println!(
+                                        "{COLOR_DIM}skills callable in this session — no restart needed{COLOR_RESET}"
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             println!("{COLOR_YELLOW}plugin install failed: {e}{COLOR_RESET}");

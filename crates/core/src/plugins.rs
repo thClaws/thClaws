@@ -412,28 +412,49 @@ pub fn all_plugins_all_scopes() -> Vec<Plugin> {
 /// Flatten all enabled plugins' skill directories into absolute paths.
 /// Each entry is a directory that contains one-or-more `<skill>/SKILL.md`
 /// subdirectories (compatible with [`crate::skills::SkillStore`] discovery).
+///
+/// When a plugin's manifest doesn't declare `skills`, we fall back to a
+/// conventional `skills/` subdir if one exists. This mirrors Claude
+/// Code's auto-discovery behavior so anthropics-style plugins (which
+/// rely on the `skills/` convention rather than declaring it
+/// explicitly in the manifest) install in thClaws unchanged.
 pub fn plugin_skill_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for plugin in installed_plugins_all_scopes() {
         let Ok(manifest) = plugin.manifest() else {
             continue;
         };
-        for rel in &manifest.skills {
-            dirs.push(plugin.path.join(rel));
+        if manifest.skills.is_empty() {
+            let conventional = plugin.path.join("skills");
+            if conventional.is_dir() {
+                dirs.push(conventional);
+            }
+        } else {
+            for rel in &manifest.skills {
+                dirs.push(plugin.path.join(rel));
+            }
         }
     }
     dirs
 }
 
-/// Flatten all enabled plugins' command directories.
+/// Flatten all enabled plugins' command directories. Same convention-
+/// over-configuration fallback as [`plugin_skill_dirs`].
 pub fn plugin_command_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for plugin in installed_plugins_all_scopes() {
         let Ok(manifest) = plugin.manifest() else {
             continue;
         };
-        for rel in &manifest.commands {
-            dirs.push(plugin.path.join(rel));
+        if manifest.commands.is_empty() {
+            let conventional = plugin.path.join("commands");
+            if conventional.is_dir() {
+                dirs.push(conventional);
+            }
+        } else {
+            for rel in &manifest.commands {
+                dirs.push(plugin.path.join(rel));
+            }
         }
     }
     dirs
