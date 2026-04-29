@@ -38,6 +38,7 @@ pub enum ProviderKind {
     LMStudio,
     AzureAIFoundry,
     OpenAICompat,
+    DeepSeek,
 }
 
 impl ProviderKind {
@@ -57,6 +58,7 @@ impl ProviderKind {
         Self::LMStudio,
         Self::AzureAIFoundry,
         Self::OpenAICompat,
+        Self::DeepSeek,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -76,6 +78,7 @@ impl ProviderKind {
             Self::LMStudio => "lmstudio",
             Self::AzureAIFoundry => "azure",
             Self::OpenAICompat => "openai-compat",
+            Self::DeepSeek => "deepseek",
         }
     }
 
@@ -115,6 +118,11 @@ impl ProviderKind {
             // vLLM, etc.). Users supply their own model id via /model oai/<id>;
             // the "oai/" prefix is stripped before the request goes upstream.
             Self::OpenAICompat => "oai/gpt-4o-mini",
+            // DeepSeek's V4-flash model. `deepseek-v4-pro` is the higher-
+            // tier sibling; older aliases `deepseek-chat` / `deepseek-reasoner`
+            // still work on the wire but `/v1/models` only lists the V4 line,
+            // so that's what catalogue-seed pulls in.
+            Self::DeepSeek => "deepseek-v4-flash",
         }
     }
 
@@ -132,6 +140,7 @@ impl ProviderKind {
             Self::LMStudio => Some("LMSTUDIO_BASE_URL"),
             Self::AzureAIFoundry => Some("AZURE_AI_FOUNDRY_ENDPOINT"),
             Self::OpenAICompat => Some("OPENAI_COMPAT_BASE_URL"),
+            Self::DeepSeek => Some("DEEPSEEK_BASE_URL"),
             _ => None,
         }
     }
@@ -174,6 +183,7 @@ impl ProviderKind {
             // Generic OAI-compat: users always set their own URL; this
             // placeholder just hints at the expected shape (path ending in /v1).
             Self::OpenAICompat => Some("http://localhost:8000/v1"),
+            Self::DeepSeek => Some("https://api.deepseek.com/v1"),
             _ => None,
         }
     }
@@ -196,6 +206,7 @@ impl ProviderKind {
             Self::LMStudio => None, // Local runtime, no auth.
             Self::AzureAIFoundry => Some("AZURE_AI_FOUNDRY_API_KEY"),
             Self::OpenAICompat => Some("OPENAI_COMPAT_API_KEY"),
+            Self::DeepSeek => Some("DEEPSEEK_API_KEY"),
         }
     }
 
@@ -273,7 +284,8 @@ impl ProviderKind {
             | Self::ZAi
             | Self::LMStudio
             | Self::AzureAIFoundry
-            | Self::OpenAICompat => None,
+            | Self::OpenAICompat
+            | Self::DeepSeek => None,
         }
     }
 
@@ -308,6 +320,12 @@ impl ProviderKind {
             Some(Self::Gemini)
         } else if model.starts_with("qwen") || model.starts_with("qwq-") {
             Some(Self::DashScope)
+        } else if model.starts_with("deepseek-") {
+            // DeepSeek's bare model IDs (deepseek-chat, deepseek-reasoner,
+            // deepseek-coder, …) are unique enough that no namespace prefix
+            // is needed — same shape as Anthropic's `claude-` and OpenAI's
+            // `gpt-`. Prefix is NOT stripped on the wire.
+            Some(Self::DeepSeek)
         } else if model.starts_with("zai/") {
             // Z.ai (GLM Coding Plan). Models look like zai/glm-4.6.
             // The "zai/" prefix is stripped before forwarding to the
@@ -571,6 +589,19 @@ mod tests {
         assert!(ProviderKind::resolve_alias_for_provider("sonnet", ProviderKind::Ollama).is_none());
         assert!(
             ProviderKind::resolve_alias_for_provider("sonnet", ProviderKind::DashScope).is_none()
+        );
+        assert!(
+            ProviderKind::resolve_alias_for_provider("sonnet", ProviderKind::DeepSeek).is_none()
+        );
+
+        // DeepSeek model IDs are bare and detected by the `deepseek-` prefix.
+        assert_eq!(
+            ProviderKind::detect("deepseek-chat"),
+            Some(ProviderKind::DeepSeek)
+        );
+        assert_eq!(
+            ProviderKind::detect("deepseek-reasoner"),
+            Some(ProviderKind::DeepSeek)
         );
 
         // Non-aliases pass through as None — they don't need translation.

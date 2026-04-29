@@ -654,6 +654,9 @@ pub fn model_uses_reasoning_content(model: &str) -> bool {
         // DeepSeek r1 family also returns reasoning_content.
         "deepseek/deepseek-r1",
         "deepseek-r1",
+        // DeepSeek's hosted API names the R1 model `deepseek-reasoner`
+        // (not `deepseek-r1`). Same reasoning_content shape on the wire.
+        "deepseek-reasoner",
     ];
     let m = model.to_lowercase();
     PATTERNS.iter().any(|p| m.contains(p))

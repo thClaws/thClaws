@@ -101,6 +101,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::ZAi,
     ProviderKind::AzureAIFoundry,
     ProviderKind::OpenAICompat,
+    ProviderKind::DeepSeek,
 ];
 
 fn entry(provider: &str) -> Result<keyring::Entry> {

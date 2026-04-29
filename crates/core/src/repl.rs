@@ -1201,6 +1201,20 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("oai/"),
             ))
         }
+        ProviderKind::DeepSeek => {
+            // DeepSeek's hosted endpoint is OpenAI-compatible. Model IDs
+            // (deepseek-chat, deepseek-reasoner) are bare — no prefix to
+            // strip. Override via DEEPSEEK_BASE_URL for proxies / self-
+            // hosted deployments.
+            let base = std::env::var("DEEPSEEK_BASE_URL")
+                .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
+            let url = if base.ends_with("/chat/completions") {
+                base
+            } else {
+                format!("{}/chat/completions", base.trim_end_matches('/'))
+            };
+            Ok(Arc::new(OpenAIProvider::new(api_key).with_base_url(url)))
+        }
         ProviderKind::Ollama
         | ProviderKind::OllamaAnthropic
         | ProviderKind::LMStudio
