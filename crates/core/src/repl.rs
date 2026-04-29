@@ -136,6 +136,29 @@ pub enum SlashCommand {
     SkillSearch(String),
     /// `/skill info <name>` — detail view for one marketplace entry.
     SkillInfo(String),
+    /// `/mcp marketplace [--refresh]` — list MCP servers in catalogue.
+    McpMarketplace {
+        refresh: bool,
+    },
+    /// `/mcp search <query>` — search MCP server catalogue.
+    McpSearch(String),
+    /// `/mcp info <name>` — detail for a marketplace MCP server entry.
+    McpInfo(String),
+    /// `/mcp install [--user] <name>` — install MCP server from catalogue.
+    /// Looks up `install_url` / transport / command and writes the
+    /// matching `mcp.json` entry; clones source if `install_url` is set.
+    McpInstall {
+        name: String,
+        user: bool,
+    },
+    /// `/plugin marketplace [--refresh]` — list plugins in catalogue.
+    PluginMarketplace {
+        refresh: bool,
+    },
+    /// `/plugin search <query>` — search plugin catalogue.
+    PluginSearch(String),
+    /// `/plugin info <name>` — detail for a marketplace plugin entry.
+    PluginInfo(String),
     Permissions(String),
     Team,
     Usage,
@@ -237,12 +260,31 @@ fn parse_plugin_subcommand(cmd: &str, args: &str) -> SlashCommand {
                 )),
             }
         }
-        "show" | "info" => match rest.split_whitespace().next() {
+        "show" => match rest.split_whitespace().next() {
             Some(name) => SlashCommand::PluginShow { name: name.to_string() },
             None => SlashCommand::Unknown("usage: /plugin show <name>".into()),
         },
+        "marketplace" => {
+            let refresh = rest.split_whitespace().any(|p| p == "--refresh");
+            SlashCommand::PluginMarketplace { refresh }
+        }
+        "search" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /plugin search <query>".into())
+            } else {
+                SlashCommand::PluginSearch(rest.to_string())
+            }
+        }
+        // `/plugin info <name>` mirrors `/skill info`/`/mcp info` —
+        // marketplace detail. Use `/plugin show <name>` for an
+        // installed-plugin detail (keeps the terminology consistent
+        // with the other extension namespaces).
+        "info" => match rest.split_whitespace().next() {
+            Some(name) => SlashCommand::PluginInfo(name.to_string()),
+            None => SlashCommand::Unknown("usage: /plugin info <name>".into()),
+        },
         other => SlashCommand::Unknown(format!(
-            "unknown plugin subcommand: '{other}' (try: /plugin, /plugin install …, /plugin remove …, /plugin enable …, /plugin disable …, /plugin show …)"
+            "unknown plugin subcommand: '{other}' (try: /plugin, /plugin install, /plugin remove, /plugin enable, /plugin disable, /plugin show, /plugin marketplace, /plugin search, /plugin info)"
         )),
     }
 }
@@ -293,8 +335,43 @@ fn parse_mcp_subcommand(args: &str) -> SlashCommand {
                 _ => SlashCommand::Unknown("usage: /mcp remove [--user] <name>".into()),
             }
         }
+        "marketplace" => {
+            let refresh = rest.split_whitespace().any(|p| p == "--refresh");
+            SlashCommand::McpMarketplace { refresh }
+        }
+        "search" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /mcp search <query>".into())
+            } else {
+                SlashCommand::McpSearch(rest.to_string())
+            }
+        }
+        "info" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /mcp info <name>".into())
+            } else {
+                SlashCommand::McpInfo(rest.to_string())
+            }
+        }
+        "install" => {
+            let mut parts: Vec<&str> = rest.split_whitespace().collect();
+            let mut user = false;
+            if parts.first().copied() == Some("--user") {
+                user = true;
+                parts.remove(0);
+            } else if parts.first().copied() == Some("--project") {
+                parts.remove(0);
+            }
+            match parts.as_slice() {
+                [name] => SlashCommand::McpInstall {
+                    name: (*name).to_string(),
+                    user,
+                },
+                _ => SlashCommand::Unknown("usage: /mcp install [--user] <name>".into()),
+            }
+        }
         other => SlashCommand::Unknown(format!(
-            "unknown mcp subcommand: '{other}' (try: /mcp, /mcp add …, /mcp remove …)"
+            "unknown mcp subcommand: '{other}' (try: /mcp, /mcp add, /mcp remove, /mcp marketplace, /mcp search, /mcp info, /mcp install)"
         )),
     }
 }
@@ -729,6 +806,134 @@ fn looks_like_url(s: &str) -> bool {
         || s.to_ascii_lowercase().ends_with(".zip")
 }
 
+/// Install an MCP server from the marketplace catalogue. Clones the
+/// source (if `install_url` is set), writes the matching mcp.json
+/// entry, and returns a human-readable report. Does **not** spawn the
+/// client — caller is responsible for connecting (CLI vs GUI surfaces
+/// have different wiring for that).
+///
+/// Errors out cleanly with a useful message when the name isn't in the
+/// catalog, when the source clone fails, or when the mcp.json write
+/// fails.
+pub async fn install_mcp_from_marketplace(
+    name: &str,
+    user: bool,
+) -> std::result::Result<Vec<String>, String> {
+    let mp = crate::marketplace::load();
+    let entry = mp
+        .find_mcp(name)
+        .ok_or_else(|| format!(
+            "no MCP named '{name}' in marketplace — try /mcp search <query> or /mcp add <name> <url> for a custom server"
+        ))?
+        .clone();
+
+    let mut report: Vec<String> = Vec::new();
+
+    // Step 1: optional source clone for stdio MCPs that ship as a
+    // git repo. Skip silently for sse-transport entries (the upstream
+    // is a hosted URL, no local source).
+    if let Some(src_url) = &entry.install_url {
+        if entry.transport == "stdio" {
+            let target_root = if user {
+                crate::util::home_dir()
+                    .ok_or_else(|| "no home directory".to_string())?
+                    .join(".config/thclaws/mcp")
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| format!("cwd: {e}"))?
+                    .join(".thclaws/mcp")
+            };
+            std::fs::create_dir_all(&target_root)
+                .map_err(|e| format!("mkdir {}: {e}", target_root.display()))?;
+            let clone_dir = target_root.join(&entry.name);
+            if clone_dir.exists() {
+                report.push(format!(
+                    "source already at {} — reusing (delete to force fresh clone)",
+                    clone_dir.display()
+                ));
+            } else {
+                let (base, branch, subpath) = crate::skills::parse_git_subpath(src_url);
+                let stage = if subpath.is_some() {
+                    target_root.join(format!(
+                        ".thclaws-install-{}",
+                        uuid::Uuid::new_v4().simple()
+                    ))
+                } else {
+                    clone_dir.clone()
+                };
+                let mut args: Vec<String> = vec!["clone".into(), "--depth".into(), "1".into()];
+                if let Some(b) = &branch {
+                    args.push("--branch".into());
+                    args.push(b.clone());
+                }
+                args.push(base.clone());
+                args.push(stage.to_string_lossy().into_owned());
+                let out = std::process::Command::new("git")
+                    .args(&args)
+                    .output()
+                    .map_err(|e| format!("spawn git: {e}"))?;
+                if !out.status.success() {
+                    let _ = std::fs::remove_dir_all(&stage);
+                    return Err(format!(
+                        "git clone failed: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ));
+                }
+                if let Some(sub) = &subpath {
+                    let src = stage.join(sub);
+                    if !src.is_dir() {
+                        let _ = std::fs::remove_dir_all(&stage);
+                        return Err(format!("subpath '{sub}' not found in cloned repo"));
+                    }
+                    std::fs::rename(&src, &clone_dir)
+                        .map_err(|e| format!("move subpath into place: {e}"))?;
+                    let _ = std::fs::remove_dir_all(&stage);
+                }
+                report.push(format!("cloned {} → {}", src_url, clone_dir.display()));
+            }
+        }
+    }
+
+    // Step 2: write the mcp.json entry. The McpServerConfig shape
+    // differs per transport — http for sse-style hosted servers, stdio
+    // for everything else.
+    let cfg = if entry.transport == "sse" {
+        crate::mcp::McpServerConfig {
+            name: entry.name.clone(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Default::default(),
+            url: entry.url.clone(),
+            headers: Default::default(),
+        }
+    } else {
+        crate::mcp::McpServerConfig {
+            name: entry.name.clone(),
+            transport: "stdio".into(),
+            command: entry.command.clone(),
+            args: entry.args.clone(),
+            env: Default::default(),
+            url: String::new(),
+            headers: Default::default(),
+        }
+    };
+    let saved_to =
+        crate::config::save_mcp_server(&cfg, user).map_err(|e| format!("save mcp.json: {e}"))?;
+    report.push(format!(
+        "registered '{}' in {} ({} transport)",
+        entry.name,
+        saved_to.display(),
+        entry.transport
+    ));
+
+    if let Some(msg) = &entry.post_install_message {
+        report.push(format!("note: {msg}"));
+    }
+
+    Ok(report)
+}
+
 // Hand-aligned struct-literal table — keeping the columns reads well at a
 // glance and rustfmt's exploded form (~6 lines per row) bloats the function
 // to >180 lines for the same content. Skip for the table only.
@@ -762,7 +967,8 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "skills",   description: "List installed skills",                      category: "Extensions", usage: "" },
         BuiltInCommand { name: "skill",    description: "Skill subcommands (install / marketplace / search / info / show)", category: "Extensions", usage: "<sub> [args]" },
         BuiltInCommand { name: "plugins",  description: "List installed plugins",                     category: "Extensions", usage: "" },
-        BuiltInCommand { name: "mcp",      description: "List active MCP servers and their tools",    category: "Extensions", usage: "" },
+        BuiltInCommand { name: "plugin",   description: "Plugin subcommands (install / marketplace / search / info / show / enable / disable)", category: "Extensions", usage: "<sub> [args]" },
+        BuiltInCommand { name: "mcp",      description: "MCP subcommands (add / remove / install / marketplace / search / info)", category: "Extensions", usage: "[sub] [args]" },
 
         // Team
         BuiltInCommand { name: "team",     description: "Show team agent status",                     category: "Team", usage: "" },
@@ -3591,6 +3797,183 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
+                SlashCommand::McpMarketplace { refresh } => {
+                    if refresh {
+                        if let Err(e) = crate::marketplace::refresh_from_remote().await {
+                            println!("{COLOR_YELLOW}refresh failed ({e}){COLOR_RESET}");
+                        }
+                    }
+                    let mp = crate::marketplace::load();
+                    println!(
+                        "{COLOR_DIM}MCP marketplace ({}, {} server(s)){COLOR_RESET}",
+                        mp.source,
+                        mp.mcp_servers.len()
+                    );
+                    let mut by_cat: std::collections::BTreeMap<String, Vec<&crate::marketplace::MarketplaceMcpServer>> =
+                        std::collections::BTreeMap::new();
+                    for s in &mp.mcp_servers {
+                        let cat = if s.category.is_empty() { "other".into() } else { s.category.clone() };
+                        by_cat.entry(cat).or_default().push(s);
+                    }
+                    for (cat, servers) in by_cat {
+                        println!("{COLOR_DIM}── {cat} ──{COLOR_RESET}");
+                        for s in servers {
+                            let tport = if s.transport == "sse" { " [hosted]" } else { "" };
+                            println!(
+                                "{COLOR_DIM}  {:<24}{tport} — {}{COLOR_RESET}",
+                                s.name, s.short_line()
+                            );
+                        }
+                    }
+                    println!(
+                        "{COLOR_DIM}install with: /mcp install <name>   |   detail: /mcp info <name>{COLOR_RESET}"
+                    );
+                }
+                SlashCommand::McpSearch(query) => {
+                    let mp = crate::marketplace::load();
+                    let hits = mp.search_mcp(&query);
+                    if hits.is_empty() {
+                        println!(
+                            "{COLOR_DIM}no matches for '{query}' — try /mcp marketplace{COLOR_RESET}"
+                        );
+                    } else {
+                        println!("{COLOR_DIM}{} match(es) for '{query}':{COLOR_RESET}", hits.len());
+                        for s in hits {
+                            println!(
+                                "{COLOR_DIM}  {:<24} — {}{COLOR_RESET}",
+                                s.name, s.short_line()
+                            );
+                        }
+                    }
+                }
+                SlashCommand::McpInfo(name) => {
+                    let mp = crate::marketplace::load();
+                    match mp.find_mcp(&name) {
+                        Some(s) => {
+                            println!("{COLOR_DIM}name:         {}{COLOR_RESET}", s.name);
+                            println!("{COLOR_DIM}description:  {}{COLOR_RESET}", s.description);
+                            if !s.category.is_empty() {
+                                println!("{COLOR_DIM}category:     {}{COLOR_RESET}", s.category);
+                            }
+                            println!(
+                                "{COLOR_DIM}license:      {} ({}){COLOR_RESET}",
+                                s.license, s.license_tier
+                            );
+                            println!("{COLOR_DIM}transport:    {}{COLOR_RESET}", s.transport);
+                            if s.transport == "stdio" && !s.command.is_empty() {
+                                let argv = if s.args.is_empty() {
+                                    s.command.clone()
+                                } else {
+                                    format!("{} {}", s.command, s.args.join(" "))
+                                };
+                                println!("{COLOR_DIM}command:      {}{COLOR_RESET}", argv);
+                            }
+                            if s.transport == "sse" && !s.url.is_empty() {
+                                println!("{COLOR_DIM}url:          {}{COLOR_RESET}", s.url);
+                            }
+                            if let Some(src) = &s.install_url {
+                                println!("{COLOR_DIM}source:       {}{COLOR_RESET}", src);
+                            }
+                            if !s.homepage.is_empty() {
+                                println!("{COLOR_DIM}homepage:     {}{COLOR_RESET}", s.homepage);
+                            }
+                            if let Some(msg) = &s.post_install_message {
+                                println!("{COLOR_DIM}note:         {}{COLOR_RESET}", msg);
+                            }
+                            println!(
+                                "{COLOR_DIM}install with: /mcp install {}{COLOR_RESET}",
+                                s.name
+                            );
+                        }
+                        None => println!(
+                            "{COLOR_YELLOW}no MCP named '{name}' in marketplace — try /mcp search <query>{COLOR_RESET}"
+                        ),
+                    }
+                }
+                SlashCommand::McpInstall { name, user } => {
+                    match install_mcp_from_marketplace(&name, user).await {
+                        Ok(report) => {
+                            for line in report {
+                                println!("{COLOR_DIM}  {line}{COLOR_RESET}");
+                            }
+                        }
+                        Err(e) => println!("{COLOR_YELLOW}mcp install failed: {e}{COLOR_RESET}"),
+                    }
+                }
+                SlashCommand::PluginMarketplace { refresh } => {
+                    if refresh {
+                        if let Err(e) = crate::marketplace::refresh_from_remote().await {
+                            println!("{COLOR_YELLOW}refresh failed ({e}){COLOR_RESET}");
+                        }
+                    }
+                    let mp = crate::marketplace::load();
+                    println!(
+                        "{COLOR_DIM}plugin marketplace ({}, {} plugin(s)){COLOR_RESET}",
+                        mp.source,
+                        mp.plugins.len()
+                    );
+                    let mut by_cat: std::collections::BTreeMap<String, Vec<&crate::marketplace::MarketplacePlugin>> =
+                        std::collections::BTreeMap::new();
+                    for p in &mp.plugins {
+                        let cat = if p.category.is_empty() { "other".into() } else { p.category.clone() };
+                        by_cat.entry(cat).or_default().push(p);
+                    }
+                    for (cat, plugins) in by_cat {
+                        println!("{COLOR_DIM}── {cat} ──{COLOR_RESET}");
+                        for p in plugins {
+                            println!(
+                                "{COLOR_DIM}  {:<24} — {}{COLOR_RESET}",
+                                p.name, p.short_line()
+                            );
+                        }
+                    }
+                    println!(
+                        "{COLOR_DIM}install with: /plugin install <name>   |   detail: /plugin info <name>{COLOR_RESET}"
+                    );
+                }
+                SlashCommand::PluginSearch(query) => {
+                    let mp = crate::marketplace::load();
+                    let hits = mp.search_plugin(&query);
+                    if hits.is_empty() {
+                        println!(
+                            "{COLOR_DIM}no matches for '{query}' — try /plugin marketplace{COLOR_RESET}"
+                        );
+                    } else {
+                        println!("{COLOR_DIM}{} match(es) for '{query}':{COLOR_RESET}", hits.len());
+                        for p in hits {
+                            println!(
+                                "{COLOR_DIM}  {:<24} — {}{COLOR_RESET}",
+                                p.name, p.short_line()
+                            );
+                        }
+                    }
+                }
+                SlashCommand::PluginInfo(name) => {
+                    let mp = crate::marketplace::load();
+                    match mp.find_plugin(&name) {
+                        Some(p) => {
+                            println!("{COLOR_DIM}name:         {}{COLOR_RESET}", p.name);
+                            println!("{COLOR_DIM}description:  {}{COLOR_RESET}", p.description);
+                            if !p.category.is_empty() {
+                                println!("{COLOR_DIM}category:     {}{COLOR_RESET}", p.category);
+                            }
+                            println!(
+                                "{COLOR_DIM}license:      {} ({}){COLOR_RESET}",
+                                p.license, p.license_tier
+                            );
+                            if !p.homepage.is_empty() {
+                                println!("{COLOR_DIM}homepage:     {}{COLOR_RESET}", p.homepage);
+                            }
+                            println!(
+                                "{COLOR_DIM}install with: /plugin install {} (resolves to {}){COLOR_RESET}",
+                                p.name, p.install_url
+                            );
+                        }
+                        None => println!(
+                            "{COLOR_YELLOW}no plugin named '{name}' in marketplace — try /plugin search <query>{COLOR_RESET}"
+                        ),
+                    }
+                }
                 SlashCommand::Team => {
                     let session = "thclaws-team";
                     if crate::team::has_tmux() {
@@ -4337,6 +4720,63 @@ mod tests {
                 git_url: "skill-creator".into(),
                 name: None,
                 project: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_slash_mcp_marketplace() {
+        assert_eq!(
+            parse_slash("/mcp marketplace"),
+            Some(SlashCommand::McpMarketplace { refresh: false })
+        );
+        assert_eq!(
+            parse_slash("/mcp marketplace --refresh"),
+            Some(SlashCommand::McpMarketplace { refresh: true })
+        );
+        assert_eq!(
+            parse_slash("/mcp search weather"),
+            Some(SlashCommand::McpSearch("weather".into()))
+        );
+        assert_eq!(
+            parse_slash("/mcp info weather-mcp"),
+            Some(SlashCommand::McpInfo("weather-mcp".into()))
+        );
+        assert_eq!(
+            parse_slash("/mcp install weather-mcp"),
+            Some(SlashCommand::McpInstall {
+                name: "weather-mcp".into(),
+                user: false,
+            })
+        );
+        assert_eq!(
+            parse_slash("/mcp install --user weather-mcp"),
+            Some(SlashCommand::McpInstall {
+                name: "weather-mcp".into(),
+                user: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_slash_plugin_marketplace() {
+        assert_eq!(
+            parse_slash("/plugin marketplace"),
+            Some(SlashCommand::PluginMarketplace { refresh: false })
+        );
+        assert_eq!(
+            parse_slash("/plugin search code-review"),
+            Some(SlashCommand::PluginSearch("code-review".into()))
+        );
+        assert_eq!(
+            parse_slash("/plugin info code-review"),
+            Some(SlashCommand::PluginInfo("code-review".into()))
+        );
+        // /plugin show <name> still works for installed-plugin detail
+        assert_eq!(
+            parse_slash("/plugin show code-review"),
+            Some(SlashCommand::PluginShow {
+                name: "code-review".into()
             })
         );
     }

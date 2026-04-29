@@ -184,6 +184,7 @@ fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
         ViewEvent::SessionListRefresh(json) => vec![json.clone()],
         ViewEvent::ProviderUpdate(json) => vec![json.clone()],
         ViewEvent::KmsUpdate(json) => vec![json.clone()],
+        ViewEvent::McpUpdate(json) => vec![json.clone()],
         ViewEvent::ModelPickerOpen(json) => vec![json.clone()],
         ViewEvent::ContextWarning { file_size_mb } => vec![serde_json::json!({
             "type": "chat_context_warning",
@@ -379,6 +380,7 @@ fn render_terminal_ansi(ev: &ViewEvent) -> Option<String> {
         ViewEvent::SessionListRefresh(_) => None,
         ViewEvent::ProviderUpdate(_) => None,
         ViewEvent::KmsUpdate(_) => None,
+        ViewEvent::McpUpdate(_) => None,
         ViewEvent::ModelPickerOpen(_) => None,
         ViewEvent::ContextWarning { file_size_mb } => Some(format!(
             "\r\n\x1b[33m[ session {:.1} MB — /fork to continue in a new session with summary ]\x1b[0m\r\n",
@@ -822,6 +824,26 @@ fn instructions_path(scope: &str) -> Option<std::path::PathBuf> {
         "global" => crate::util::home_dir().map(|h| h.join(".config/thclaws/AGENTS.md")),
         _ => std::env::current_dir().ok().map(|d| d.join("AGENTS.md")),
     }
+}
+
+/// Build the `mcp_update` IPC payload: the configured MCP servers for
+/// this session (read fresh from disk so removals via `/mcp remove` are
+/// reflected immediately, not after a restart). Tool count is reported
+/// as 0 for now — the live registry doesn't track which tool came from
+/// which MCP server, so we'd have to hold a separate name-to-server
+/// map to do better. The sidebar today only renders the name, so 0 is
+/// a non-misleading placeholder.
+pub(crate) fn build_mcp_update_payload() -> serde_json::Value {
+    let config = crate::config::AppConfig::load().unwrap_or_default();
+    let servers: Vec<serde_json::Value> = config
+        .mcp_servers
+        .iter()
+        .map(|s| serde_json::json!({"name": s.name, "tools": 0}))
+        .collect();
+    serde_json::json!({
+        "type": "mcp_update",
+        "servers": servers,
+    })
 }
 
 /// Build the `kms_update` IPC payload: every discoverable KMS tagged with

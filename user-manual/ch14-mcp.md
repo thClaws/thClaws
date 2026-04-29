@@ -86,6 +86,47 @@ Remove:
 mcp 'weather' removed from .thclaws/mcp.json (restart to drop active tools)
 ```
 
+## Marketplace
+
+`/mcp marketplace` browses curated MCP servers vetted by the thClaws
+team. Same shape as the skill marketplace — three discovery commands
+plus a name-based install:
+
+```
+❯ /mcp marketplace
+MCP marketplace (baseline 2026-04-29, 1 server(s))
+── data ──
+  weather-mcp              — Global weather (current + forecast) via Open-Meteo
+install with: /mcp install <name>   |   detail: /mcp info <name>
+```
+
+```
+❯ /mcp info weather-mcp
+name:         weather-mcp
+description:  Global weather MCP server — current conditions and...
+transport:    stdio
+command:      python -m thclaws_weather
+source:       https://github.com/thClaws/marketplace.git#main:mcp/weather-mcp
+note:         Run `pip install -e <clone-path>` to install dependencies...
+install with: /mcp install weather-mcp
+```
+
+```
+❯ /mcp install --user weather-mcp
+  cloned https://github.com/thClaws/marketplace.git → ~/.config/thclaws/mcp/weather-mcp
+  registered 'weather-mcp' in ~/.config/thclaws/mcp.json (stdio transport)
+  note: Run `pip install -e <clone-path>` …
+```
+
+For stdio entries with a `post_install_message`, follow that
+instruction (typically `pip install` / `npm install` to fetch runtime
+dependencies) before the server can start. After the install, restart
+or reconnect to load the new tools.
+
+For hosted entries (transport `sse`), no source clone happens — the
+mcp.json entry just points at the hosted URL, and the agent connects
+on next session start.
+
 ## Listing what's available
 
 ```

@@ -154,6 +154,11 @@ pub enum ViewEvent {
     /// Emitted after `/kms new | use | off` so the sidebar reflects
     /// the new state without waiting for the next full session_update.
     KmsUpdate(String),
+    /// Sidebar MCP server list refresh — pre-built JSON payload shaped
+    /// like `{type: "mcp_update", servers: [{name, tools}, ...]}`.
+    /// Emitted after `/mcp add | remove` so the sidebar reflects the
+    /// new state without waiting for the next full session_update.
+    McpUpdate(String),
     /// Open the GUI's interactive model picker — pre-built JSON payload
     /// shaped like `{type: "model_picker_open", provider, current,
     /// models: [{id, context, max_output}, ...]}`. Emitted by the

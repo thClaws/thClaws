@@ -66,6 +66,13 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | `/skill search QUERY` | ค้น marketplace catalog แบบ substring |
 | `/skill info NAME` | รายละเอียด marketplace ของ skill (license, source, install URL) |
 | `/skill install [--user] <name-or-url> [name]` | ติดตั้ง skill — slug ตรง ๆ จะ lookup จาก marketplace, หรือใช้ URL git/`.zip` |
+| `/mcp marketplace [--refresh]` | เปิดดู MCP servers ใน catalog (ทั้งแบบ hosted และ installable) |
+| `/mcp search QUERY` | ค้น MCP marketplace แบบ substring |
+| `/mcp info NAME` | รายละเอียด MCP จาก marketplace (transport, command/url, license) |
+| `/mcp install [--user] NAME` | ติดตั้ง MCP จาก marketplace — clone source (ถ้าจำเป็น) แล้วเขียนเข้า mcp.json |
+| `/plugin marketplace [--refresh]` | เปิดดู plugin catalog |
+| `/plugin search QUERY` | ค้น plugin marketplace แบบ substring |
+| `/plugin info NAME` | รายละเอียด plugin จาก marketplace (`/plugin show NAME` ใช้สำหรับ plugin ที่ติดตั้งแล้ว) |
 | `/<skill-name> [args]` | เรียกใช้ skill ที่ติดตั้งไว้โดยตรง |
 | `/<command-name> [args]` | เรียกใช้ legacy prompt command (template) |
 | `/plugins` | แสดงรายการ plugin ที่ติดตั้งไว้ (ทั้งเปิดและปิด) |

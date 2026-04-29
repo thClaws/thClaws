@@ -2,18 +2,22 @@
   "schema": 1,
   "source": "baseline 2026-04-29",
   "fetched_at": "2026-04-29T00:00:00Z",
-  "skills": [
+  "skills": [],
+  "mcp_servers": [
     {
-      "name": "skill-creator",
-      "short_description": "Create new skills, optimize triggering, run evals",
-      "description": "Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run evals to test a skill, benchmark skill performance with variance analysis, or optimize a skill's description for better triggering accuracy.",
-      "category": "development",
+      "name": "weather-mcp",
+      "short_description": "Global weather (current + forecast) via Open-Meteo",
+      "description": "Global weather MCP server — current conditions and N-day forecast for any city, postcode, or lat/lng worldwide. Powered by Open-Meteo (free, no API key required for normal use). Replaces the US-only NWS-based servers.",
+      "category": "data",
       "license": "Apache-2.0",
       "license_tier": "open",
-      "source_repo": "thClaws/marketplace",
-      "source_path": "skills/skill-creator",
-      "install_url": "https://github.com/thClaws/marketplace.git#main:skills/skill-creator",
-      "homepage": "https://github.com/thClaws/marketplace/tree/main/skills/skill-creator"
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "thclaws_weather"],
+      "install_url": "https://github.com/thClaws/marketplace.git#main:mcp/weather-mcp",
+      "post_install_message": "Run `pip install -e <clone-path>` to install Python dependencies (mcp, httpx) before the server can start.",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/mcp/weather-mcp"
     }
-  ]
+  ],
+  "plugins": []
 }

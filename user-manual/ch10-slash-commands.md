@@ -65,6 +65,13 @@ tried first.
 | `/skill search QUERY` | Substring-search the marketplace catalog |
 | `/skill info NAME` | Marketplace detail for one skill (license, source, install URL) |
 | `/skill install [--user] <name-or-url> [name]` | Install a skill — bare slug → marketplace lookup, otherwise git or `.zip` URL |
+| `/mcp marketplace [--refresh]` | Browse hosted + installable MCP servers in the catalog |
+| `/mcp search QUERY` | Substring-search the MCP marketplace |
+| `/mcp info NAME` | MCP marketplace detail (transport, command/url, license) |
+| `/mcp install [--user] NAME` | Install a marketplace MCP — clones source if needed, writes mcp.json entry |
+| `/plugin marketplace [--refresh]` | Browse the plugin catalog |
+| `/plugin search QUERY` | Substring-search the plugin marketplace |
+| `/plugin info NAME` | Marketplace detail for one plugin (use `/plugin show NAME` for installed) |
 | `/<skill-name> [args]` | Invoke an installed skill directly |
 | `/<command-name> [args]` | Invoke a legacy prompt command (template) |
 | `/plugins` | List installed plugins (enabled + disabled) |
