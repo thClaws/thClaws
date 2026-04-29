@@ -63,6 +63,12 @@ csv = "1"
 # Excel-typed form (Number / String / Bool / DateTime) and serialized
 # to CSV or JSON depending on the tool's `format` argument.
 calamine = "0.34"
+# XLSX read+modify+write used by XlsxEdit. Purpose-built for round-trip
+# format preservation: load a file, mutate specific cells / sheets, save
+# without touching unrelated formatting (the XLSX skill's headline
+# requirement). rust_xlsxwriter is write-only and would reset every
+# style on load → unsuitable for edits.
+umya-spreadsheet = "2"
 tao = { version = "0.34", optional = true }
 wry = { version = "0.54", optional = true }
 # Markdown → HTML for the Files-tab preview. GFM tables, strikethrough,
