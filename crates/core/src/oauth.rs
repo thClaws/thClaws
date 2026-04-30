@@ -618,8 +618,10 @@ fn open_browser(url: &str) {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("cmd")
             .args(["/c", "start", url])
+            .creation_flags(0x08000000)
             .spawn();
     }
 }
