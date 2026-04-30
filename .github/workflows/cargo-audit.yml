@@ -3,16 +3,8 @@ name: cargo-audit
 on:
   push:
     branches: [main]
-    paths:
-      - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
-      - '.github/workflows/cargo-audit.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
-      - '.github/workflows/cargo-audit.yml'
   schedule:
     - cron: '0 5 * * 1'  # Mondays 05:00 UTC
 
