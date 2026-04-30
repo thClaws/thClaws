@@ -59,9 +59,7 @@ impl GitInfo {
 
             cmd.args(args).current_dir(cwd);
 
-            let out = cmd
-                .output()
-                .ok()?;
+            let out = cmd.output().ok()?;
 
             if !out.status.success() {
                 return None;
