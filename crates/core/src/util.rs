@@ -3,6 +3,10 @@
 
 use std::path::PathBuf;
 
+// for Windows creation flag to hide the console window
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 /// The current user's home directory, in a form that works on both
 /// Unix and Windows.
 ///
@@ -121,6 +125,11 @@ pub fn shell_command_sync(command: &str) -> std::process::Command {
     let (shell, flag) = shell_invocation();
     let mut c = std::process::Command::new(shell);
     c.arg(flag).arg(command);
+
+    // for Windows creation flag to hide the console window
+    #[cfg(target_os = "windows")]
+    c.creation_flags(0x08000000);
+
     c
 }
 
@@ -130,6 +139,11 @@ pub fn shell_command_async(command: &str) -> tokio::process::Command {
     let (shell, flag) = shell_invocation();
     let mut c = tokio::process::Command::new(shell);
     c.arg(flag).arg(command);
+
+    // for Windows creation flag to hide the console window
+    #[cfg(target_os = "windows")]
+    c.creation_flags(0x08000000);
+
     c
 }
 
