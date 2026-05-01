@@ -203,6 +203,12 @@ pub enum ViewEvent {
         content: serde_json::Value,
         is_error: bool,
     },
+    /// Worker → event-loop signal: the user invoked `/quit` in the
+    /// chat input, the confirmation dialog was accepted, and the GUI
+    /// should now shut down. The translator forwards this to a
+    /// `UserEvent::QuitRequested` so the tao loop runs the same
+    /// save-and-exit path as the window-close button. Issue #52.
+    QuitRequested,
 }
 
 #[derive(Debug, Clone)]

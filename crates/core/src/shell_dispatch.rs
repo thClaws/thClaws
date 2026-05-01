@@ -37,7 +37,29 @@ pub async fn dispatch(
         // ─── read-only status ───────────────────────────────────────
         SlashCommand::Help => emit(events_tx, render_help().to_string()),
         SlashCommand::Quit => {
-            emit(events_tx, "Use ⌘Q (or close the window) to quit.".into());
+            // CLI handles `/quit` via an early break in the REPL loop
+            // and never reaches this dispatch (repl.rs `SlashCommand::
+            // Quit => break`). What lands here is the GUI's chat-input
+            // path: pop a native confirm dialog, then signal the event
+            // loop on accept. Cancel leaves the session running. #52.
+            #[cfg(feature = "gui")]
+            {
+                let confirmed = tokio::task::spawn_blocking(|| {
+                    crate::gui::native_confirm("Quit thclaws", "Quit?", "OK", "Cancel")
+                })
+                .await
+                .unwrap_or(false);
+                if confirmed {
+                    let _ = events_tx.send(ViewEvent::QuitRequested);
+                }
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                // Defensive — no GUI feature means no chat input route
+                // either, but if a future caller wires this up the
+                // user gets a clear next-step instead of silence.
+                emit(events_tx, "Use Ctrl+C to quit.".into());
+            }
         }
         SlashCommand::Version => emit(events_tx, crate::version::one_line()),
         SlashCommand::Cwd => {

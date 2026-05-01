@@ -95,6 +95,14 @@ fn spawn_event_translator(handle: &SharedSessionHandle, proxy: EventLoopProxy<Us
             loop {
                 match rx.recv().await {
                     Ok(ev) => {
+                        // /quit confirmed by the worker — forward to
+                        // the tao event loop so the window runs the
+                        // same save-and-exit path as the close button
+                        // (#52). No chat / terminal rendering needed.
+                        if matches!(ev, ViewEvent::QuitRequested) {
+                            let _ = proxy.send_event(UserEvent::QuitRequested);
+                            continue;
+                        }
                         for dispatch in render_chat_dispatches(&ev) {
                             let _ = proxy.send_event(UserEvent::Dispatch(dispatch));
                         }
@@ -227,6 +235,10 @@ fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
             "isError": is_error,
         })
         .to_string()],
+        // QuitRequested is intercepted by the translator before this
+        // function is called — see the `if matches!(...)` early-return
+        // above. Listed here for match exhaustiveness only.
+        ViewEvent::QuitRequested => vec![],
     }
 }
 
@@ -523,6 +535,10 @@ fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> Opti
         // them — they're consumed by the chat-tab translator above
         // and forwarded to the iframe's JSON-RPC reply path.
         ViewEvent::McpAppCallToolResult { .. } => None,
+        // QuitRequested is intercepted by the translator early-return
+        // and forwarded to the tao loop; the terminal tab has nothing
+        // to render for it.
+        ViewEvent::QuitRequested => None,
     };
 
     // Non-tool event finished. If we had a pending tool-result line
@@ -849,7 +865,12 @@ fn ospath(path: &str) -> String {
 /// Windows MessageBox enforces "Yes"/"No" labels; `yes_label`/`no_label`
 /// are only honoured on macOS and Linux, with the message text carrying
 /// the intent on Windows.
-fn native_confirm(title: &str, message: &str, yes_label: &str, no_label: &str) -> bool {
+pub(crate) fn native_confirm(
+    title: &str,
+    message: &str,
+    yes_label: &str,
+    no_label: &str,
+) -> bool {
     #[cfg(target_os = "macos")]
     {
         let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
