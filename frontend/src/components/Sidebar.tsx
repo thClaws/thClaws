@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Plus } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
+import { ModelPickerDropdown } from "./ModelPickerDropdown";
 
 type SessionInfo = { id: string; model: string; messages: number; title?: string | null };
 type KmsInfo = { name: string; scope: "user" | "project"; active: boolean };
@@ -52,6 +53,9 @@ export function Sidebar() {
   const [activeProvider, setActiveProvider] = useState("anthropic");
   const [activeModel, setActiveModel] = useState("claude-sonnet-4-5");
   const [providerReady, setProviderReady] = useState(true);
+  // Inline model picker dropdown anchored to the Provider section.
+  // null means closed; opens on click of the active model row. #49.
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [sso, setSso] = useState<SsoState>({ enabled: false, logged_in: false });
   const [mcpServers, setMcpServers] = useState<
     { name: string; tools: number }[]
@@ -162,35 +166,64 @@ export function Sidebar() {
     >
       {/* Provider */}
       <Section title="Provider">
-        <div className="px-2 py-1">
-          <div className="flex items-center gap-1.5">
-            <span
-              className="w-1.5 h-1.5 rounded-full"
-              style={{
-                background: providerReady
-                  ? "var(--accent)"
-                  : "var(--danger, #e06c75)",
-              }}
-              title={providerReady ? "Provider ready" : "No API key configured"}
-            />
-            <span
-              style={{
-                color: providerReady
-                  ? "var(--text-primary)"
-                  : "var(--text-secondary)",
-                textDecoration: providerReady ? "none" : "line-through",
-              }}
-              title={providerReady ? undefined : "No API key — open the gear → Provider API keys"}
-            >
-              {activeProvider}
-            </span>
-          </div>
-          <div
-            className="ml-3 font-mono"
-            style={{ color: "var(--text-secondary)", fontSize: "10px" }}
+        <div className="px-2 py-1 relative">
+          <button
+            type="button"
+            onClick={() => setModelPickerOpen((v) => !v)}
+            className="w-full text-left rounded"
+            style={{
+              background: modelPickerOpen ? "var(--bg-tertiary)" : "transparent",
+              border: "1px solid transparent",
+              cursor: "pointer",
+              padding: "2px 4px",
+            }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.background = "var(--bg-tertiary)")
+            }
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.background = modelPickerOpen
+                ? "var(--bg-tertiary)"
+                : "transparent")
+            }
+            title="Click to switch model"
           >
-            {activeModel}
-          </div>
+            <div className="flex items-center gap-1.5">
+              <span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{
+                  background: providerReady
+                    ? "var(--accent)"
+                    : "var(--danger, #e06c75)",
+                }}
+              />
+              <span
+                style={{
+                  color: providerReady
+                    ? "var(--text-primary)"
+                    : "var(--text-secondary)",
+                  textDecoration: providerReady ? "none" : "line-through",
+                }}
+              >
+                {activeProvider}
+              </span>
+              <span
+                className="ml-auto"
+                style={{
+                  color: "var(--text-secondary)",
+                  fontSize: "10px",
+                  opacity: 0.7,
+                }}
+              >
+                ▾
+              </span>
+            </div>
+            <div
+              className="ml-3 font-mono truncate"
+              style={{ color: "var(--text-secondary)", fontSize: "10px" }}
+            >
+              {activeModel}
+            </div>
+          </button>
           {!providerReady && (
             <div
               className="ml-3 mt-1"
@@ -198,6 +231,12 @@ export function Sidebar() {
             >
               no API key — set one in Settings
             </div>
+          )}
+          {modelPickerOpen && (
+            <ModelPickerDropdown
+              current={activeModel}
+              onClose={() => setModelPickerOpen(false)}
+            />
           )}
         </div>
       </Section>

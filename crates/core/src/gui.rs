@@ -1150,6 +1150,70 @@ fn open_external_url(url: &str) {
     }
 }
 
+/// Assemble the cross-provider model list payload for the sidebar's
+/// inline picker dropdown (#49). Catalogue rows for every known
+/// provider, plus a live Ollama probe so models added via `ollama pull`
+/// after launch are visible without restart. The Ollama probe uses a
+/// short timeout — failure just falls back to whatever rows are in the
+/// baseline catalogue.
+async fn build_all_models_payload() -> String {
+    use crate::providers::{Provider, ProviderKind};
+    let cat = crate::model_catalogue::EffectiveCatalogue::load();
+
+    // Live Ollama models (best-effort) — merged into the ollama group
+    // alongside catalogue rows. dedup on `id` so cached entries don't
+    // double up with live ones.
+    let ollama_live: Vec<String> = {
+        let base = std::env::var("OLLAMA_BASE_URL")
+            .unwrap_or_else(|_| crate::providers::ollama::DEFAULT_BASE_URL.to_string());
+        let provider = crate::providers::ollama::OllamaProvider::new().with_base_url(base);
+        // tokio timeout — short so an unreachable host doesn't stall
+        // the dropdown render.
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            provider.list_models(),
+        )
+        .await
+        {
+            Ok(Ok(models)) => models.into_iter().map(|m| m.id).collect(),
+            _ => Vec::new(),
+        }
+    };
+
+    let mut groups: Vec<serde_json::Value> = Vec::new();
+    for kind in ProviderKind::ALL {
+        let name = kind.name();
+        let mut model_ids: std::collections::BTreeMap<String, Option<u32>> =
+            std::collections::BTreeMap::new();
+        for (id, entry) in cat.list_models_for_provider(name) {
+            model_ids.insert(id, entry.context);
+        }
+        if matches!(kind, ProviderKind::Ollama) {
+            for id in &ollama_live {
+                model_ids.entry(id.clone()).or_insert(None);
+            }
+        }
+        if model_ids.is_empty() {
+            continue;
+        }
+        let model_rows: Vec<serde_json::Value> = model_ids
+            .into_iter()
+            .map(|(id, ctx)| serde_json::json!({ "id": id, "context": ctx }))
+            .collect();
+        groups.push(serde_json::json!({
+            "provider": name,
+            "models": model_rows,
+        }));
+    }
+
+    serde_json::json!({
+        "type": "all_models_list",
+        "groups": groups,
+        "ollama_reachable": !ollama_live.is_empty(),
+    })
+    .to_string()
+}
+
 fn request_gui_shutdown(shared: &SharedSessionHandle, control_flow: &mut ControlFlow) {
     let _ = shared.input_tx.send(ShellInput::SaveAndQuit);
     // Kill any spawned teammate processes.
@@ -1450,6 +1514,18 @@ pub fn run_gui() {
                         ));
                         let _ = shared_for_ipc.input_tx.send(ShellInput::ReloadConfig);
                     }
+                }
+                "request_all_models" => {
+                    // Sidebar's inline model picker dropdown asking for
+                    // the cross-provider model list. Catalogue rows for
+                    // every known provider plus a live Ollama probe so
+                    // local models the user just `ollama pull`-ed show
+                    // up without restart. Issue #49.
+                    let proxy = proxy_for_ipc.clone();
+                    tokio::spawn(async move {
+                        let payload = build_all_models_payload().await;
+                        let _ = proxy.send_event(UserEvent::SessionLoaded(payload));
+                    });
                 }
                 "ask_user_response" => {
                     let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
