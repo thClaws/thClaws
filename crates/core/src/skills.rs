@@ -41,8 +41,24 @@ pub struct SkillStore {
 }
 
 impl SkillStore {
-    /// Discover skills from all standard locations.
+    /// Discover skills from all standard locations **plus** any
+    /// directories contributed by currently-installed plugins. This
+    /// is the right default for runtime callers — every site that
+    /// rebuilds the store after a `/skill install` or `/plugin
+    /// install` should pick up plugin-contributed skills automatically.
+    ///
+    /// Use [`Self::discover_with_extra`] directly when you need to
+    /// supply the plugin dir list yourself (e.g. at startup, before
+    /// the plugins module is fully wired) or [`Self::discover_no_plugins`]
+    /// when you explicitly want only filesystem-discovered skills.
     pub fn discover() -> Self {
+        Self::discover_with_extra(&crate::plugins::plugin_skill_dirs())
+    }
+
+    /// Discover only filesystem-resident skills, excluding plugin
+    /// contributions. Used by tests and by any caller that needs a
+    /// stable view independent of which plugins happen to be installed.
+    pub fn discover_no_plugins() -> Self {
         Self::discover_with_extra(&[])
     }
 

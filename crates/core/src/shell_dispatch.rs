@@ -37,7 +37,29 @@ pub async fn dispatch(
         // ─── read-only status ───────────────────────────────────────
         SlashCommand::Help => emit(events_tx, render_help().to_string()),
         SlashCommand::Quit => {
-            emit(events_tx, "Use ⌘Q (or close the window) to quit.".into());
+            // CLI handles `/quit` via an early break in the REPL loop
+            // and never reaches this dispatch (repl.rs `SlashCommand::
+            // Quit => break`). What lands here is the GUI's chat-input
+            // path: pop a native confirm dialog, then signal the event
+            // loop on accept. Cancel leaves the session running. #52.
+            #[cfg(feature = "gui")]
+            {
+                let confirmed = tokio::task::spawn_blocking(|| {
+                    crate::gui::native_confirm("Quit thclaws", "Quit?", "OK", "Cancel")
+                })
+                .await
+                .unwrap_or(false);
+                if confirmed {
+                    let _ = events_tx.send(ViewEvent::QuitRequested);
+                }
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                // Defensive — no GUI feature means no chat input route
+                // either, but if a future caller wires this up the
+                // user gets a clear next-step instead of silence.
+                emit(events_tx, "Use Ctrl+C to quit.".into());
+            }
         }
         SlashCommand::Version => emit(events_tx, crate::version::one_line()),
         SlashCommand::Cwd => {
@@ -987,6 +1009,189 @@ pub async fn dispatch(
                 ),
             }
         }
+        SlashCommand::McpMarketplace { refresh } => {
+            if refresh {
+                if let Err(e) = crate::marketplace::refresh_from_remote().await {
+                    emit(events_tx, format!("refresh failed: {e}"));
+                }
+            }
+            let mp = crate::marketplace::load();
+            let mut out = format!(
+                "MCP marketplace ({}, {} server(s))\n",
+                mp.source,
+                mp.mcp_servers.len()
+            );
+            let mut by_cat: std::collections::BTreeMap<
+                String,
+                Vec<&crate::marketplace::MarketplaceMcpServer>,
+            > = std::collections::BTreeMap::new();
+            for s in &mp.mcp_servers {
+                let cat = if s.category.is_empty() {
+                    "other".into()
+                } else {
+                    s.category.clone()
+                };
+                by_cat.entry(cat).or_default().push(s);
+            }
+            for (cat, servers) in by_cat {
+                out.push_str(&format!("── {cat} ──\n"));
+                for s in servers {
+                    let tport = if s.transport == "sse" {
+                        " [hosted]"
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!("  {:<24}{tport} — {}\n", s.name, s.short_line()));
+                }
+            }
+            out.push_str("install with: /mcp install <name>   |   detail: /mcp info <name>");
+            emit(events_tx, out);
+        }
+        SlashCommand::McpSearch(query) => {
+            let mp = crate::marketplace::load();
+            let hits = mp.search_mcp(&query);
+            if hits.is_empty() {
+                emit(
+                    events_tx,
+                    format!("no matches for '{query}' — try /mcp marketplace"),
+                );
+            } else {
+                let mut out = format!("{} match(es) for '{query}':\n", hits.len());
+                for s in hits {
+                    out.push_str(&format!("  {:<24} — {}\n", s.name, s.short_line()));
+                }
+                emit(events_tx, out);
+            }
+        }
+        SlashCommand::McpInfo(name) => {
+            let mp = crate::marketplace::load();
+            match mp.find_mcp(&name) {
+                Some(s) => {
+                    let mut out = format!("name:         {}\n", s.name);
+                    out.push_str(&format!("description:  {}\n", s.description));
+                    if !s.category.is_empty() {
+                        out.push_str(&format!("category:     {}\n", s.category));
+                    }
+                    out.push_str(&format!(
+                        "license:      {} ({})\n",
+                        s.license, s.license_tier
+                    ));
+                    out.push_str(&format!("transport:    {}\n", s.transport));
+                    if s.transport == "stdio" && !s.command.is_empty() {
+                        let argv = if s.args.is_empty() {
+                            s.command.clone()
+                        } else {
+                            format!("{} {}", s.command, s.args.join(" "))
+                        };
+                        out.push_str(&format!("command:      {argv}\n"));
+                    }
+                    if s.transport == "sse" && !s.url.is_empty() {
+                        out.push_str(&format!("url:          {}\n", s.url));
+                    }
+                    if let Some(src) = &s.install_url {
+                        out.push_str(&format!("source:       {src}\n"));
+                    }
+                    if !s.homepage.is_empty() {
+                        out.push_str(&format!("homepage:     {}\n", s.homepage));
+                    }
+                    if let Some(msg) = &s.post_install_message {
+                        out.push_str(&format!("note:         {msg}\n"));
+                    }
+                    out.push_str(&format!("install with: /mcp install {}", s.name));
+                    emit(events_tx, out);
+                }
+                None => emit(
+                    events_tx,
+                    format!("no MCP named '{name}' in marketplace — try /mcp search <query>"),
+                ),
+            }
+        }
+        SlashCommand::McpInstall { name, user } => {
+            match crate::repl::install_mcp_from_marketplace(&name, user).await {
+                Ok(report) => {
+                    emit(events_tx, report.join("\n"));
+                    broadcast_mcp_update(events_tx);
+                }
+                Err(e) => emit(events_tx, format!("mcp install failed: {e}")),
+            }
+        }
+        SlashCommand::PluginMarketplace { refresh } => {
+            if refresh {
+                if let Err(e) = crate::marketplace::refresh_from_remote().await {
+                    emit(events_tx, format!("refresh failed: {e}"));
+                }
+            }
+            let mp = crate::marketplace::load();
+            let mut out = format!(
+                "plugin marketplace ({}, {} plugin(s))\n",
+                mp.source,
+                mp.plugins.len()
+            );
+            let mut by_cat: std::collections::BTreeMap<
+                String,
+                Vec<&crate::marketplace::MarketplacePlugin>,
+            > = std::collections::BTreeMap::new();
+            for p in &mp.plugins {
+                let cat = if p.category.is_empty() {
+                    "other".into()
+                } else {
+                    p.category.clone()
+                };
+                by_cat.entry(cat).or_default().push(p);
+            }
+            for (cat, plugins) in by_cat {
+                out.push_str(&format!("── {cat} ──\n"));
+                for p in plugins {
+                    out.push_str(&format!("  {:<24} — {}\n", p.name, p.short_line()));
+                }
+            }
+            out.push_str("install with: /plugin install <name>   |   detail: /plugin info <name>");
+            emit(events_tx, out);
+        }
+        SlashCommand::PluginSearch(query) => {
+            let mp = crate::marketplace::load();
+            let hits = mp.search_plugin(&query);
+            if hits.is_empty() {
+                emit(
+                    events_tx,
+                    format!("no matches for '{query}' — try /plugin marketplace"),
+                );
+            } else {
+                let mut out = format!("{} match(es) for '{query}':\n", hits.len());
+                for p in hits {
+                    out.push_str(&format!("  {:<24} — {}\n", p.name, p.short_line()));
+                }
+                emit(events_tx, out);
+            }
+        }
+        SlashCommand::PluginInfo(name) => {
+            let mp = crate::marketplace::load();
+            match mp.find_plugin(&name) {
+                Some(p) => {
+                    let mut out = format!("name:         {}\n", p.name);
+                    out.push_str(&format!("description:  {}\n", p.description));
+                    if !p.category.is_empty() {
+                        out.push_str(&format!("category:     {}\n", p.category));
+                    }
+                    out.push_str(&format!(
+                        "license:      {} ({})\n",
+                        p.license, p.license_tier
+                    ));
+                    if !p.homepage.is_empty() {
+                        out.push_str(&format!("homepage:     {}\n", p.homepage));
+                    }
+                    out.push_str(&format!(
+                        "install with: /plugin install {} (resolves to {})",
+                        p.name, p.install_url
+                    ));
+                    emit(events_tx, out);
+                }
+                None => emit(
+                    events_tx,
+                    format!("no plugin named '{name}' in marketplace — try /plugin search <query>"),
+                ),
+            }
+        }
 
         // ─── knowledge bases ────────────────────────────────────────
         SlashCommand::Kms => {
@@ -1172,6 +1377,9 @@ pub async fn dispatch(
             }
         }
         SlashCommand::McpAdd { name, url, user } => {
+            // Hand-add is untrusted by default; enabling widget UI
+            // requires the user to edit mcp.json and set
+            // `"trusted": true` explicitly.
             let cfg = crate::mcp::McpServerConfig {
                 name: name.clone(),
                 transport: "http".into(),
@@ -1180,6 +1388,7 @@ pub async fn dispatch(
                 env: Default::default(),
                 url,
                 headers: Default::default(),
+                trusted: false,
             };
             // 1. Persist to disk (so restarts keep the server).
             let saved_to = match crate::config::save_mcp_server(&cfg, user) {
@@ -1219,6 +1428,7 @@ pub async fn dispatch(
                                 names.join(", "),
                             ),
                         );
+                        broadcast_mcp_update(events_tx);
                     }
                     Err(e) => emit(
                         events_tx,
@@ -1252,6 +1462,11 @@ pub async fn dispatch(
                             p.display()
                         ),
                     );
+                    // Sidebar shows the new (shorter) list immediately —
+                    // the dropped tools won't disappear until restart but
+                    // at least the entry doesn't linger after the user
+                    // explicitly removed it.
+                    broadcast_mcp_update(events_tx);
                 }
                 Ok((false, p)) => emit(
                     events_tx,
@@ -1288,7 +1503,13 @@ pub async fn dispatch(
             }
         }
         SlashCommand::PluginInstall { url, user } => {
-            match crate::plugins::install(&url, user).await {
+            // Resolve marketplace slug → install_url (no-op for URLs).
+            let (effective_url, abort_msg) = crate::repl::resolve_plugin_install_target(&url);
+            if let Some(msg) = abort_msg {
+                emit(events_tx, msg);
+                return;
+            }
+            match crate::plugins::install(&effective_url, user).await {
                 Ok(plugin) => {
                     // Refresh the SkillTool store so plugin-contributed
                     // skills are callable in this session. Plugin-
@@ -1741,4 +1962,13 @@ fn resolve_skill_install_target_gui(
 fn broadcast_kms_update(events_tx: &broadcast::Sender<ViewEvent>) {
     let payload = crate::gui::build_kms_update_payload();
     let _ = events_tx.send(ViewEvent::KmsUpdate(payload.to_string()));
+}
+
+/// Same shape as [`broadcast_kms_update`], for the MCP-server list. Read
+/// fresh from disk by `build_mcp_update_payload` so user-scope removals
+/// (which the live tool registry can't surgically reflect) at least
+/// disappear from the sidebar immediately.
+fn broadcast_mcp_update(events_tx: &broadcast::Sender<ViewEvent>) {
+    let payload = crate::gui::build_mcp_update_payload();
+    let _ = events_tx.send(ViewEvent::McpUpdate(payload.to_string()));
 }

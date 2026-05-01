@@ -123,6 +123,18 @@ pub enum ShellInput {
     /// worker keeps holding the stale one — the exact mismatch users
     /// see as "sidebar says openai but error mentions anthropic."
     ReloadConfig,
+    /// Widget-initiated tool call from an embedded MCP App. The
+    /// originating widget called `app.callServerTool({name, arguments})`;
+    /// we look up the qualified tool in the registry, run it, and
+    /// broadcast a [`ViewEvent::McpAppCallToolResult`] keyed by the
+    /// same `request_id` so the frontend can route the response back
+    /// to the iframe. No approval gate — the trust check already
+    /// happened at the marketplace install boundary (see dev-log/112).
+    McpAppCallTool {
+        request_id: String,
+        qualified_name: String,
+        arguments: serde_json::Value,
+    },
 }
 
 /// What both tabs render. Each variant maps to a UI affordance:
@@ -138,6 +150,11 @@ pub enum ViewEvent {
     ToolCallResult {
         name: String,
         output: String,
+        /// MCP-Apps widget to embed inline alongside this tool's
+        /// result. Carried verbatim from [`crate::agent::AgentEvent`]
+        /// so the frontend translator can ship it on the
+        /// `chat_tool_result` IPC envelope.
+        ui_resource: Option<crate::tools::UiResource>,
     },
     SlashOutput(String),
     TurnDone,
@@ -154,6 +171,11 @@ pub enum ViewEvent {
     /// Emitted after `/kms new | use | off` so the sidebar reflects
     /// the new state without waiting for the next full session_update.
     KmsUpdate(String),
+    /// Sidebar MCP server list refresh — pre-built JSON payload shaped
+    /// like `{type: "mcp_update", servers: [{name, tools}, ...]}`.
+    /// Emitted after `/mcp add | remove` so the sidebar reflects the
+    /// new state without waiting for the next full session_update.
+    McpUpdate(String),
     /// Open the GUI's interactive model picker — pre-built JSON payload
     /// shaped like `{type: "model_picker_open", provider, current,
     /// models: [{id, context, max_output}, ...]}`. Emitted by the
@@ -168,6 +190,25 @@ pub enum ViewEvent {
         file_size_mb: f64,
     },
     ErrorText(String),
+    /// Result of a widget-initiated tool call. Pairs with a
+    /// [`ShellInput::McpAppCallTool`] of the same `request_id`. The
+    /// event translator converts this into an
+    /// `mcp_call_tool_result` IPC envelope so the frontend's pending
+    /// promise can resolve and the iframe gets its JSON-RPC reply.
+    McpAppCallToolResult {
+        request_id: String,
+        /// MCP `CallToolResult.content` — array of content blocks
+        /// shaped per spec (`{type:"text", text}`, etc.). Carried
+        /// as raw JSON so the wire format is opaque to Rust.
+        content: serde_json::Value,
+        is_error: bool,
+    },
+    /// Worker → event-loop signal: the user invoked `/quit` in the
+    /// chat input, the confirmation dialog was accepted, and the GUI
+    /// should now shut down. The translator forwards this to a
+    /// `UserEvent::QuitRequested` so the tao loop runs the same
+    /// save-and-exit path as the window-close button. Issue #52.
+    QuitRequested,
 }
 
 #[derive(Debug, Clone)]
@@ -826,6 +867,45 @@ async fn run_worker(
                     "[mcp] '{server_name}' failed to start: {error}"
                 )));
             }
+            ShellInput::McpAppCallTool {
+                request_id,
+                qualified_name,
+                arguments,
+            } => {
+                // Widget asked us to invoke a tool on its originating
+                // MCP server (app.callServerTool). Trust gate already
+                // applied when the widget was rendered (only trusted
+                // servers ship a `ui_resource` in the first place);
+                // direct invoke here.
+                let tool = state.tool_registry.get(&qualified_name);
+                let (content, is_error) = match tool {
+                    Some(t) => match t.call_multimodal(arguments).await {
+                        Ok(result) => {
+                            // Convert ToolResultContent → MCP
+                            // CallToolResult.content shape. Phase 1
+                            // is text-only — image blocks degrade to
+                            // their text summary via to_text. Pinn.ai
+                            // image2image returns a URL string, so
+                            // text-only is sufficient.
+                            let text = result.to_text();
+                            (serde_json::json!([{ "type": "text", "text": text }]), false)
+                        }
+                        Err(e) => (
+                            serde_json::json!([{ "type": "text", "text": format!("error: {e}") }]),
+                            true,
+                        ),
+                    },
+                    None => (
+                        serde_json::json!([{ "type": "text", "text": format!("unknown tool: {qualified_name}") }]),
+                        true,
+                    ),
+                };
+                let _ = events_tx.send(ViewEvent::McpAppCallToolResult {
+                    request_id,
+                    content,
+                    is_error,
+                });
+            }
             ShellInput::ReloadConfig => {
                 // Pull the on-disk settings (api_key_set may have just
                 // auto-switched the model in `.thclaws/settings.json`)
@@ -990,6 +1070,45 @@ async fn handle_line(
     );
 
     if trimmed.starts_with('/') {
+        // `/<skill-name> [args]` shortcut — same UX as the CLI repl
+        // (see repl.rs:2406). If `parse_slash` returns Unknown AND the
+        // first word matches an installed skill name, rewrite to a
+        // normal user prompt and fall through to the regular agent
+        // pipeline; the model then calls `Skill(name: …)` to load the
+        // skill content. Without this, every plugin-contributed skill
+        // surfaced as "unknown command" in the GUI even when the
+        // skill was loaded into the registry.
+        if let Some(crate::repl::SlashCommand::Unknown(what)) = crate::repl::parse_slash(trimmed) {
+            let word = what.split_whitespace().next().unwrap_or("").to_string();
+            let skill_present = state
+                .skill_store
+                .lock()
+                .ok()
+                .map(|s| s.skills.contains_key(&word))
+                .unwrap_or(false);
+            if skill_present {
+                let body = trimmed.strip_prefix('/').unwrap_or("").trim_start();
+                let args = body.strip_prefix(&word).unwrap_or("").trim();
+                let args_note = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" The user's task for this skill: {args}")
+                };
+                let rewritten = format!(
+                    "The user ran the `/{word}` slash command. Call `Skill(name: \"{word}\")` right away and follow the instructions it returns.{args_note}"
+                );
+                // Fall through to the regular agent pipeline below
+                // with the rewritten prompt instead of dispatching as
+                // a slash command.
+                emit_skill_resolution_hint(events_tx, &word);
+                let stream = Box::pin(state.agent.run_turn(rewritten));
+                let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
+                let _ = lead_mb.write_status("lead", "working", None);
+                drive_turn_stream(stream, state, events_tx, cancel, &lead_mb).await;
+                return;
+            }
+        }
+
         crate::shell_dispatch::dispatch(trimmed, state, events_tx).await;
         let _ = events_tx.send(ViewEvent::TurnDone);
         return;
@@ -1111,10 +1230,19 @@ async fn drive_turn_stream(
                 );
                 let _ = events_tx.send(ViewEvent::ToolCallStart { name, label });
             }
-            Ok(AgentEvent::ToolCallResult { name, output, .. }) => {
+            Ok(AgentEvent::ToolCallResult {
+                name,
+                output,
+                ui_resource,
+                ..
+            }) => {
                 let out = output.unwrap_or_else(|e| e);
                 write_lead_log(&state.lead_log, "\x1b[90m✓\x1b[0m\n\x1b[32m");
-                let _ = events_tx.send(ViewEvent::ToolCallResult { name, output: out });
+                let _ = events_tx.send(ViewEvent::ToolCallResult {
+                    name,
+                    output: out,
+                    ui_resource,
+                });
             }
             Ok(AgentEvent::Done { usage, .. }) => {
                 write_lead_log(&state.lead_log, "\x1b[0m\n");
@@ -1148,6 +1276,14 @@ async fn drive_turn_stream(
             _ => {}
         }
     }
+}
+
+/// Surface the `/skill → Skill(name: …)` resolution to the user the
+/// same way the CLI does, so it's clear which skill is about to fire.
+fn emit_skill_resolution_hint(events_tx: &broadcast::Sender<ViewEvent>, name: &str) {
+    let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+        "(/{name} → Skill(name: \"{name}\"))"
+    )));
 }
 
 fn write_lead_log(log: &std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>, s: &str) {
@@ -1238,10 +1374,19 @@ async fn handle_team_messages(
                 );
                 let _ = events_tx.send(ViewEvent::ToolCallStart { name, label });
             }
-            Ok(AgentEvent::ToolCallResult { name, output, .. }) => {
+            Ok(AgentEvent::ToolCallResult {
+                name,
+                output,
+                ui_resource,
+                ..
+            }) => {
                 let out = output.unwrap_or_else(|e| e);
                 write_lead_log(&state.lead_log, "\x1b[90m✓\x1b[0m\n\x1b[32m");
-                let _ = events_tx.send(ViewEvent::ToolCallResult { name, output: out });
+                let _ = events_tx.send(ViewEvent::ToolCallResult {
+                    name,
+                    output: out,
+                    ui_resource,
+                });
             }
             Ok(AgentEvent::Done { usage, .. }) => {
                 write_lead_log(&state.lead_log, "\x1b[0m\n");
@@ -1431,6 +1576,20 @@ fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
     out
 }
 
+/// Squash any control char (newline, carriage return, tab, ESC, etc.)
+/// to a single space so a multi-line tool argument renders as one
+/// line in the terminal. Keeps printable Unicode (Thai, emoji, etc.)
+/// intact — only ASCII control chars get replaced. Then collapses
+/// runs of whitespace so a sanitized multi-line string doesn't read
+/// as `Line 1   Line 2  ` after stripping.
+fn sanitize_label_field(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn format_tool_label(name: &str, input: &serde_json::Value) -> String {
     let detail = match name {
         "Skill" => input
@@ -1442,8 +1601,19 @@ fn format_tool_label(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(|a| format!("(agent={a})")),
         "Bash" => input.get("command").and_then(|v| v.as_str()).map(|c| {
-            let first: String = c.chars().take(40).collect();
-            format!("({first}{})", if c.chars().count() > 40 { "…" } else { "" })
+            // Same control-char strip as AskUserQuestion — bash
+            // commands often contain heredocs (`<<'PY' ... PY`) whose
+            // newlines break the single-line label.
+            let cleaned = sanitize_label_field(c);
+            let first: String = cleaned.chars().take(40).collect();
+            format!(
+                "({first}{})",
+                if cleaned.chars().count() > 40 {
+                    "…"
+                } else {
+                    ""
+                }
+            )
         }),
         "Read" | "Write" | "Edit" => input
             .get("path")
@@ -1462,10 +1632,18 @@ fn format_tool_label(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(|q| format!("({q})")),
         "AskUserQuestion" => input.get("question").and_then(|v| v.as_str()).map(|q| {
-            let first: String = q.chars().take(60).collect();
+            // Strip newlines / control chars first — agents often pass
+            // multi-line prompts here, and the raw text breaks the
+            // single-line tool label in xterm.
+            let cleaned = sanitize_label_field(q);
+            let first: String = cleaned.chars().take(60).collect();
             format!(
                 "({first}{})",
-                if q.chars().count() > 60 { "..." } else { "" }
+                if cleaned.chars().count() > 60 {
+                    "..."
+                } else {
+                    ""
+                }
             )
         }),
         _ => None,

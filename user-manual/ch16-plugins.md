@@ -56,13 +56,55 @@ Installed plugins live under:
 The registry is a JSON array tracking name, source URL, install path,
 version, and enabled flag.
 
-## Install
+## Marketplace
+
+`/plugin marketplace` browses the curated catalog at
+[`thClaws/marketplace`](https://github.com/thClaws/marketplace), same
+shape as the skill marketplace. Three discovery commands plus a
+name-based install:
+
+```
+❯ /plugin marketplace
+plugin marketplace (baseline 2026-04-29, 1 plugin(s))
+── workflow ──
+  productivity             — Task management, workplace memory, visual dashboard
+install with: /plugin install <name>   |   detail: /plugin info <name>
+```
+
+```
+❯ /plugin info productivity
+license:      Apache-2.0 (open)
+homepage:     https://github.com/thClaws/marketplace/tree/main/plugins/productivity
+install with: /plugin install productivity (resolves to https://github.com/thClaws/marketplace.git#main:plugins/productivity)
+```
+
+```
+❯ /plugin install productivity
+plugin 'productivity' installed (project, 1 skill dir(s)) → .thclaws/plugins/productivity
+skills callable in this session — no restart needed
+```
+
+Use `/plugin show <name>` for an INSTALLED plugin's detail (path,
+contributions, scope) — the marketplace's `/plugin info` is for
+catalog entries before install.
+
+## Install (custom URL)
+
+For plugins not in the marketplace:
 
 ```
 ❯ /plugin install https://github.com/agentic-press/deploy-plugin.git
 plugin 'agentic-press-deploy' installed (project) → .thclaws/plugins/agentic-press-deploy
 Skills refreshed and callable this session.
 1 plugin-contributed MCP server(s) still need a restart to spawn — or use /mcp add to register them now.
+```
+
+The `<git-url>#<branch>:<subpath>` extension also works for plugins
+(same as skills) — useful when the upstream repo bundles many plugins
+under a `plugins/` directory:
+
+```
+❯ /plugin install https://github.com/anthropics/knowledge-work-plugins.git#main:productivity
 ```
 
 Plugin-contributed **skills** activate immediately in the current

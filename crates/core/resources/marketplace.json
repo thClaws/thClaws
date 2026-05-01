@@ -15,5 +15,37 @@
       "install_url": "https://github.com/thClaws/marketplace.git#main:skills/skill-creator",
       "homepage": "https://github.com/thClaws/marketplace/tree/main/skills/skill-creator"
     }
+  ],
+  "mcp_servers": [
+    {
+      "name": "weather-mcp",
+      "short_description": "Global weather (current + forecast) via Open-Meteo",
+      "description": "Global weather MCP server — current conditions and N-day forecast for any city, postcode, or lat/lng worldwide. Powered by Open-Meteo (free, no API key required for normal use). Replaces the US-only NWS-based servers.",
+      "category": "data",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/thClaws/marketplace.git#subdirectory=mcp/weather-mcp",
+        "thclaws-weather"
+      ],
+      "install_url": "https://github.com/thClaws/marketplace.git#main:mcp/weather-mcp",
+      "post_install_message": "Requires `uv` (one-time: `pip install uv` or `brew install uv`). First invocation downloads the package and dependencies into an isolated env automatically — no separate pip install needed.",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/mcp/weather-mcp"
+    }
+  ],
+  "plugins": [
+    {
+      "name": "productivity",
+      "short_description": "Task management, workplace memory, visual dashboard",
+      "description": "Manage tasks (TASKS.md), build up workplace memory (people, projects, terminology, shorthand), and operate from a visual dashboard. Includes /start to bootstrap, /update to sync from connectors, and a memory-management skill that decodes nicknames/acronyms/codenames so the agent acts like a colleague. Forked from anthropics/knowledge-work-plugins with empty .mcp.json — install the connectors you actually use via /mcp install.",
+      "category": "workflow",
+      "license": "Apache-2.0",
+      "license_tier": "open",
+      "install_url": "https://github.com/thClaws/marketplace.git#main:plugins/productivity",
+      "homepage": "https://github.com/thClaws/marketplace/tree/main/plugins/productivity"
+    }
   ]
 }

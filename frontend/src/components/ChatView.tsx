@@ -12,6 +12,7 @@ import {
   filterCommands,
   type SlashCommandInfo,
 } from "./SlashCommandPopup";
+import { McpAppIframe } from "./McpAppIframe";
 
 type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system";
@@ -21,6 +22,15 @@ type ChatMessage = {
   /// when the matching `chat_tool_result` arrives. Drives the leading
   /// glyph (▸ vs ✓) without changing the bubble's identity.
   toolDone?: boolean;
+  /// MCP-Apps widget the bubble should embed inline below the tool
+  /// label (e.g. pinn.ai's image viewer). Populated from the
+  /// `ui_resource` field on `chat_tool_result` when the upstream MCP
+  /// server declared `meta.ui.resourceUri` on the tool.
+  uiResource?: {
+    uri: string;
+    html: string;
+    mime?: string;
+  };
 };
 
 /// One pasted/dropped image waiting to be sent with the next chat
@@ -245,19 +255,35 @@ export function ChatView({ active, modalOpen }: Props) {
             },
           ]);
           break;
-        case "chat_tool_result":
+        case "chat_tool_result": {
           // Flip the same bubble's done flag. We don't store the
           // output text here — the chat-tab UX is "the agent ran X",
           // not "X returned Y". (Errors still surface as red error
           // bubbles via chat_text_delta-like paths; that's separate
           // from normal tool completion.)
+          //
+          // If the tool came back with an MCP-Apps `ui_resource`,
+          // attach it to the bubble too — the render path embeds an
+          // iframe widget below the tool label (pinn.ai image viewer
+          // etc.). The output text is also stashed so the widget's
+          // `ui/notifications/tool-result` push can carry it as a
+          // standard MCP text content block.
+          const ui = msg.ui_resource as
+            | { uri: string; html: string; mime?: string }
+            | undefined;
+          const output = (msg.output as string | undefined) ?? "";
           setMessages((prev) => {
             for (let i = prev.length - 1; i >= 0; i--) {
               const candidate = prev[i];
               if (candidate.role === "tool" && !candidate.toolDone) {
                 return [
                   ...prev.slice(0, i),
-                  { ...candidate, toolDone: true },
+                  {
+                    ...candidate,
+                    toolDone: true,
+                    content: ui ? output : candidate.content,
+                    uiResource: ui,
+                  },
                   ...prev.slice(i + 1),
                 ];
               }
@@ -265,6 +291,7 @@ export function ChatView({ active, modalOpen }: Props) {
             return prev;
           });
           break;
+        }
         case "chat_slash_output":
           setMessages((prev) => [
             ...prev,
@@ -365,6 +392,21 @@ export function ChatView({ active, modalOpen }: Props) {
       }
     };
   }, []);
+
+  // Click handler for chat-rendered links. preventDefault stops the
+  // wry webview from navigating away (the webview has no browser
+  // chrome to get back from), then routes the URL to the OS default
+  // browser via the vetted `open_external` IPC. MCP-Apps tools render
+  // their own widgets inline via `McpAppIframe`, so we don't need
+  // an in-app lightbox for image previews — links can just hand off.
+  const handleChatLinkClick = (
+    e: React.MouseEvent<HTMLAnchorElement>,
+    href: string,
+  ) => {
+    if (!href) return;
+    e.preventDefault();
+    send({ type: "open_external", url: href });
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -500,10 +542,14 @@ export function ChatView({ active, modalOpen }: Props) {
           if (msg.role === "tool") {
             const glyph = msg.toolDone ? "✓" : "▸";
             const copied = copiedMessageIndex === i;
+            // MCP-Apps tools widen the bubble so the embedded iframe
+            // gets meaningful width. Plain tools keep the thin
+            // one-liner indicator.
+            const widget = msg.uiResource;
             return (
               <div key={i} className="flex justify-start">
                 <div
-                  className="group inline-flex max-w-[80%] items-center gap-1 text-xs"
+                  className={`group flex max-w-[80%] flex-col gap-1 ${widget ? "w-[80%]" : ""}`}
                   style={{
                     color: "var(--text-secondary)",
                     fontFamily:
@@ -512,14 +558,27 @@ export function ChatView({ active, modalOpen }: Props) {
                     opacity: msg.toolDone ? 0.7 : 1,
                   }}
                 >
-                  <span className="truncate">
-                    {glyph} {msg.toolName ?? msg.content}
-                  </span>
-                  <CopyMessageButton
-                    copied={copied}
-                    compact
-                    onCopy={() => copyMessage(msg, i)}
-                  />
+                  <div className="inline-flex items-center gap-1 text-xs">
+                    <span className="truncate">
+                      {glyph} {msg.toolName ?? msg.content}
+                    </span>
+                    <CopyMessageButton
+                      copied={copied}
+                      compact
+                      onCopy={() => copyMessage(msg, i)}
+                    />
+                  </div>
+                  {widget && msg.toolDone && (
+                    <McpAppIframe
+                      uri={widget.uri}
+                      html={widget.html}
+                      parentToolName={msg.toolName ?? ""}
+                      toolResult={{
+                        content: [{ type: "text", text: msg.content }],
+                        isError: false,
+                      }}
+                    />
+                  )}
                 </div>
               </div>
             );
@@ -576,6 +635,40 @@ export function ChatView({ active, modalOpen }: Props) {
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       rehypePlugins={[rehypeHighlight]}
+                      components={{
+                        // Intercept link clicks so the wry webview
+                        // never navigates away from the chat. Image
+                        // URLs open in a lightbox; everything else
+                        // hands off to the OS browser.
+                        a: ({ href, children, ...rest }) => (
+                          <a
+                            {...rest}
+                            href={href}
+                            onClick={(e) =>
+                              handleChatLinkClick(e, href ?? "")
+                            }
+                          >
+                            {children}
+                          </a>
+                        ),
+                        // Markdown `![alt](url)` images render inline.
+                        // Click-to-zoom isn't needed: MCP-Apps tools
+                        // produce their own iframe widgets, and any
+                        // other inline image (e.g. attached by the
+                        // user) is already shown at full bubble width.
+                        img: ({ src, alt, ...rest }) => (
+                          <img
+                            {...rest}
+                            src={src}
+                            alt={alt}
+                            style={{
+                              maxWidth: "100%",
+                              height: "auto",
+                              borderRadius: 6,
+                            }}
+                          />
+                        ),
+                      }}
                     >
                       {stripThinkBlocks(msg.content)}
                     </ReactMarkdown>

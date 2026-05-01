@@ -46,6 +46,12 @@ pub enum AgentEvent {
         id: String,
         name: String,
         output: std::result::Result<String, String>,
+        /// MCP-Apps widget the chat surface should embed inline below
+        /// this tool's text result. `Some` only when the tool's
+        /// upstream MCP server declared a `ui.resourceUri` and the
+        /// resource fetch succeeded. Plain tools (Read, Bash, …)
+        /// always have `None`.
+        ui_resource: Option<crate::tools::UiResource>,
     },
     /// Tool was denied by the approver. No call was made.
     ToolCallDenied { id: String, name: String },
@@ -340,6 +346,7 @@ impl Agent {
                                 id: id.clone(),
                                 name: name.clone(),
                                 output: Err(msg),
+                                ui_resource: None,
                             };
                             continue;
                         }
@@ -413,6 +420,18 @@ impl Agent {
                         is_error,
                     });
 
+                    // For MCP-Apps tools, fetch the widget HTML so the
+                    // chat surface can mount an iframe alongside the
+                    // text result. Only attempted on success; an
+                    // errored tool call doesn't produce a widget. The
+                    // fetch is best-effort — if it fails the user
+                    // still sees the text result.
+                    let ui_resource = if matches!(tool_result, Ok(_)) {
+                        tool.fetch_ui_resource().await
+                    } else {
+                        None
+                    };
+
                     yield AgentEvent::ToolCallResult {
                         id: id.clone(),
                         name: name.clone(),
@@ -420,6 +439,7 @@ impl Agent {
                             Ok(c) => Ok(c.to_text()),
                             Err(e) => Err(format!("{e}")),
                         },
+                        ui_resource,
                     };
                 }
 

@@ -445,6 +445,7 @@ fn url_encode(s: &str) -> String {
 
 fn open_browser(url: &str) -> std::io::Result<()> {
     use std::process::Command;
+
     #[cfg(target_os = "macos")]
     let mut cmd = {
         let mut c = Command::new("open");
@@ -463,6 +464,14 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         c.args(["/C", "start", "", url]);
         c
     };
+
+    #[cfg(target_os = "windows")]
+    use std::os::windows::process::CommandExt;
+
+    // for Windows creation flag to hide the console window
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
     cmd.spawn()?;
     Ok(())
 }

@@ -590,6 +590,8 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
         ProviderKind::LMStudio => "lmstudio",
         ProviderKind::AzureAIFoundry => "azure",
         ProviderKind::OpenAICompat => "openai-compat",
+        ProviderKind::DeepSeek => "deepseek",
+        ProviderKind::ThaiLLM => "thaillm",
     }
 }
 

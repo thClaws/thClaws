@@ -1,6 +1,6 @@
 # Chapter 11 — Built-in tools
 
-thClaws ships with around twenty built-in tools. The agent picks them
+thClaws ships with around thirty built-in tools. The agent picks them
 autonomously; you see each call as a `[tool: Name: …]` line, then a
 ✓ (success) or ✗ (error). This chapter is the reference.
 
@@ -50,6 +50,56 @@ Defaults:
 Search provider is picked via `TAVILY_API_KEY` or `BRAVE_SEARCH_API_KEY`
 if set, else DuckDuckGo (no key, lower quality). Override with
 `searchEngine: "tavily"` in settings.
+
+## Documents — PDF & Office
+
+Native Rust tools for producing and reading PDF, Word, Excel, and
+PowerPoint files. **Clean-room ports of Anthropic's source-available
+skills** so thClaws can redistribute them under MIT/Apache. Embedded
+Noto Sans + Noto Sans Thai fonts ship in the binary (~650 KB total)
+so Thai content renders correctly without a system-font dependency.
+
+| Tool | Approval | Summary |
+|---|---|---|
+| `PdfCreate` | prompt | Markdown → PDF (printpdf + embedded Thai font, A4/Letter/Legal) |
+| `PdfRead` | auto | Extract text via `pdftotext` (poppler-utils — `brew install poppler` / `apt install poppler-utils`) |
+| `DocxCreate` | prompt | Markdown → Word (.docx) via `docx-rs` — headings, lists, code blocks |
+| `DocxRead` | auto | Extract text from a Word doc (pure Rust XML walk) |
+| `DocxEdit` | prompt | `find_replace` / `append_paragraph` in place |
+| `XlsxCreate` | prompt | CSV or JSON 2D-array → Excel (.xlsx) via `rust_xlsxwriter` |
+| `XlsxRead` | auto | Read XLSX/XLSM/XLSB/XLS/ODS via `calamine`; CSV or typed JSON output |
+| `XlsxEdit` | prompt | `set_cell` / `set_cells` / `add_sheet` / `delete_sheet` — format-preserving via `umya-spreadsheet` |
+| `PptxCreate` | prompt | Markdown outline → PowerPoint (.pptx); `# Heading` = new slide |
+| `PptxRead` | auto | Extract text per slide (numeric ordering — slide10 doesn't sort before slide2) |
+| `PptxEdit` | prompt | `find_replace` across all slides — designed for `{{placeholder}}` template fill |
+
+**Thai rendering across formats:**
+
+- `PdfCreate` embeds the Noto Sans Thai TTF directly in the PDF —
+  Thai renders identically on every viewer regardless of installed
+  fonts.
+- `DocxCreate` / `PptxCreate` set `<w:rFonts w:cs="Noto Sans Thai"/>`
+  / `<a:cs typeface="Noto Sans Thai"/>` per run, so Word and
+  PowerPoint pick the Thai font from the user's system. Modern Win/
+  Mac/Linux ship Noto Sans Thai by default; Office falls back to
+  Tahoma / Cordia New if absent.
+- `XlsxCreate` uses Calibri (Excel's default) — Excel's text engine
+  handles Thai script via the OS Thai font stack with no per-cell
+  configuration.
+
+**Edit-tool semantics:**
+
+- `DocxEdit` / `PptxEdit` `find_replace` matches **per text-run**.
+  Word and PowerPoint split text across runs when style changes mid-
+  paragraph (e.g. one bold word in a sentence), so a substring spanning
+  a styled boundary won't match. For docs you authored with the
+  matching `*Create` tool this is a non-issue (each block is a single
+  run); for human-authored docs with rich styling, flatten styling
+  first.
+- `XlsxEdit` is **format-preserving** — `umya-spreadsheet` is built for
+  round-trip; styles, formulas, charts, and conditional formatting in
+  unrelated regions survive the load+modify+save cycle. Cells use A1-
+  style addresses (`B7`, `AA12`).
 
 ## User interaction
 

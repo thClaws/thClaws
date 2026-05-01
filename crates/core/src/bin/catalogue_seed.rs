@@ -9,6 +9,7 @@
 //!   - Anthropic    (ANTHROPIC_API_KEY)      → real dated ids, context from OpenRouter or existing curation
 //!   - OpenAI       (OPENAI_API_KEY)         → real dated ids, context from OpenRouter or existing curation
 //!   - Gemini       (GEMINI_API_KEY)         → real ids + inputTokenLimit
+//!   - DeepSeek     (DEEPSEEK_API_KEY)       → V4 line (flash/pro), context from OpenRouter mirror or default 128K
 //!   - Ollama       (if OLLAMA_HOST reachable, default http://localhost:11434)
 //!
 //! New ids are inserted into the appropriate `providers.<name>.models`
@@ -34,6 +35,8 @@ const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/models";
 const OPENAI_URL: &str = "https://api.openai.com/v1/models";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const OLLAMA_CLOUD_URL: &str = "https://ollama.com/v1/models";
+const DEEPSEEK_URL: &str = "https://api.deepseek.com/v1/models";
+const THAILLM_URL: &str = "http://thaillm.or.th/api/v1/models";
 const DEFAULT_TARGET: &str = "crates/core/resources/model_catalogue.json";
 
 // ── Wire types ──────────────────────────────────────────────────────
@@ -271,6 +274,72 @@ async fn run() -> Result<String, String> {
         }
     } else {
         report.push("  ollama-cloud: skipped (no OLLAMA_CLOUD_API_KEY)".into());
+    }
+
+    // 4b. DeepSeek — OpenAI-compatible `/v1/models` lists their V4 line
+    //     (deepseek-v4-flash, deepseek-v4-pro). Bare model ids — no
+    //     prefix-namespacing on our side, since `deepseek-` is enough
+    //     for ProviderKind::detect. Default context seeded conservatively
+    //     at 128K (V4 line ships with a longer window but specific rows
+    //     can be hand-bumped after operator review of the diff).
+    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
+        match fetch_deepseek(&key).await {
+            Ok(ids) => {
+                let pc = cat
+                    .providers
+                    .entry("deepseek".into())
+                    .or_insert_with(ProviderCatalogue::default);
+                if pc.default_context.is_none() {
+                    pc.default_context = Some(131072);
+                }
+                let added = merge_discovered(
+                    &mut cat,
+                    "deepseek",
+                    DEEPSEEK_URL,
+                    ids,
+                    &openrouter_ctx_by_bare,
+                    &today,
+                );
+                push_provider_stats(&mut report, "deepseek", &added, None);
+            }
+            Err(e) => report.push(format!("  deepseek:    FAILED ({e})")),
+        }
+    } else {
+        report.push("  deepseek:    skipped (no DEEPSEEK_API_KEY)".into());
+    }
+
+    // 4c. ThaiLLM — NSTDA / สวทช aggregator at thaillm.or.th. OpenAI-
+    //     compatible /v1/models lists OpenThaiGPT, Typhoon-S, Pathumma,
+    //     THaLLE — all 8B Thai-tuned models on Llama-3.1-8B / Qwen3-8B
+    //     bases (native 128K context). Each id is namespaced with the
+    //     `thaillm/` prefix so ProviderKind::detect routes correctly,
+    //     mirroring the ollama-cloud pattern.
+    if let Ok(key) = std::env::var("THAILLM_API_KEY") {
+        match fetch_thaillm(&key).await {
+            Ok(ids) => {
+                let prefixed: Vec<String> =
+                    ids.into_iter().map(|id| format!("thaillm/{id}")).collect();
+                let pc = cat
+                    .providers
+                    .entry("thaillm".into())
+                    .or_insert_with(ProviderCatalogue::default);
+                if pc.default_context.is_none() {
+                    pc.default_context = Some(131072);
+                }
+                let added = merge_discovered(
+                    &mut cat,
+                    "thaillm",
+                    THAILLM_URL,
+                    prefixed,
+                    &openrouter_ctx_by_bare,
+                    &today,
+                );
+                push_provider_stats(&mut report, "thaillm", &added, None);
+            }
+            Err(e) => report.push(format!("  thaillm:     FAILED ({e})")),
+        }
+    } else {
+        report.push("  thaillm:     skipped (no THAILLM_API_KEY)".into());
     }
 
     // 5. Derive agent-sdk rows from anthropic. The Claude CLI subprocess
@@ -572,6 +641,45 @@ async fn fetch_openai(key: &str) -> Result<Vec<String>, String> {
         .map_err(|e| format!("GET {OPENAI_URL}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("openai HTTP {}", resp.status()));
+    }
+    let env: OpenAIEnvelope = resp.json().await.map_err(|e| format!("json: {e}"))?;
+    Ok(env.data.into_iter().map(|m| m.id).collect())
+}
+
+/// Fetch DeepSeek's `/v1/models` (OpenAI-compatible). At the time of
+/// writing this returns just the V4 line (`deepseek-v4-flash`,
+/// `deepseek-v4-pro`); older aliases like `deepseek-chat` and
+/// `deepseek-reasoner` still work on the chat completions endpoint as
+/// wire-level aliases but aren't listed by `/v1/models`, so they don't
+/// land in the catalogue automatically. Operators can hand-add them.
+async fn fetch_deepseek(key: &str) -> Result<Vec<String>, String> {
+    let resp = client()?
+        .get(DEEPSEEK_URL)
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(|e| format!("GET {DEEPSEEK_URL}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("deepseek HTTP {}", resp.status()));
+    }
+    let env: OpenAIEnvelope = resp.json().await.map_err(|e| format!("json: {e}"))?;
+    Ok(env.data.into_iter().map(|m| m.id).collect())
+}
+
+/// Fetch the model list from NSTDA's Thai LLM aggregator. The endpoint
+/// is OpenAI-compatible — `/v1/models` returns `{data:[{id, object,
+/// owned_by}]}` for each Thai model hosted (OpenThaiGPT, Typhoon-S,
+/// Pathumma, THaLLE, etc.). Returns bare ids; caller adds the
+/// `thaillm/` prefix to namespace them.
+async fn fetch_thaillm(key: &str) -> Result<Vec<String>, String> {
+    let resp = client()?
+        .get(THAILLM_URL)
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(|e| format!("GET {THAILLM_URL}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("thaillm HTTP {}", resp.status()));
     }
     let env: OpenAIEnvelope = resp.json().await.map_err(|e| format!("json: {e}"))?;
     Ok(env.data.into_iter().map(|m| m.id).collect())

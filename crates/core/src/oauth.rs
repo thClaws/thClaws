@@ -25,7 +25,11 @@ use std::path::PathBuf;
 
 const CALLBACK_PORT_START: u16 = 19150;
 const CALLBACK_PORT_END: u16 = 19160;
+/// Fallback client_id used when the authorization server does NOT advertise
+/// a `registration_endpoint`. When DCR is supported (the MCP spec norm) we
+/// POST `/register` (RFC 7591) and use the issued client_id instead.
 const CLIENT_ID: &str = "thclaws";
+const CLIENT_NAME: &str = "thClaws";
 
 // ── Token storage ────────────────────────────────────────────────────
 
@@ -50,6 +54,17 @@ pub struct TokenEntry {
     /// forced.
     #[serde(default)]
     pub authorization_server: Option<String>,
+    /// Client ID used to obtain this token. For RFC 7591 dynamically-
+    /// registered clients we MUST send the same `client_id` to the token
+    /// endpoint when refreshing — the static fallback would be rejected.
+    /// `None` on entries saved before DCR support existed.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Client secret issued by DCR, if any. Public PKCE clients usually
+    /// receive `None`; confidential clients receive a secret that must be
+    /// presented on token exchange / refresh.
+    #[serde(default)]
+    pub client_secret: Option<String>,
 }
 
 impl TokenStore {
@@ -311,6 +326,58 @@ fn generate_state() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+// ── Dynamic Client Registration (RFC 7591) ──────────────────────────
+
+/// Register a new OAuth client at the AS's `registration_endpoint`. Returns
+/// `(client_id, Option<client_secret>)`. We register fresh per browser flow
+/// with the *exact* loopback redirect_uri we just bound — strict ASes
+/// reject `/authorize` if the redirect_uri wasn't registered, and RFC 8252
+/// port-flexibility for loopback URIs is only a SHOULD, not honored
+/// universally. Re-registering each flow trades a small amount of AS-side
+/// churn for reliability across heterogeneous MCP servers.
+async fn register_dynamic_client(
+    client: &Client,
+    registration_endpoint: &str,
+    redirect_uri: &str,
+) -> Result<(String, Option<String>)> {
+    let body = serde_json::json!({
+        "client_name": CLIENT_NAME,
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "application_type": "native",
+    });
+    let resp = client
+        .post(registration_endpoint)
+        .header("Accept", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Provider(format!("oauth register: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(Error::Provider(format!(
+            "oauth register failed: {status} {text}"
+        )));
+    }
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| Error::Provider(format!("oauth register json: {e}")))?;
+    let client_id = v
+        .get("client_id")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| Error::Provider("register response missing client_id".into()))?
+        .to_string();
+    let client_secret = v
+        .get("client_secret")
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    Ok((client_id, client_secret))
+}
+
 // ── Authorization flow ───────────────────────────────────────────────
 
 /// Run the full OAuth 2.1 + PKCE browser flow. Opens a browser, waits for
@@ -333,6 +400,31 @@ pub async fn authorize(
         .port();
     let redirect_uri = format!("http://localhost:{port}/callback");
 
+    // RFC 7591 dynamic client registration BEFORE /authorize. Required by
+    // the MCP spec when the AS advertises a `registration_endpoint`; falls
+    // back to the static client_id only when DCR is unavailable.
+    let (effective_client_id, client_secret) =
+        if let Some(reg_url) = meta.registration_endpoint.as_deref() {
+            eprintln!("\x1b[2m[oauth] registering client at {reg_url}\x1b[0m");
+            match register_dynamic_client(client, reg_url, &redirect_uri).await {
+                Ok((cid, secret)) => {
+                    eprintln!(
+                        "\x1b[2m[oauth] registered client_id={cid}{}\x1b[0m",
+                        if secret.is_some() { " (+secret)" } else { "" }
+                    );
+                    (cid, secret)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "\x1b[33m[oauth] DCR failed ({e}); falling back to static client_id\x1b[0m"
+                    );
+                    (CLIENT_ID.to_string(), None)
+                }
+            }
+        } else {
+            (CLIENT_ID.to_string(), None)
+        };
+
     // Build the authorization URL.
     let scope = if meta.scopes_supported.is_empty() {
         "hosting:read hosting:write deploy:write".to_string()
@@ -343,7 +435,7 @@ pub async fn authorize(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}\
          &code_challenge={}&code_challenge_method=S256",
         meta.authorization_endpoint,
-        urlencoding::encode(CLIENT_ID),
+        urlencoding::encode(&effective_client_id),
         urlencoding::encode(&redirect_uri),
         urlencoding::encode(&scope),
         urlencoding::encode(&state),
@@ -358,16 +450,22 @@ pub async fn authorize(
 
     eprintln!("\x1b[36m[oauth] exchanging code for tokens…\x1b[0m");
 
-    // Exchange code for tokens.
+    // Exchange code for tokens. For confidential clients (DCR-issued
+    // secret) authenticate via Basic auth on the token endpoint, per
+    // RFC 6749 §2.3.1; the body still carries client_id for parity.
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", "authorization_code"),
+        ("code", &code),
+        ("redirect_uri", &redirect_uri),
+        ("client_id", &effective_client_id),
+        ("code_verifier", &code_verifier),
+    ];
+    if let Some(s) = client_secret.as_deref() {
+        form.push(("client_secret", s));
+    }
     let token_resp = client
         .post(&meta.token_endpoint)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("redirect_uri", &redirect_uri),
-            ("client_id", CLIENT_ID),
-            ("code_verifier", &code_verifier),
-        ])
+        .form(&form)
         .send()
         .await
         .map_err(|e| Error::Provider(format!("token exchange: {e}")))?;
@@ -445,6 +543,8 @@ pub async fn authorize(
         token_endpoint: meta.token_endpoint.clone(),
         expires_at: now + expires_in,
         authorization_server: Some(meta.authorization_server_origin.clone()),
+        client_id: Some(effective_client_id),
+        client_secret,
     })
 }
 
@@ -455,13 +555,21 @@ pub async fn refresh(client: &Client, entry: &TokenEntry) -> Result<TokenEntry> 
         .as_ref()
         .ok_or_else(|| Error::Provider("no refresh_token available".into()))?;
 
+    // Use the client_id this token was issued under. DCR-registered
+    // clients have unique IDs that the AS will not honor under the
+    // static fallback.
+    let cid = entry.client_id.as_deref().unwrap_or(CLIENT_ID);
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", cid),
+    ];
+    if let Some(s) = entry.client_secret.as_deref() {
+        form.push(("client_secret", s));
+    }
     let resp = client
         .post(&entry.token_endpoint)
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", CLIENT_ID),
-        ])
+        .form(&form)
         .send()
         .await
         .map_err(|e| Error::Provider(format!("token refresh: {e}")))?;
@@ -501,6 +609,8 @@ pub async fn refresh(client: &Client, entry: &TokenEntry) -> Result<TokenEntry> 
         token_endpoint: entry.token_endpoint.clone(),
         expires_at: now + expires_in,
         authorization_server: entry.authorization_server.clone(),
+        client_id: entry.client_id.clone(),
+        client_secret: entry.client_secret.clone(),
     })
 }
 
@@ -618,8 +728,10 @@ fn open_browser(url: &str) {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("cmd")
             .args(["/c", "start", url])
+            .creation_flags(0x08000000)
             .spawn();
     }
 }
@@ -664,6 +776,8 @@ mod tests {
             token_endpoint: "https://as.example/token".into(),
             expires_at: 0,
             authorization_server: issuer.map(String::from),
+            client_id: None,
+            client_secret: None,
         }
     }
 

@@ -71,7 +71,31 @@ fn main() {
         .map(|b| base64_encode(&b))
         .unwrap_or_default();
     println!("cargo:rustc-env=THCLAWS_EMBEDDED_POLICY_PUBKEY={embedded_b64}");
+
+    embed_windows_icon();
 }
+
+/// Embed `resources/thclaws.ico` into the Windows PE so Explorer, the
+/// taskbar, alt-tab, and file properties pick up the icon (issue #53).
+/// No-op on non-Windows targets — `winresource` is gated behind a
+/// `cfg(windows)` build-dependency so this whole call disappears at
+/// compile time on Linux/macOS.
+#[cfg(windows)]
+fn embed_windows_icon() {
+    println!("cargo:rerun-if-changed=resources/thclaws.ico");
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("resources/thclaws.ico");
+    if let Err(e) = res.compile() {
+        // Don't fail the build over an icon — Windows users without the
+        // toolchain pieces (rc.exe / windres) can still ship a working
+        // binary, just without the embedded icon. Surface the warning
+        // so CI release builds catch a misconfiguration.
+        println!("cargo:warning=winresource compile failed: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_icon() {}
 
 /// Conventional path used at build time when `THCLAWS_POLICY_PUBKEY_PATH`
 /// isn't explicitly set. Mirrors the runtime loader's fallback so the

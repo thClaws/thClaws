@@ -94,8 +94,37 @@ struct Cli {
     prompt: Vec<String>,
 }
 
+/// Re-attach stdout/stderr to the parent terminal on Windows so
+/// `--version`, `--help`, and any print-and-exit flag actually emit
+/// their output to the shell that launched us. Without this, the
+/// `windows_subsystem = "windows"` attribute (declared at the top of
+/// this file to prevent a console flicker on File Explorer double-click)
+/// detaches stdio entirely and clap's writes go nowhere. Issue #48.
+///
+/// `AttachConsole(ATTACH_PARENT_PROCESS)` is the same pattern used by
+/// `winget`, `gh.exe`, modern Tauri apps, etc.: harmless when there's
+/// no parent console (returns 0 / GetLastError = ERROR_INVALID_HANDLE
+/// for double-click launches), and gives us a working stdio when one
+/// exists. No-op on macOS / Linux.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: `AttachConsole` is a Win32 entry point with no Rust
+    // invariants; calling it before any stdio I/O is the documented
+    // contract. We deliberately ignore the return value — failure
+    // means "no parent console available" (e.g. double-click launch),
+    // which is the same state we'd be in if we hadn't called it at all.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
+
 #[tokio::main]
 async fn main() {
+    attach_parent_console();
     secrets::load_into_env();
     endpoints::load_into_env();
     load_dotenv();

@@ -141,6 +141,75 @@ pub struct MarketplaceSkill {
     pub homepage: String,
 }
 
+/// One MCP-server entry in the marketplace catalogue. Two transport
+/// shapes share this struct:
+///
+/// * **stdio** — the agent spawns a subprocess. `command` + `args` are
+///   required; `install_url` (if set) is a git URL the source for the
+///   subprocess can be cloned from before first run, and
+///   `post_install_message` (if set) tells the user any prerequisite
+///   step (e.g. `pip install -e <path>`).
+/// * **sse / http** — the agent connects to a hosted HTTP endpoint.
+///   `url` is required; `command` / `args` are unused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketplaceMcpServer {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    pub description: String,
+    #[serde(default)]
+    pub category: String,
+    pub license: String,
+    pub license_tier: String,
+    /// `"stdio"` (default) or `"sse"`. Determines which fields are
+    /// consulted by `/mcp install`.
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+    // ── stdio transport ──
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Optional git clone source — when set, `/mcp install` clones
+    /// this URL (with the same `<git-url>#<branch>:<subpath>` syntax
+    /// as skills) into `~/.config/thclaws/mcp/<name>/` before writing
+    /// the mcp.json entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_url: Option<String>,
+    /// Shown verbatim after a successful install — typically the pip
+    /// or npm install command the user must run before the stdio
+    /// command resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_install_message: Option<String>,
+    // ── sse / http transport ──
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    // ── shared ──
+    #[serde(default)]
+    pub homepage: String,
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".to_string()
+}
+
+/// One plugin entry in the marketplace catalogue. Plugins always
+/// install from a git URL or zip — no transport-specific shapes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketplacePlugin {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    pub description: String,
+    #[serde(default)]
+    pub category: String,
+    pub license: String,
+    pub license_tier: String,
+    pub install_url: String,
+    #[serde(default)]
+    pub homepage: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Marketplace {
     #[serde(default)]
@@ -151,6 +220,29 @@ pub struct Marketplace {
     pub fetched_at: String,
     #[serde(default)]
     pub skills: Vec<MarketplaceSkill>,
+    #[serde(default)]
+    pub mcp_servers: Vec<MarketplaceMcpServer>,
+    #[serde(default)]
+    pub plugins: Vec<MarketplacePlugin>,
+}
+
+/// Derive a single-line catalog row from an entry's full description.
+/// Shared by all three marketplace types (skill / mcp / plugin) — kept
+/// as a free function so each type's `short_line()` is a one-liner.
+fn derive_short_line(short: Option<&str>, description: &str) -> String {
+    if let Some(s) = short {
+        return s.to_string();
+    }
+    if let Some(idx) = description.find(". ") {
+        return description[..=idx].to_string();
+    }
+    const CAP: usize = 70;
+    if description.chars().count() <= CAP {
+        description.to_string()
+    } else {
+        let cut: String = description.chars().take(CAP).collect();
+        format!("{cut}…")
+    }
 }
 
 impl MarketplaceSkill {
@@ -160,25 +252,19 @@ impl MarketplaceSkill {
     /// (or falls back to a hard char cap) so we never blow the line in
     /// a typical 80-col terminal.
     pub fn short_line(&self) -> String {
-        if let Some(s) = &self.short_description {
-            return s.clone();
-        }
-        // Cut at the first ". " — single-line first sentence is almost
-        // always the right summary for legacy entries that didn't
-        // author a `short_description`. Include the period itself so
-        // the truncation reads as a complete sentence.
-        if let Some(idx) = self.description.find(". ") {
-            return self.description[..=idx].to_string();
-        }
-        // No sentence break — hard-cap at 70 chars with an ellipsis so
-        // the line stays scanable.
-        const CAP: usize = 70;
-        if self.description.chars().count() <= CAP {
-            self.description.clone()
-        } else {
-            let cut: String = self.description.chars().take(CAP).collect();
-            format!("{cut}…")
-        }
+        derive_short_line(self.short_description.as_deref(), &self.description)
+    }
+}
+
+impl MarketplaceMcpServer {
+    pub fn short_line(&self) -> String {
+        derive_short_line(self.short_description.as_deref(), &self.description)
+    }
+}
+
+impl MarketplacePlugin {
+    pub fn short_line(&self) -> String {
+        derive_short_line(self.short_description.as_deref(), &self.description)
     }
 }
 
@@ -207,6 +293,46 @@ impl Marketplace {
         let q = query.to_lowercase();
         let mut hits: Vec<(u8, &MarketplaceSkill)> = Vec::new();
         for s in &self.skills {
+            if s.name.to_lowercase().contains(&q) {
+                hits.push((0, s));
+            } else if s.description.to_lowercase().contains(&q) {
+                hits.push((1, s));
+            } else if s.category.to_lowercase().contains(&q) {
+                hits.push((2, s));
+            }
+        }
+        hits.sort_by_key(|(rank, _)| *rank);
+        hits.into_iter().map(|(_, s)| s).collect()
+    }
+
+    pub fn find_mcp(&self, name: &str) -> Option<&MarketplaceMcpServer> {
+        self.mcp_servers.iter().find(|s| s.name == name)
+    }
+
+    pub fn search_mcp(&self, query: &str) -> Vec<&MarketplaceMcpServer> {
+        let q = query.to_lowercase();
+        let mut hits: Vec<(u8, &MarketplaceMcpServer)> = Vec::new();
+        for s in &self.mcp_servers {
+            if s.name.to_lowercase().contains(&q) {
+                hits.push((0, s));
+            } else if s.description.to_lowercase().contains(&q) {
+                hits.push((1, s));
+            } else if s.category.to_lowercase().contains(&q) {
+                hits.push((2, s));
+            }
+        }
+        hits.sort_by_key(|(rank, _)| *rank);
+        hits.into_iter().map(|(_, s)| s).collect()
+    }
+
+    pub fn find_plugin(&self, name: &str) -> Option<&MarketplacePlugin> {
+        self.plugins.iter().find(|s| s.name == name)
+    }
+
+    pub fn search_plugin(&self, query: &str) -> Vec<&MarketplacePlugin> {
+        let q = query.to_lowercase();
+        let mut hits: Vec<(u8, &MarketplacePlugin)> = Vec::new();
+        for s in &self.plugins {
             if s.name.to_lowercase().contains(&q) {
                 hits.push((0, s));
             } else if s.description.to_lowercase().contains(&q) {

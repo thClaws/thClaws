@@ -58,6 +58,15 @@ pub struct McpServerConfig {
     /// the server requires auth but you don't have a full OAuth flow.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Whether this MCP server is trusted to render UI widgets and
+    /// receive widget-initiated tool calls (`callServerTool`). Set to
+    /// `true` only by the marketplace install flow — hand-added
+    /// servers default to `false` and get text-only fallback (the
+    /// model still sees their tool results, just no inline iframe).
+    /// Trust is the gate for arbitrary HTML rendering inside chat;
+    /// see dev-log/112.
+    #[serde(default)]
+    pub trusted: bool,
 }
 
 fn default_transport() -> String {
@@ -225,6 +234,33 @@ pub struct McpToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// MCP-Apps widget URI declared on the tool's `meta`. Set when the
+    /// server wants the client to render an iframe widget for this
+    /// tool's results (`text/html;profile=mcp-app` resource at
+    /// `ui://server/widget`). `None` for plain tools. Read from
+    /// `meta.ui.resourceUri` (current spec) with a fallback to the
+    /// legacy flat key `meta["ui/resourceUri"]` — pinn.ai et al. set
+    /// both for backward compat with older Claude Desktop versions.
+    pub ui_resource_uri: Option<String>,
+}
+
+/// Pull the MCP-Apps UI resource URI out of a tool's `meta` value.
+/// Mirrors the dual-key contract documented in the MCP-Apps spec:
+/// `meta.ui.resourceUri` (current) wins, `meta["ui/resourceUri"]`
+/// (legacy flat) is the fallback. `None` if neither is present or
+/// the value isn't a string.
+fn extract_ui_resource_uri(meta: Option<&Value>) -> Option<String> {
+    let meta = meta?;
+    if let Some(s) = meta
+        .get("ui")
+        .and_then(|u| u.get("resourceUri"))
+        .and_then(Value::as_str)
+    {
+        return Some(s.to_string());
+    }
+    meta.get("ui/resourceUri")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>;
@@ -238,6 +274,11 @@ pub struct McpClient {
     next_id: AtomicU64,
     reader_task: tokio::task::JoinHandle<()>,
     _child: Mutex<Option<Child>>,
+    /// Trust flag inherited from [`McpServerConfig::trusted`]. Marketplace
+    /// installs set this; hand-added servers leave it `false`. Gates
+    /// MCP-Apps widget rendering and widget→host tool calls — see
+    /// dev-log/112.
+    trusted: bool,
 }
 
 impl Drop for McpClient {
@@ -263,7 +304,12 @@ impl McpClient {
     /// reader task that parses incoming JSON-RPC messages and resolves pending
     /// requests by id. The task exits when the reader hits EOF; any still-
     /// pending requests at that point get an `"mcp transport closed"` error.
-    pub fn from_streams<R, W>(name: impl Into<String>, reader: R, writer: W) -> Arc<Self>
+    pub fn from_streams<R, W>(
+        name: impl Into<String>,
+        reader: R,
+        writer: W,
+        trusted: bool,
+    ) -> Arc<Self>
     where
         R: AsyncRead + Send + Unpin + 'static,
         W: AsyncWrite + Send + Unpin + 'static,
@@ -308,7 +354,15 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             reader_task,
             _child: Mutex::new(None),
+            trusted,
         })
+    }
+
+    /// Whether this server is trusted to render UI widgets. Mirror of
+    /// [`McpServerConfig::trusted`]; gates `fetch_ui_resource` and
+    /// widget-initiated `tools/call`.
+    pub fn is_trusted(&self) -> bool {
+        self.trusted
     }
 
     /// Create a client from config. Dispatches on `config.transport`:
@@ -360,7 +414,7 @@ impl McpClient {
             .take()
             .ok_or_else(|| Error::Provider("mcp: child had no stdout".into()))?;
 
-        let client = Self::from_streams(config.name.clone(), stdout, stdin);
+        let client = Self::from_streams(config.name.clone(), stdout, stdin, config.trusted);
         *client._child.lock().unwrap() = Some(child);
         client.initialize().await?;
         Ok(client)
@@ -604,7 +658,12 @@ impl McpClient {
             }
         });
 
-        let client = Self::from_streams(config.name.clone(), client_read, client_write);
+        let client = Self::from_streams(
+            config.name.clone(),
+            client_read,
+            client_write,
+            config.trusted,
+        );
         client.initialize().await?;
         Ok(client)
     }
@@ -694,13 +753,46 @@ impl McpClient {
                 .get("inputSchema")
                 .cloned()
                 .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+            let ui_resource_uri = extract_ui_resource_uri(t.get("_meta").or_else(|| t.get("meta")));
             out.push(McpToolInfo {
                 name,
                 description,
                 input_schema,
+                ui_resource_uri,
             });
         }
         Ok(out)
+    }
+
+    /// Fetch an MCP resource by URI via standard `resources/read`.
+    /// Returns the first text content the server sent — for MCP-Apps
+    /// widgets that's the inlined HTML. The MIME type from the
+    /// response is returned alongside so callers can assert
+    /// `text/html;profile=mcp-app` before mounting an iframe and
+    /// avoid trusting arbitrary text the server might return for the
+    /// same URI.
+    pub async fn read_resource(&self, uri: &str) -> Result<(String, Option<String>)> {
+        let result = self
+            .request("resources/read", json!({ "uri": uri }))
+            .await?;
+        let contents = result
+            .get("contents")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                Error::Provider("mcp resources/read: missing `contents` array".into())
+            })?;
+        for entry in contents {
+            if let Some(text) = entry.get("text").and_then(Value::as_str) {
+                let mime = entry
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                return Ok((text.to_string(), mime));
+            }
+        }
+        Err(Error::Provider(format!(
+            "mcp resources/read({uri}): no text content in response"
+        )))
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
@@ -778,9 +870,19 @@ fn extract_text(result: &Value) -> String {
 /// and bounded by the configured server set. Document this in the phase log.
 pub struct McpTool {
     client: Arc<McpClient>,
+    /// Provider-safe identifier — `<sanitized_server>__<sanitized_tool>`.
     name: &'static str,
+    /// Original MCP tool name as advertised by the server. Sent verbatim
+    /// on `tools/call`; never sanitized, because the server matches it
+    /// byte-for-byte.
+    bare: &'static str,
     description: &'static str,
     schema: Value,
+    /// MCP-Apps widget URI declared on this tool (see [`McpToolInfo`]).
+    /// Carried through to callers so the agent loop can fetch the
+    /// resource HTML and ship it to the chat surface alongside the
+    /// tool result.
+    ui_resource_uri: Option<&'static str>,
 }
 
 /// Separator used between server name and tool name in the qualified identifier.
@@ -788,24 +890,68 @@ pub struct McpTool {
 /// (OpenAI, Anthropic) require `^[a-zA-Z0-9_-]+$`, which excludes dots.
 pub const MCP_NAME_SEPARATOR: &str = "__";
 
+/// Replace any character outside `[A-Za-z0-9_-]` with `_` so the result
+/// fits the OpenAI / Anthropic tool-name regex `^[a-zA-Z0-9_-]+$`. Applied
+/// independently to each segment of the qualified name; the bare tool
+/// name kept on the McpTool struct stays verbatim so server-side
+/// dispatch (e.g. `tools/call name="version"`) still matches.
+pub fn sanitize_tool_name_segment(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        "_".into()
+    } else {
+        out
+    }
+}
+
 impl McpTool {
     pub fn new(client: Arc<McpClient>, info: McpToolInfo) -> Self {
-        let qualified_name = format!("{}{}{}", client.name(), MCP_NAME_SEPARATOR, info.name);
+        let qualified_name = format!(
+            "{}{}{}",
+            sanitize_tool_name_segment(client.name()),
+            MCP_NAME_SEPARATOR,
+            sanitize_tool_name_segment(&info.name),
+        );
+        let ui_resource_uri = info
+            .ui_resource_uri
+            .map(|s| &*Box::leak(s.into_boxed_str()));
         Self {
             client,
             name: Box::leak(qualified_name.into_boxed_str()),
+            bare: Box::leak(info.name.into_boxed_str()),
             description: Box::leak(info.description.into_boxed_str()),
             schema: info.input_schema,
+            ui_resource_uri,
         }
     }
 
-    /// Original MCP tool name (without the server prefix). Splits on the first
-    /// occurrence of [`MCP_NAME_SEPARATOR`].
+    /// Original MCP tool name as advertised by the server, used when
+    /// dispatching `tools/call`. Kept verbatim — must NOT be sanitized.
     pub fn bare_name(&self) -> &str {
-        self.name
-            .split_once(MCP_NAME_SEPARATOR)
-            .map(|(_, t)| t)
-            .unwrap_or(self.name)
+        self.bare
+    }
+
+    /// MCP-Apps widget URI for this tool, if the server declared one.
+    /// Callers fetch the actual widget HTML via
+    /// [`McpClient::read_resource`].
+    pub fn ui_resource_uri(&self) -> Option<&str> {
+        self.ui_resource_uri
+    }
+
+    /// Borrow the underlying transport so callers (e.g. the agent
+    /// loop) can issue follow-up MCP requests like `resources/read`
+    /// without a second handshake.
+    pub fn client(&self) -> &Arc<McpClient> {
+        &self.client
     }
 }
 
@@ -831,6 +977,37 @@ impl Tool for McpTool {
         // MCP tools can be arbitrary — default to requiring approval until
         // a per-tool allow-list / annotation mechanism lands.
         true
+    }
+
+    async fn fetch_ui_resource(&self) -> Option<crate::tools::UiResource> {
+        let uri = self.ui_resource_uri?;
+        // Trust gate: widget HTML is third-party code rendered inside
+        // chat. Only servers that came in via the marketplace install
+        // path (or were manually flagged `trusted: true` in mcp.json)
+        // are allowed to render. Untrusted servers still work as
+        // plain MCPs — the model sees their tool result text — but
+        // no inline iframe. Power-user diagnosis hint logged once.
+        if !self.client.is_trusted() {
+            eprintln!(
+                "\x1b[2m[mcp] {}: ignoring widget resource {uri} (server not trusted; install via marketplace or set `trusted: true` in mcp.json to enable)\x1b[0m",
+                self.client.name()
+            );
+            return None;
+        }
+        match self.client.read_resource(uri).await {
+            Ok((html, mime)) => Some(crate::tools::UiResource {
+                uri: uri.to_string(),
+                html,
+                mime,
+            }),
+            Err(e) => {
+                eprintln!(
+                    "\x1b[33m[mcp] {}: failed to fetch ui resource {uri}: {e}\x1b[0m",
+                    self.client.name()
+                );
+                None
+            }
+        }
     }
 }
 
@@ -1146,7 +1323,7 @@ mod tests {
     ) {
         let (c_write, s_read) = duplex(4096); // client→server
         let (s_write, c_read) = duplex(4096); // server→client
-        let client = McpClient::from_streams("mock", c_read, c_write);
+        let client = McpClient::from_streams("mock", c_read, c_write, false);
         (client, (s_read, s_write))
     }
 
@@ -1289,6 +1466,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_tools_extracts_ui_resource_uri_from_meta() {
+        // Servers stamp `_meta` (per current MCP spec) on each tool.
+        // We accept both `_meta` and the older `meta` so older
+        // servers that haven't migrated still work.
+        let (client, (s_read, s_write)) = paired_streams();
+
+        let server_task = tokio::spawn(async move {
+            run_mock_server(s_read, s_write, move |msg| {
+                let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+                let id = msg.get("id").and_then(Value::as_u64);
+                match (method, id) {
+                    ("tools/list", Some(id)) => Some(jsonrpc_response(
+                        id,
+                        json!({
+                            "tools": [
+                                {
+                                    "name": "text2image",
+                                    "_meta": {
+                                        "ui": {"resourceUri": "ui://pinn/image-viewer"},
+                                        "ui/resourceUri": "ui://pinn/image-viewer"
+                                    }
+                                },
+                                {"name": "version"}
+                            ]
+                        }),
+                    )),
+                    _ => None,
+                }
+            })
+            .await;
+        });
+
+        let tools = client.list_tools().await.expect("list_tools");
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
+
+        assert_eq!(tools[0].name, "text2image");
+        assert_eq!(
+            tools[0].ui_resource_uri.as_deref(),
+            Some("ui://pinn/image-viewer"),
+        );
+        assert_eq!(tools[1].name, "version");
+        assert_eq!(tools[1].ui_resource_uri, None);
+    }
+
+    #[tokio::test]
+    async fn read_resource_returns_text_and_mime() {
+        let (client, (s_read, s_write)) = paired_streams();
+
+        let server_task = tokio::spawn(async move {
+            run_mock_server(s_read, s_write, move |msg| {
+                let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+                let id = msg.get("id").and_then(Value::as_u64);
+                match (method, id) {
+                    ("resources/read", Some(id)) => {
+                        let uri = msg
+                            .get("params")
+                            .and_then(|p| p.get("uri"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        assert_eq!(uri, "ui://pinn/image-viewer");
+                        Some(jsonrpc_response(
+                            id,
+                            json!({
+                                "contents": [{
+                                    "uri": uri,
+                                    "mimeType": "text/html;profile=mcp-app",
+                                    "text": "<html>widget</html>"
+                                }]
+                            }),
+                        ))
+                    }
+                    _ => None,
+                }
+            })
+            .await;
+        });
+
+        let (text, mime) = client
+            .read_resource("ui://pinn/image-viewer")
+            .await
+            .expect("read_resource");
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
+
+        assert_eq!(text, "<html>widget</html>");
+        assert_eq!(mime.as_deref(), Some("text/html;profile=mcp-app"));
+    }
+
+    #[tokio::test]
     async fn call_tool_returns_joined_text_content() {
         let (client, (s_read, s_write)) = paired_streams();
 
@@ -1412,6 +1679,7 @@ mod tests {
             name: "ping".into(),
             description: "say pong".into(),
             input_schema: json!({"type": "object", "properties": {}}),
+            ui_resource_uri: None,
         };
         let tool = McpTool::new(client.clone(), info);
 
@@ -1427,6 +1695,84 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
 
         assert_eq!(out, "pong");
+    }
+
+    #[test]
+    fn extract_ui_resource_uri_handles_dual_keys() {
+        // Current spec: nested under `ui.resourceUri`. Wins over legacy.
+        let nested = json!({"ui": {"resourceUri": "ui://pinn/image-viewer"}});
+        assert_eq!(
+            extract_ui_resource_uri(Some(&nested)).as_deref(),
+            Some("ui://pinn/image-viewer"),
+        );
+        // Legacy flat key only.
+        let legacy = json!({"ui/resourceUri": "ui://pinn/gallery"});
+        assert_eq!(
+            extract_ui_resource_uri(Some(&legacy)).as_deref(),
+            Some("ui://pinn/gallery"),
+        );
+        // Both set (pinn.ai's case): prefer the current-spec nested form
+        // so future servers that drift the legacy key away from the
+        // canonical value don't silently win.
+        let both = json!({
+            "ui": {"resourceUri": "ui://pinn/image-viewer"},
+            "ui/resourceUri": "ui://pinn/image-viewer-legacy",
+        });
+        assert_eq!(
+            extract_ui_resource_uri(Some(&both)).as_deref(),
+            Some("ui://pinn/image-viewer"),
+        );
+        // Plain tools (no UI) — None.
+        assert_eq!(extract_ui_resource_uri(Some(&json!({}))), None);
+        assert_eq!(extract_ui_resource_uri(None), None);
+        // Wrong shapes don't blow up.
+        assert_eq!(
+            extract_ui_resource_uri(Some(&json!({"ui": "string"}))),
+            None
+        );
+        assert_eq!(
+            extract_ui_resource_uri(Some(&json!({"ui": {"resourceUri": 42}}))),
+            None,
+        );
+    }
+
+    #[test]
+    fn sanitize_tool_name_segment_replaces_disallowed_chars() {
+        // Real-world cases: server names with dots, tool names with slashes.
+        assert_eq!(sanitize_tool_name_segment("pinn.ai"), "pinn_ai");
+        assert_eq!(
+            sanitize_tool_name_segment("foo.bar:baz/qux"),
+            "foo_bar_baz_qux"
+        );
+        // Already-safe input is left alone.
+        assert_eq!(sanitize_tool_name_segment("filesystem"), "filesystem");
+        assert_eq!(sanitize_tool_name_segment("read_file-v2"), "read_file-v2");
+        // Empty or all-illegal input still produces a usable identifier.
+        assert_eq!(sanitize_tool_name_segment(""), "_");
+        assert_eq!(sanitize_tool_name_segment("..."), "___");
+    }
+
+    #[tokio::test]
+    async fn qualified_name_sanitizes_server_segment_but_call_uses_raw_bare() {
+        // Reproduces the pinn.ai bug: server name has a dot which leaked
+        // into the qualified name and made OpenAI reject the request.
+        // We don't drive any I/O — only verify the name plumbing.
+        let (c_write, _s_read) = duplex(4096);
+        let (_s_write, c_read) = duplex(4096);
+        let client = McpClient::from_streams("pinn.ai", c_read, c_write, false);
+
+        let info = McpToolInfo {
+            name: "version".into(),
+            description: "get version".into(),
+            input_schema: json!({"type": "object", "properties": {}}),
+            ui_resource_uri: None,
+        };
+        let tool = McpTool::new(client.clone(), info);
+
+        // Provider-facing identifier must match `^[a-zA-Z0-9_-]+$`.
+        assert_eq!(tool.name(), "pinn_ai__version");
+        // But the bare name dispatched to the MCP server must stay verbatim.
+        assert_eq!(tool.bare_name(), "version");
     }
 
     #[tokio::test]

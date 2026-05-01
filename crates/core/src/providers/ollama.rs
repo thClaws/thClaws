@@ -274,11 +274,12 @@ impl Provider for OllamaProvider {
 
         let byte_stream = resp.bytes_stream();
         let raw_dump = super::RawDump::new(format!("ollama {}", req.model));
+        let tool_names: Vec<String> = req.tools.iter().map(|t| t.name.clone()).collect();
 
         let event_stream = try_stream! {
             let mut buffer = String::new();
             let mut byte_stream = Box::pin(byte_stream);
-            let mut state = ParseState::default();
+            let mut state = ParseState::with_tools(tool_names);
             let mut raw = raw_dump;
 
             while let Some(chunk) = byte_stream.next().await {
@@ -315,6 +316,65 @@ impl Provider for OllamaProvider {
 #[derive(Default, Debug)]
 pub struct ParseState {
     pub seen_message_start: bool,
+    /// Names of tools the request advertised. Used by the leak-detector to
+    /// validate that a fenced JSON `{"name": ..., "arguments": {...}}` block
+    /// in `content` actually targets a registered tool before converting it
+    /// into a structured tool-call event. Empty when the request had no tools.
+    pub tool_names: Vec<String>,
+    /// Buffer for `/message/content` chunks when leak detection is active.
+    /// Flushed on `done:true` either as a structured tool-call (if it parses
+    /// as a leaked call to a registered tool) or as a plain text delta.
+    pub buffered_text: String,
+    /// Whether the currently-buffered text triggered leak-detect mode.
+    /// Decided on the first non-empty content chunk and locked for the turn.
+    pub buffering: bool,
+    /// Have we seen at least one non-empty content chunk this turn?
+    pub seen_content: bool,
+}
+
+impl ParseState {
+    /// Initialise state with the list of registered tool names so the
+    /// content-leak detector can validate any extracted tool name.
+    pub fn with_tools(tool_names: Vec<String>) -> Self {
+        Self {
+            tool_names,
+            ..Default::default()
+        }
+    }
+}
+
+/// Some small Ollama models (notably qwen2.5-coder) emit tool calls as a
+/// markdown-fenced JSON object in the `content` field instead of via
+/// the structured `tool_calls` channel — see issue #50. Try to recognise
+/// that pattern and recover the (name, arguments_json) so the agent loop
+/// can dispatch it as a real tool call. Returns `None` when the buffer
+/// doesn't match the leak shape or names a tool we didn't advertise.
+fn try_extract_leaked_tool_call(text: &str, tool_names: &[String]) -> Option<(String, String)> {
+    let mut s = text.trim();
+    // Strip an optional ```json / ``` fence pair.
+    if let Some(rest) = s.strip_prefix("```json") {
+        s = rest.trim();
+    } else if let Some(rest) = s.strip_prefix("```") {
+        s = rest.trim();
+    }
+    if let Some(stripped) = s.strip_suffix("```") {
+        s = stripped.trim();
+    }
+
+    if !s.starts_with('{') || !s.ends_with('}') {
+        return None;
+    }
+
+    let v: Value = serde_json::from_str(s).ok()?;
+    let name = v.get("name")?.as_str()?.to_string();
+    let arguments = v.get("arguments")?;
+    if !arguments.is_object() {
+        return None;
+    }
+    if !tool_names.iter().any(|n| n == &name) {
+        return None;
+    }
+    Some((name, arguments.to_string()))
 }
 
 /// Parse a single NDJSON line from the Ollama stream. Emits zero or more events.
@@ -335,7 +395,22 @@ pub fn parse_line(line: &str, state: &mut ParseState) -> Result<Vec<ProviderEven
     // Text content delta.
     if let Some(text) = v.pointer("/message/content").and_then(Value::as_str) {
         if !text.is_empty() {
-            out.push(ProviderEvent::TextDelta(text.to_string()));
+            // First content chunk for this turn: when tools are advertised,
+            // peek at the leading characters to decide whether to enter
+            // leak-detection mode (buffer until done) or stream normally.
+            // We only buffer on suspicious prefixes to preserve streaming
+            // UX for ordinary replies.
+            if !state.seen_content && !state.tool_names.is_empty() {
+                let head = text.trim_start();
+                state.buffering = head.starts_with("```") || head.starts_with('{');
+            }
+            state.seen_content = true;
+
+            if state.buffering {
+                state.buffered_text.push_str(text);
+            } else {
+                out.push(ProviderEvent::TextDelta(text.to_string()));
+            }
         }
     }
 
@@ -379,8 +454,30 @@ pub fn parse_line(line: &str, state: &mut ParseState) -> Result<Vec<ProviderEven
         }
     }
 
-    // Done marker with usage.
+    // Done marker with usage. Before emitting MessageStop, flush any text
+    // we held back for leak detection: convert recognised content-leaked
+    // tool calls into structured ToolUse events, otherwise pass the text
+    // through unchanged.
     if v.get("done").and_then(Value::as_bool).unwrap_or(false) {
+        if state.buffering && !state.buffered_text.is_empty() {
+            let buffered = std::mem::take(&mut state.buffered_text);
+            if let Some((name, args_json)) =
+                try_extract_leaked_tool_call(&buffered, &state.tool_names)
+            {
+                out.push(ProviderEvent::ToolUseStart {
+                    id: "ollama-leaked-call".into(),
+                    name,
+                });
+                out.push(ProviderEvent::ToolUseDelta {
+                    partial_json: args_json,
+                });
+                out.push(ProviderEvent::ContentBlockStop);
+            } else {
+                out.push(ProviderEvent::TextDelta(buffered));
+            }
+            state.buffering = false;
+        }
+
         let stop_reason = v
             .get("done_reason")
             .and_then(Value::as_str)
@@ -438,6 +535,127 @@ mod tests {
             }
             e => panic!("expected MessageStop, got {:?}", e),
         }
+    }
+
+    #[test]
+    fn leaked_tool_call_in_fenced_json_is_recovered() {
+        // qwen2.5-coder symptom (issue #50 / #56): the model emits a
+        // tool call as a markdown-fenced JSON object in `content`
+        // instead of via the structured `tool_calls` field. With the
+        // tool name registered, the leak detector should convert it.
+        let mut state = ParseState::with_tools(vec!["Write".into()]);
+        let events = {
+            let mut out = Vec::new();
+            for line in [
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":"```json\n"},"done":false}"#,
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":"{\"name\": \"Write\", \"arguments\": {\"path\": \"/tmp/dog.txt\", \"content\": \"dog\"}}"},"done":false}"#,
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":"\n```"},"done":false}"#,
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}"#,
+            ] {
+                out.extend(parse_line(line, &mut state).unwrap());
+            }
+            out
+        };
+
+        // Expect: MessageStart, ToolUseStart(Write), ToolUseDelta(args), ContentBlockStop, MessageStop.
+        // No TextDelta — the leaked JSON should not have leaked to the user.
+        assert!(matches!(events[0], ProviderEvent::MessageStart { .. }));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::TextDelta(_))),
+            "leaked JSON should not surface as TextDelta, got events: {events:?}"
+        );
+        assert_eq!(
+            events[1],
+            ProviderEvent::ToolUseStart {
+                id: "ollama-leaked-call".into(),
+                name: "Write".into(),
+            }
+        );
+        match &events[2] {
+            ProviderEvent::ToolUseDelta { partial_json } => {
+                assert!(partial_json.contains("/tmp/dog.txt"));
+                assert!(partial_json.contains("\"dog\""));
+            }
+            e => panic!("expected ToolUseDelta, got {e:?}"),
+        }
+        assert_eq!(events[3], ProviderEvent::ContentBlockStop);
+        assert!(matches!(events[4], ProviderEvent::MessageStop { .. }));
+    }
+
+    #[test]
+    fn leaked_tool_call_unfenced_bare_json_is_recovered() {
+        // Same leak shape, but without the markdown fences.
+        let mut state = ParseState::with_tools(vec!["Read".into()]);
+        let events = {
+            let mut out = Vec::new();
+            for line in [
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":"{\"name\": \"Read\", \"arguments\": {\"path\": \"/x\"}}"},"done":false}"#,
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":""},"done":true}"#,
+            ] {
+                out.extend(parse_line(line, &mut state).unwrap());
+            }
+            out
+        };
+        assert_eq!(
+            events[1],
+            ProviderEvent::ToolUseStart {
+                id: "ollama-leaked-call".into(),
+                name: "Read".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn fenced_json_for_unknown_tool_passes_through_as_text() {
+        // The model emitted a JSON object that names a tool not in our
+        // registry — could be legitimate code in a reply (e.g. user
+        // asked to show a JSON example). Don't convert; keep the text.
+        let mut state = ParseState::with_tools(vec!["Read".into(), "Write".into()]);
+        let events = {
+            let mut out = Vec::new();
+            for line in [
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":"```json\n{\"name\": \"NotARealTool\", \"arguments\": {}}\n```"},"done":false}"#,
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":""},"done":true}"#,
+            ] {
+                out.extend(parse_line(line, &mut state).unwrap());
+            }
+            out
+        };
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::TextDelta(_))),
+            "non-tool JSON should survive as text, events: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::ToolUseStart { .. })),
+            "should not mistake unknown name for a tool, events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_text_streams_without_buffering_when_tools_present() {
+        // First content chunk doesn't look like a leak prefix → no
+        // buffering, deltas flow through immediately as before. Verifies
+        // the leak-detector doesn't regress streaming UX for normal replies.
+        let mut state = ParseState::with_tools(vec!["Read".into()]);
+        let events = {
+            let mut out = Vec::new();
+            for line in [
+                r#"{"model":"llama3.2","message":{"role":"assistant","content":"Hello"},"done":false}"#,
+                r#"{"model":"llama3.2","message":{"role":"assistant","content":" there"},"done":false}"#,
+                r#"{"model":"llama3.2","message":{"role":"assistant","content":""},"done":true}"#,
+            ] {
+                out.extend(parse_line(line, &mut state).unwrap());
+            }
+            out
+        };
+        assert_eq!(events[1], ProviderEvent::TextDelta("Hello".into()));
+        assert_eq!(events[2], ProviderEvent::TextDelta(" there".into()));
     }
 
     #[test]

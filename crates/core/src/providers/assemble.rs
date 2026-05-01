@@ -209,6 +209,19 @@ where
                     }
                 }
                 ProviderEvent::ThinkingDelta(s) => {
+                    // A structured ThinkingDelta means the provider
+                    // already separates reasoning (DashScope/OpenRouter
+                    // `reasoning_content`, Ollama `message.thinking`,
+                    // OpenAI o-series). The implicit-thinking
+                    // pre-seed was guarding against models that stream
+                    // raw chain-of-thought as text up to a closing
+                    // `</think>` tag — that mode is mutually exclusive
+                    // with structured reasoning, so flip the buffer
+                    // off the first time we see one. Without this,
+                    // qwen3.6 on DashScope would never emit any text
+                    // (the `</think>` close never arrives in the
+                    // content stream because reasoning lives elsewhere).
+                    think.in_block = false;
                     yield AssembledEvent::Thinking(s);
                 }
                 ProviderEvent::ToolUseStart { id, name } => {
@@ -302,6 +315,40 @@ mod tests {
         assert_eq!(r.tool_uses.len(), 0);
         assert_eq!(r.stop_reason.as_deref(), Some("end_turn"));
         assert_eq!(r.usage.unwrap().output_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn structured_thinking_disables_implicit_thinking_buffer() {
+        // qwen3.6-flash on DashScope: the model name contains "qwen3" so
+        // is_implicit_thinking_model returns true and the assembler used
+        // to pre-seed in_block=true, waiting for a `</think>` tag in the
+        // text stream that never arrives because reasoning lives in a
+        // separate `reasoning_content` field. Result: every TextDelta
+        // got swallowed as Thinking and the user saw an empty bubble.
+        // Once a structured ThinkingDelta lands we know reasoning is
+        // out-of-band, so subsequent TextDeltas should render as the
+        // answer.
+        let r = collected(vec![
+            ProviderEvent::MessageStart {
+                model: "qwen3.6-flash".into(),
+            },
+            ProviderEvent::ThinkingDelta("Let me consider…".into()),
+            ProviderEvent::TextDelta("Hello".into()),
+            ProviderEvent::TextDelta("!".into()),
+            ProviderEvent::ContentBlockStop,
+            ProviderEvent::MessageStop {
+                stop_reason: Some("stop".into()),
+                usage: None,
+            },
+        ])
+        .await;
+
+        assert_eq!(r.text, "Hello!");
+        assert!(
+            r.thinking.contains("consider"),
+            "reasoning should still land in a Thinking block, got: {:?}",
+            r.thinking
+        );
     }
 
     #[tokio::test]

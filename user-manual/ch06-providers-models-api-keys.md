@@ -1,7 +1,8 @@
 # Chapter 6 — Providers, models & API keys
 
-thClaws talks to **eleven providers**, auto-detected from the model name.
-Switch any time with `/model` or `/provider`.
+thClaws talks to **thirteen providers**, auto-detected from the model name.
+Switch any time with `/model`, `/provider`, or by clicking the provider/model
+chip in the sidebar (Desktop GUI, v0.7.2+).
 
 ## Provider overview
 
@@ -18,6 +19,8 @@ Switch any time with `/model` or `/provider`.
 | Ollama | `ollama/*` | — (local) | NDJSON streaming; no auth |
 | Ollama Anthropic | `oa/*` | — (local, v0.14+) | Ollama's Anthropic-compatible `/v1/messages` endpoint |
 | DashScope | `qwen-*`, `qwq-*` | `DASHSCOPE_API_KEY` | Alibaba Qwen; automatic caching |
+| DeepSeek | `deepseek-*` | `DEEPSEEK_API_KEY` (+ `DEEPSEEK_BASE_URL`) | V4 line: `deepseek-v4-flash`, `deepseek-v4-pro`. Older aliases `deepseek-chat` / `deepseek-reasoner` still work as wire-level aliases |
+| ThaiLLM (NSTDA) | `thaillm/*` | `THAILLM_API_KEY` | Aggregator at `thaillm.or.th` for four 8B Thai-tuned models (OpenThaiGPT, Typhoon-S, Pathumma, THaLLE). Aliases (case-insensitive): `openthaigpt`, `typhoon`, `pathumma`, `thalle` |
 
 The default on first run is `claude-sonnet-4-6`; change it with
 `--model` on the command line or persist in `settings.json`.
@@ -88,8 +91,8 @@ next request echoes it back **only** for providers that need it.
 
 | Family | Example model id | Provider |
 |---|---|---|
-| DeepSeek v4 | `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro` | OpenRouter |
-| DeepSeek r1 | `deepseek/deepseek-r1`, `deepseek-r1` | OpenRouter, native |
+| DeepSeek v4 | `deepseek-v4-flash`, `deepseek-v4-pro` (native) · `deepseek/deepseek-v4-*` (OpenRouter) | DeepSeek, OpenRouter |
+| DeepSeek r1 | `deepseek-reasoner` (native) · `deepseek/deepseek-r1`, `deepseek-r1` | DeepSeek, OpenRouter |
 | OpenAI o-series | `openai/o1-mini`, `openai/o3`, `openai/o4-*` | OpenRouter |
 
 For everything outside those families (gpt-4o, claude-sonnet-4-6,

@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.6.4"
+version = "0.7.4"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -30,6 +30,45 @@ uuid = { version = "1", features = ["v4"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 arboard = "3"
+# PDF generation backing the PdfCreate tool. Embedded Noto Sans + Noto Sans
+# Thai TTFs (resources/fonts/) ship Thai-native glyphs without a system-font
+# dependency. printpdf 0.7's font API takes any `Read` — we feed `&[u8]`
+# from `include_bytes!`.
+printpdf = "0.7"
+# Markdown parser used by PdfCreate to walk paragraphs, headings, lists,
+# emphasis, and code blocks before laying them out in the PDF. No HTML
+# features needed — we render directly to printpdf primitives.
+pulldown-cmark = { version = "0.10", default-features = false }
+# DOCX generation backing DocxCreate. Markdown → Word XML via docx-rs's
+# document builder; renders runs/paragraphs/tables/headings/lists with
+# explicit fontTable references (Calibri for Latin, Noto Sans Thai for
+# Thai range) so Word picks the right glyph stream per codepoint.
+docx-rs = "0.4"
+# XLSX generation backing XlsxCreate. Port of the heavily-used Python
+# xlsxwriter (same author, John McNamara). High-level API for cells,
+# formulas, formats, autofilter, freeze panes; we use only the basic
+# write-cell + auto-width subset for v1.
+rust_xlsxwriter = "0.94"
+# OOXML XML emit/parse — used by PptxCreate to assemble slide XML
+# inside the bundled minimal pptx template, and by Tier 2's XlsxRead /
+# DocxRead / PptxRead to walk extracted document.xml / sheet1.xml.
+quick-xml = "0.39"
+# RFC 4180 CSV parser used by XlsxCreate to ingest CSV/TSV string input.
+# JSON 2D-array input is also accepted (typed cells); CSV is the more
+# common form so reusing a vetted parser beats hand-rolling quote/escape.
+csv = "1"
+# XLSX/XLS/XLSB/ODS reader used by XlsxRead. Mature MIT/Apache crate
+# with broad real-world format coverage. We only consume the read API
+# (no formula evaluation) — values are pulled per-cell as their raw
+# Excel-typed form (Number / String / Bool / DateTime) and serialized
+# to CSV or JSON depending on the tool's `format` argument.
+calamine = "0.34"
+# XLSX read+modify+write used by XlsxEdit. Purpose-built for round-trip
+# format preservation: load a file, mutate specific cells / sheets, save
+# without touching unrelated formatting (the XLSX skill's headline
+# requirement). rust_xlsxwriter is write-only and would reset every
+# style on load → unsuitable for edits.
+umya-spreadsheet = "2"
 tao = { version = "0.34", optional = true }
 wry = { version = "0.54", optional = true }
 # Markdown → HTML for the Files-tab preview. GFM tables, strikethrough,
@@ -81,3 +120,18 @@ path = "src/bin/policy_tool.rs"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 wiremock = "0.6"
+
+# Embed the .ico resource into the Windows PE so Explorer / taskbar /
+# alt-tab pick up the icon. Only pulled in for Windows targets; macOS
+# and Linux builds skip this dependency entirely. Issue #53.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# AttachConsole(ATTACH_PARENT_PROCESS) on app startup so `--version`
+# / `--help` / any print-and-exit flag get stdout when the GUI binary
+# is launched from a terminal. The `windows_subsystem = "windows"`
+# attribute on app.rs (required to suppress the console flicker on
+# File Explorer double-click) otherwise detaches stdout entirely.
+# Issue #48.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

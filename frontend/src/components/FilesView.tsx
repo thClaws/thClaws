@@ -88,8 +88,23 @@ function isTextEditable(path: string): boolean {
 }
 
 function isMarkdownPath(path: string): boolean {
+  // Used to gate the iframe's `srcDoc` branch (vs. the asset-URL fetch
+  // branch). Backend-rendered HTML previews — Markdown source files
+  // *and* the Office formats whose extracted text we render through
+  // the same comrak pipeline — both want srcDoc. Adding the office
+  // extensions here is what makes Files-tab previews work for them.
   const e = extOf(path);
-  return e === "md" || e === "markdown";
+  return (
+    e === "md" ||
+    e === "markdown" ||
+    e === "docx" ||
+    e === "xlsx" ||
+    e === "xlsm" ||
+    e === "xlsb" ||
+    e === "xls" ||
+    e === "ods" ||
+    e === "pptx"
+  );
 }
 
 // Build a same-origin URL for the custom protocol's file-asset handler.
@@ -119,6 +134,13 @@ export function FilesView({ active }: Props) {
     readMode: ReadMode;
   } | null>(null);
 
+  // Bumped on every Refresh click; used as part of iframe `key` props so
+  // the iframe unmounts + re-fetches its asset (otherwise the browser
+  // caches the iframe content even after the file on disk changes —
+  // most visible with the productivity plugin's dashboard.html, which
+  // an agent regenerates after every TASKS.md mutation).
+  const [previewVersion, setPreviewVersion] = useState(0);
+
   const [mode, setMode] = useState<ViewMode>("preview");
   // Source-text kept separate from preview.content because the preview
   // content may be rendered HTML while the editor always operates on
@@ -134,16 +156,41 @@ export function FilesView({ active }: Props) {
         setEntries(msg.entries as FileEntry[]);
         if (msg.path) setCurrentPath(msg.path as string);
       } else if (msg.type === "file_content") {
+        const incomingPath = msg.path as string;
+        const incomingContent = msg.content as string;
+        // Dashboard host bridge: if a dashboard requested THIS
+        // file via the load message, forward the content back to
+        // it and DON'T touch the preview pane state — the user
+        // is viewing dashboard.html, not TASKS.md.
+        const pending = pendingDashboardLoad.current;
+        if (pending && pending.targetPath === incomingPath) {
+          pendingDashboardLoad.current = null;
+          try {
+            pending.source.postMessage(
+              {
+                type: "thclaws-dashboard-load-ack",
+                reqId: pending.reqId,
+                ok: true,
+                content: incomingContent,
+              },
+              "*",
+            );
+          } catch {
+            // iframe was torn down between request and response —
+            // benign.
+          }
+          return;
+        }
         const incomingReadMode: ReadMode =
           (msg.mode as ReadMode) ?? "preview";
         setPreview({
-          path: msg.path as string,
-          content: msg.content as string,
+          path: incomingPath,
+          content: incomingContent,
           mime: msg.mime as string,
           readMode: incomingReadMode,
         });
         if (incomingReadMode === "source") {
-          setEditorSource(msg.content as string);
+          setEditorSource(incomingContent);
           setEditorDirty(false);
         }
       } else if (msg.type === "file_written") {
@@ -230,6 +277,34 @@ export function FilesView({ active }: Props) {
     send({ type: "file_read", path: preview.path, mode: "source" });
   };
 
+  /// Refresh the current preview — re-fetches content from disk via
+  /// the backend AND forces the preview iframe (when applicable) to
+  /// re-mount so it re-fetches its asset URL. Needed because:
+  ///   1. iframe content is browser-cached by URL; when an agent
+  ///      regenerates a file on disk, the iframe still shows the old
+  ///      content until it remounts.
+  ///   2. The send() re-read alone updates preview.content (used for
+  ///      .md and code-mirror previews), but iframe-rendered HTML
+  ///      uses src={assetUrl(path)} not srcDoc={content}, so it
+  ///      doesn't notice the state change without a key bump.
+  const refreshPreview = () => {
+    if (!preview) return;
+    if (editorDirty) {
+      const ok = window.confirm(
+        "You have unsaved changes in the editor. Refresh anyway? Unsaved edits will be lost."
+      );
+      if (!ok) return;
+      setEditorDirty(false);
+    }
+    setPreviewVersion((v) => v + 1);
+    send({
+      type: "file_read",
+      path: preview.path,
+      mode: mode === "preview" ? "preview" : "source",
+      theme: themeMode,
+    });
+  };
+
   const exitEditMode = async () => {
     // If there are unsaved edits, surface a native OS confirm so the
     // user can abort a misclick. When the editor is already clean
@@ -255,6 +330,99 @@ export function FilesView({ active }: Props) {
     if (!preview || !editorDirty) return;
     send({ type: "file_write", path: preview.path, content: editorSource });
   }, [preview, editorDirty, editorSource]);
+
+  // ── thClaws → dashboard host bridge ─────────────────────────────
+  //
+  // Lets self-contained HTML dashboards (e.g. the productivity
+  // plugin's dashboard.html, opened in an iframe via this Files
+  // tab) save AND load sibling files via thClaws's IPC — without
+  // ever prompting the user for a File System Access API permission
+  // and without depending on agent-regenerated stale snapshots.
+  //
+  // Two message types from the iframe:
+  //   - thclaws-dashboard-save  {filename, content}  →  file_write IPC
+  //   - thclaws-dashboard-load  {filename}           →  file_read IPC
+  // Each pairs with a *-ack response back to the same iframe.
+  //
+  // Sender origin isn't checked because the iframe runs sandboxed
+  // from a `thclaws://` asset URL — the attack surface is bounded
+  // to our own dashboard content.
+  //
+  // The load path correlates async file_read responses to requesting
+  // iframes via a single-slot pendingDashboardLoad ref. Concurrent
+  // requests overwrite (rare in practice — one dashboard, one read).
+  const pendingDashboardLoad = useRef<{
+    source: Window;
+    reqId: string;
+    targetPath: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      const d = e.data as
+        | {
+            type?: string;
+            reqId?: string;
+            filename?: string;
+            content?: string;
+          }
+        | undefined;
+      if (!d || !preview) return;
+
+      // Resolve `filename` (e.g. "TASKS.md") against the directory of
+      // the currently-previewed file. So opening
+      // `/proj/business-cards/dashboard.html` and asking for
+      // "TASKS.md" hits `/proj/business-cards/TASKS.md`.
+      const slash = preview.path.lastIndexOf("/");
+      const dir = slash > 0 ? preview.path.slice(0, slash) : ".";
+      const targetPath = `${dir}/${d.filename || "TASKS.md"}`;
+
+      if (d.type === "thclaws-dashboard-save") {
+        try {
+          send({
+            type: "file_write",
+            path: targetPath,
+            content: d.content || "",
+          });
+          if (e.source && "postMessage" in e.source) {
+            (e.source as Window).postMessage(
+              {
+                type: "thclaws-dashboard-save-ack",
+                reqId: d.reqId,
+                ok: true,
+              },
+              "*",
+            );
+          }
+        } catch (err) {
+          if (e.source && "postMessage" in e.source) {
+            (e.source as Window).postMessage(
+              {
+                type: "thclaws-dashboard-save-ack",
+                reqId: d.reqId,
+                ok: false,
+                error: String(err),
+              },
+              "*",
+            );
+          }
+        }
+      } else if (d.type === "thclaws-dashboard-load") {
+        if (!e.source || !("postMessage" in e.source) || !d.reqId) return;
+        // Stash the requesting iframe + reqId so the file_content
+        // subscriber below can route the response back. Single-slot
+        // — concurrent requests overwrite (rare in practice).
+        pendingDashboardLoad.current = {
+          source: e.source as Window,
+          reqId: d.reqId,
+          targetPath,
+        };
+        send({ type: "file_read", path: targetPath, mode: "source" });
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, [preview]);
 
   // Global Cmd/Ctrl-S when Files tab is active + in edit mode.
   useEffect(() => {
@@ -376,6 +544,14 @@ export function FilesView({ active }: Props) {
                     {saveToast}
                   </span>
                 )}
+                <button
+                  onClick={refreshPreview}
+                  className="flex items-center gap-1 text-[11px] px-2 py-1 rounded hover:bg-white/5"
+                  style={{ color: "var(--text-primary)" }}
+                  title="Re-read this file from disk and re-render the preview"
+                >
+                  Refresh
+                </button>
                 {canEdit && mode === "preview" && (
                   <button
                     onClick={enterEditMode}
@@ -457,6 +633,7 @@ export function FilesView({ active }: Props) {
                 // fetch the raw .md via the custom protocol and the
                 // iframe would end up blank.
                 <iframe
+                  key={`md-${preview.path}-${previewVersion}`}
                   srcDoc={preview.content}
                   className="w-full flex-1 min-h-0 rounded border"
                   style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
@@ -465,6 +642,7 @@ export function FilesView({ active }: Props) {
                 />
               ) : (
                 <iframe
+                  key={`html-${preview.path}-${previewVersion}`}
                   src={assetUrl(preview.path)}
                   className="w-full flex-1 min-h-0 rounded border"
                   style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}

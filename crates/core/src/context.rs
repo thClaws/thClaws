@@ -10,6 +10,10 @@ use crate::error::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// for Windows creation flag to hide the console window
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitInfo {
     pub branch: String,
@@ -47,11 +51,16 @@ impl GitInfo {
     /// or if git is not installed.
     pub fn from_cwd(cwd: &Path) -> Option<Self> {
         let run = |args: &[&str]| -> Option<String> {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .ok()?;
+            let mut cmd = Command::new("git");
+
+            // for Windows creation flag to hide the console window
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(0x08000000);
+
+            cmd.args(args).current_dir(cwd);
+
+            let out = cmd.output().ok()?;
+
             if !out.status.success() {
                 return None;
             }
