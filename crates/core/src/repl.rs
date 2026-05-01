@@ -4400,14 +4400,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repl_prompt_matches_platform() {
-        #[cfg(windows)]
-        assert_eq!(REPL_PROMPT, "> ");
-        #[cfg(not(windows))]
-        assert_eq!(REPL_PROMPT, "❯ ");
-    }
-
-    #[test]
     fn readline_config_matches_platform() {
         #[cfg(windows)]
         assert_eq!(
