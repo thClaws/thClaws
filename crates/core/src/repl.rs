@@ -31,6 +31,13 @@ const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_BOLD: &str = "\x1b[1m";
 const REPL_PROMPT: &str = "❯ ";
 
+fn readline_config() -> rustyline::Config {
+    let builder = rustyline::Config::builder();
+    #[cfg(windows)]
+    let builder = builder.behavior(rustyline::Behavior::PreferTerm);
+    builder.build()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
     Help,
@@ -2255,7 +2262,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     let mut rl: rustyline::Editor<
         crate::cli_completer::SlashCompleter,
         rustyline::history::DefaultHistory,
-    > = rustyline::Editor::new().map_err(|e| Error::Agent(format!("readline init: {e}")))?;
+    > = rustyline::Editor::with_config(readline_config())
+        .map_err(|e| Error::Agent(format!("readline init: {e}")))?;
     rl.set_helper(Some(crate::cli_completer::SlashCompleter));
     let rl_mutex = std::sync::Arc::new(std::sync::Mutex::new(rl));
 
@@ -4237,7 +4245,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 
         // Run a turn and stream the output live.
         // Ctrl-C during streaming cancels the turn cleanly.
-        lead_log!("\n{COLOR_CYAN}❯ {line}{COLOR_RESET}\n{COLOR_GREEN}");
+        lead_log!("\n{COLOR_CYAN}{REPL_PROMPT}{line}{COLOR_RESET}\n{COLOR_GREEN}");
         print!("{COLOR_GREEN}");
         let _ = std::io::stdout().flush();
         let turn_start = std::time::Instant::now();
@@ -4390,6 +4398,25 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repl_prompt_matches_platform() {
+        #[cfg(windows)]
+        assert_eq!(REPL_PROMPT, "> ");
+        #[cfg(not(windows))]
+        assert_eq!(REPL_PROMPT, "❯ ");
+    }
+
+    #[test]
+    fn readline_config_matches_platform() {
+        #[cfg(windows)]
+        assert_eq!(
+            readline_config().behavior(),
+            rustyline::Behavior::PreferTerm
+        );
+        #[cfg(not(windows))]
+        assert_eq!(readline_config().behavior(), rustyline::Behavior::Stdio);
+    }
 
     #[test]
     fn parse_slash_returns_none_for_plain_text() {

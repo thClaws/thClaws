@@ -4,15 +4,6 @@
 //! `--cli`: interactive REPL in the terminal (same as thclaws-cli).
 //! `--print`: non-interactive single-prompt mode (implies --cli).
 
-//! To create a Rust GUI application that runs without spawning a command-line (terminal) window,
-//! add this attribute to the very top of your main.rs file:
-//!
-//! #![windows_subsystem = "windows"]
-//!
-//! macOS and Linux?
-//! Unlike Windows, macOS and Linux do not automatically spawn a terminal for every executable.
-#![windows_subsystem = "windows"]
-
 use clap::Parser;
 use thclaws_core::config::AppConfig;
 use thclaws_core::dotenv::load_dotenv;
@@ -94,37 +85,25 @@ struct Cli {
     prompt: Vec<String>,
 }
 
-/// Re-attach stdout/stderr to the parent terminal on Windows so
-/// `--version`, `--help`, and any print-and-exit flag actually emit
-/// their output to the shell that launched us. Without this, the
-/// `windows_subsystem = "windows"` attribute (declared at the top of
-/// this file to prevent a console flicker on File Explorer double-click)
-/// detaches stdio entirely and clap's writes go nowhere. Issue #48.
-///
-/// `AttachConsole(ATTACH_PARENT_PROCESS)` is the same pattern used by
-/// `winget`, `gh.exe`, modern Tauri apps, etc.: harmless when there's
-/// no parent console (returns 0 / GetLastError = ERROR_INVALID_HANDLE
-/// for double-click launches), and gives us a working stdio when one
-/// exists. No-op on macOS / Linux.
+/// Hide the console allocated for the Windows console-subsystem binary when
+/// the user is launching the GUI. CLI mode keeps the console attached so
+/// `thclaws --cli` can read keys normally from PowerShell/CMD.
 #[cfg(windows)]
-fn attach_parent_console() {
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-    // SAFETY: `AttachConsole` is a Win32 entry point with no Rust
-    // invariants; calling it before any stdio I/O is the documented
-    // contract. We deliberately ignore the return value — failure
-    // means "no parent console available" (e.g. double-click launch),
-    // which is the same state we'd be in if we hadn't called it at all.
+fn detach_console_for_gui() {
+    use windows_sys::Win32::System::Console::FreeConsole;
+
+    // SAFETY: `FreeConsole` detaches this process from its console and has no
+    // Rust-side invariants. Failure only means there was no console to detach.
     unsafe {
-        AttachConsole(ATTACH_PARENT_PROCESS);
+        FreeConsole();
     }
 }
 
 #[cfg(not(windows))]
-fn attach_parent_console() {}
+fn detach_console_for_gui() {}
 
 #[tokio::main]
 async fn main() {
-    attach_parent_console();
     secrets::load_into_env();
     endpoints::load_into_env();
     load_dotenv();
@@ -146,6 +125,7 @@ async fn main() {
     if !use_cli {
         #[cfg(feature = "gui")]
         {
+            detach_console_for_gui();
             thclaws_core::gui::run_gui();
             return;
         }
