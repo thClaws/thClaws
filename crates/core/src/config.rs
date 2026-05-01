@@ -198,6 +198,14 @@ pub struct ProjectConfig {
     /// GUI window height (logical pixels). Default: 700.
     #[serde(rename = "windowHeight")]
     pub window_height: Option<f64>,
+    /// User-controlled GUI zoom multiplier applied via wry's
+    /// `WebView::zoom()` so HiDPI / 4K displays can be tuned without
+    /// changing OS-level display scaling. `None` (default) leaves the
+    /// WebView at its native 1.0 scale; values typically range from
+    /// 0.75 to 2.0. Persisted on every change made through the
+    /// Settings panel. Issue #47.
+    #[serde(rename = "guiScale")]
+    pub gui_scale: Option<f64>,
     /// Enable the Agent Teams feature (TeamCreate, SpawnTeammate, SendMessage,
     /// CheckInbox, TeamTask*, TeamMerge, lead coordination prompt, inbox
     /// poller, GUI Team tab). Off by default because teams spin up multiple
@@ -241,6 +249,7 @@ impl Default for ProjectConfig {
             disallowed_tools: None,
             window_width: None,
             window_height: None,
+            gui_scale: None,
             team_enabled: Some(false),
             show_raw_response: None,
             kms: None,
@@ -355,6 +364,14 @@ impl ProjectConfig {
 
     pub fn set_model(&mut self, model: &str) {
         self.model = Some(model.to_string());
+    }
+
+    /// Persist the GUI zoom factor. Clamped to a sane range so a
+    /// stray slider value can't push text into single-pixel territory
+    /// or fill the screen — matches the bounds VS Code / Slack use.
+    pub fn set_gui_scale(&mut self, scale: f64) {
+        let clamped = scale.clamp(0.5, 3.0);
+        self.gui_scale = Some(clamped);
     }
 
     /// Persist the permission mode (`"auto"` / `"ask"`) to project

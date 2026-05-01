@@ -18,6 +18,10 @@ export function SettingsMenu({
   const { mode, setMode } = useTheme();
   const [teamEnabled, setTeamEnabled] = useState<boolean | null>(null);
   const [teamDirty, setTeamDirty] = useState(false);
+  // Persisted GUI zoom factor (multiplier, 1.0 = native). Loaded
+  // once when the menu opens; updated optimistically on selection
+  // so the dropdown reflects the click without a round-trip. #47.
+  const [guiScale, setGuiScale] = useState<number | null>(null);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -29,11 +33,19 @@ export function SettingsMenu({
       ) {
         setTeamEnabled(msg.enabled as boolean);
         setTeamDirty(true);
+      } else if (msg.type === "gui_scale_value" && typeof msg.scale === "number") {
+        setGuiScale(msg.scale as number);
       }
     });
     send({ type: "team_enabled_get" });
+    send({ type: "gui_scale_get" });
     return unsub;
   }, []);
+
+  const setZoom = (scale: number) => {
+    setGuiScale(scale);
+    send({ type: "gui_set_zoom", scale });
+  };
 
   const toggleTeam = () => {
     const next = !(teamEnabled ?? false);
@@ -179,6 +191,33 @@ export function SettingsMenu({
           </button>
         );
       })}
+      <div
+        className="px-3 py-1.5 flex items-center gap-2"
+        style={{ color: "var(--text-primary)", fontSize: "12px" }}
+      >
+        <span style={{ color: "var(--text-secondary)" }}>GUI scale</span>
+        <select
+          value={guiScale ?? 1.0}
+          onChange={(e) => setZoom(parseFloat(e.target.value))}
+          className="ml-auto rounded px-2 py-0.5 outline-none"
+          style={{
+            background: "var(--bg-tertiary)",
+            border: "1px solid var(--border)",
+            color: "var(--text-primary)",
+            fontSize: "12px",
+          }}
+          title="Tune GUI text size for HiDPI / 4K displays — applies live"
+        >
+          <option value={0.75}>75%</option>
+          <option value={0.9}>90%</option>
+          <option value={1.0}>100%</option>
+          <option value={1.1}>110%</option>
+          <option value={1.25}>125%</option>
+          <option value={1.5}>150%</option>
+          <option value={1.75}>175%</option>
+          <option value={2.0}>200%</option>
+        </select>
+      </div>
       <div
         className="my-1"
         style={{ borderTop: "1px solid var(--border)" }}
