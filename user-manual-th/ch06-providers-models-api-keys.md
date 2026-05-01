@@ -1,7 +1,8 @@
 # บทที่ 6 — provider, model และ API key
 
-thClaws คุยกับ **provider ได้ทั้งหมดสิบสองราย** โดยตรวจจับให้อัตโนมัติ
-จากชื่อ model และสลับได้ตลอดเวลาด้วย `/model` หรือ `/provider`
+thClaws คุยกับ **provider ได้ทั้งหมดสิบสามราย** โดยตรวจจับให้อัตโนมัติ
+จากชื่อ model และสลับได้ตลอดเวลาด้วย `/model`, `/provider` หรือ
+คลิกที่แถบ provider/model ใน sidebar (Desktop GUI, v0.7.2+)
 
 ## ภาพรวม provider
 
@@ -19,6 +20,7 @@ thClaws คุยกับ **provider ได้ทั้งหมดสิบส
 | Ollama Anthropic | `oa/*` | — (local, v0.14+) | endpoint `/v1/messages` ของ Ollama ที่เข้ากันกับ Anthropic |
 | DashScope | `qwen-*`, `qwq-*` | `DASHSCOPE_API_KEY` | Qwen ของ Alibaba; caching อัตโนมัติ |
 | DeepSeek | `deepseek-*` | `DEEPSEEK_API_KEY` (+ `DEEPSEEK_BASE_URL`) | สาย V4: `deepseek-v4-flash`, `deepseek-v4-pro` ส่วน alias เดิม `deepseek-chat` / `deepseek-reasoner` ยังใช้ได้ในระดับ wire |
+| ThaiLLM (สวทช.) | `thaillm/*` | `THAILLM_API_KEY` | aggregator ที่ `thaillm.or.th` รวม model 8B ภาษาไทยสี่ตัว (OpenThaiGPT, Typhoon-S, Pathumma, THaLLE) มี alias (case-insensitive): `openthaigpt`, `typhoon`, `pathumma`, `thalle` |
 
 ค่าเริ่มต้นครั้งแรกคือ `claude-sonnet-4-6` เปลี่ยนได้ด้วย
 `--model` ที่ command line หรือบันทึกลง `settings.json`

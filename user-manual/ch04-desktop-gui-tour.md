@@ -21,7 +21,7 @@ The sidebar is always visible and holds four sections:
 
 | Section | Shows | Actions |
 |---|---|---|
-| **Provider** | Active provider + model, ready/not-ready dot | Click to open API keys |
+| **Provider** | Active provider + model, ready/not-ready dot, ▾ chevron | Click to open the inline model picker (v0.7.2+) |
 | **Sessions** | Last 10 saved sessions (title or ID) | `+` to start a new session · hover row → pencil to rename · click to load |
 | **Knowledge** | Every discoverable KMS with attach checkbox | `+` to create a new KMS — see [chapter 9](ch09-knowledge-bases-kms.md) |
 | **MCP Servers** | Active MCP servers + their tool count | Read-only here — configure via `/mcp add` |
@@ -32,6 +32,8 @@ The **Provider** section has a visual health indicator:
 - 🔴 red dot + ~~strikethrough~~ + "no API key — set one in Settings": provider has no credentials
 
 When a key is saved via Settings, the dot flips to green and the active model may auto-switch to the first provider with credentials — see [chapter 6](ch06-providers-models-api-keys.md#auto-switch-on-key-save).
+
+**Inline model picker** (v0.7.2+): clicking the Provider row opens a search-as-you-type dropdown listing every model the catalogue knows about, grouped by provider, plus any local Ollama models discovered live via `/api/tags`. Click a row to switch — the change persists to `.thclaws/settings.json` and the active provider rebuilds in place (same path as `/model`). Esc or click-outside dismisses without changing.
 
 ### Tab bar
 
@@ -106,6 +108,7 @@ Click the gear ⚙ in the top-right to open a popup menu:
 | **Folder instructions** | Tiptap editor on `./AGENTS.md` (in the working directory) |
 | **Provider API keys** | Settings modal for keys — see [chapter 6](ch06-providers-models-api-keys.md) |
 | **Appearance** | Light / Dark / System theme toggle — see below |
+| **GUI scale** | Zoom factor for HiDPI / 4K displays — 75 / 90 / 100 / 110 / 125 / 150 / 175 / 200% (v0.7.3+) |
 
 The Tiptap editor round-trips markdown through `tiptap-markdown`: you edit in a rich-text UI (headings, bold, lists, code fences), save to disk as markdown, and the agent reads the file on its next turn. No lossy conversion for standard Markdown.
 
@@ -116,6 +119,12 @@ The path shown at the top of the editor is the resolved filename so you always k
 The bottom of the gear menu has three theme options — Light, Dark, System — each with a check next to the active one. Clicking a theme applies immediately and persists to `~/.config/thclaws/theme.json` (per-user; never committed with your project). The menu deliberately stays open when you click a theme so you can try all three without reopening the gear.
 
 **Light** and **Dark** are explicit overrides — they are honoured even if your OS is set to the opposite scheme. **System** follows `prefers-color-scheme` and flips live when the OS appearance changes (macOS Appearance, Linux DE theme, Windows personalization) without an app restart.
+
+### GUI scale (v0.7.3+)
+
+Below the theme rows, **GUI scale** is a dropdown of zoom presets that tunes WebView text size for HiDPI / 4K displays without changing OS-level display scaling. Pick a preset (75–200%) and the entire app scales live — Chat, Terminal, Files, Settings, sidebar — same primitive used by VS Code and Slack. The value persists per-project to `.thclaws/settings.json` as `guiScale: <number>` and is reapplied on every launch.
+
+Use case: a 4K laptop screen at 100% Windows scaling renders thClaws text too small relative to other dev tools. Bump to 125% or 150% to match without affecting any other app.
 
 The theme covers every surface:
 

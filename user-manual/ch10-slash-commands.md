@@ -108,7 +108,7 @@ See [Chapter 9](ch09-knowledge-bases-kms.md) for the full KMS concept + workflow
 | `/doctor` | Run diagnostic checks |
 | `/usage` | Token usage by provider and model |
 | `/version` | Show the thClaws version and commit SHA |
-| `/quit` | Exit |
+| `/quit` | Exit (aliases: `/exit`, `/q`). In the GUI, opens a native confirm dialog ("Quit?") before closing — Cancel keeps the session open |
 
 ### Shell escape
 

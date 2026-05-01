@@ -109,7 +109,7 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | `/doctor` | รันการตรวจสอบวินิจฉัย |
 | `/usage` | แสดงการใช้ token แยกตาม provider และ model |
 | `/version` | แสดงเวอร์ชัน thClaws และ commit SHA |
-| `/quit` | ออกจากโปรแกรม |
+| `/quit` | ออกจากโปรแกรม (alias: `/exit`, `/q`) ใน GUI จะเปิด native confirm dialog ("Quit?") ก่อนปิด — กด Cancel เพื่อใช้ session ต่อ |
 
 ### Shell escape
 

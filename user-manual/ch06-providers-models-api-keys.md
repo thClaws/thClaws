@@ -1,7 +1,8 @@
 # Chapter 6 — Providers, models & API keys
 
-thClaws talks to **twelve providers**, auto-detected from the model name.
-Switch any time with `/model` or `/provider`.
+thClaws talks to **thirteen providers**, auto-detected from the model name.
+Switch any time with `/model`, `/provider`, or by clicking the provider/model
+chip in the sidebar (Desktop GUI, v0.7.2+).
 
 ## Provider overview
 
@@ -19,6 +20,7 @@ Switch any time with `/model` or `/provider`.
 | Ollama Anthropic | `oa/*` | — (local, v0.14+) | Ollama's Anthropic-compatible `/v1/messages` endpoint |
 | DashScope | `qwen-*`, `qwq-*` | `DASHSCOPE_API_KEY` | Alibaba Qwen; automatic caching |
 | DeepSeek | `deepseek-*` | `DEEPSEEK_API_KEY` (+ `DEEPSEEK_BASE_URL`) | V4 line: `deepseek-v4-flash`, `deepseek-v4-pro`. Older aliases `deepseek-chat` / `deepseek-reasoner` still work as wire-level aliases |
+| ThaiLLM (NSTDA) | `thaillm/*` | `THAILLM_API_KEY` | Aggregator at `thaillm.or.th` for four 8B Thai-tuned models (OpenThaiGPT, Typhoon-S, Pathumma, THaLLE). Aliases (case-insensitive): `openthaigpt`, `typhoon`, `pathumma`, `thalle` |
 
 The default on first run is `claude-sonnet-4-6`; change it with
 `--model` on the command line or persist in `settings.json`.
