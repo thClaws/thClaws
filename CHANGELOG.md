@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows `--cli` readline whitespace and cursor offset.** Interactive
+  REPL input on Windows mishandled spaces and put the cursor in the wrong
+  column inside PowerShell / `cmd.exe`. Two root causes: the binary was
+  built with `#![windows_subsystem = "windows"]` and called
+  `AttachConsole(ATTACH_PARENT_PROCESS)` at startup, which detached stdio
+  from the parent terminal before rustyline could read keys; and the cyan
+  ANSI escapes embedded directly in the prompt string confused rustyline's
+  column accounting on Windows.
+  - Removed the `windows_subsystem = "windows"` attribute on
+    `crates/core/src/bin/app.rs` so the binary defaults to the console
+    subsystem and `--cli` keeps a working stdio.
+  - Replaced startup-wide `AttachConsole` with a GUI-only
+    `detach_console_for_gui()` that calls `FreeConsole()` immediately
+    before `gui::run_gui()`. Double-clicking still hides the console; the
+    REPL keeps it.
+  - Added `readline_config()` that sets `rustyline::Behavior::PreferTerm`
+    on Windows.
+  - Moved prompt coloring out of the prompt string into a
+    `highlight_prompt` impl on `SlashCompleter`, and routed the prompt
+    through a single `REPL_PROMPT` constant used by `readline()`, the
+    team-inbox reprint, and the turn-start log line.
+
 ## [0.6.2] — 2026-04-27
 
 Patch release. Two open-issue fixes plus a routine catalogue refresh.
