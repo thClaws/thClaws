@@ -80,8 +80,8 @@ Three tabs, one binary — captured from a live thClaws session looking at its o
 
 ### Pre-built binaries
 
-Download the latest release for your platform from the [Releases page](https://github.com/thClaws/thClaws/releases) or from [thclaws.ai/downloads](https://thclaws.ai/downloads).
-
+Download the latest release for your platform from the [Releases page](https://github.com/thClaws/thClaws/releases) or from [thclaws.ai/downloads](https://thclaws.ai/downloads.html). 
+ 
 Supported: macOS (Apple Silicon & Intel), Windows (x86_64 & ARM64), Linux (x86_64 & ARM64).
 
 ### Build from source
