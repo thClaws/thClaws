@@ -35,6 +35,7 @@ pub mod secrets;
 pub mod session;
 #[cfg(feature = "gui")]
 pub mod shared_session;
+pub mod shell_bang;
 #[cfg(feature = "gui")]
 pub mod shell_dispatch;
 pub mod skills;

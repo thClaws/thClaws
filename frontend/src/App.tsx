@@ -5,6 +5,7 @@ import { ChatView } from "./components/ChatView";
 import { FilesView } from "./components/FilesView";
 import { TeamView } from "./components/TeamView";
 import { Sidebar } from "./components/Sidebar";
+import { PlanSidebar } from "./components/PlanSidebar";
 import { SettingsModal } from "./components/SettingsModal";
 import { SettingsMenu } from "./components/SettingsMenu";
 import { InstructionsEditorModal } from "./components/InstructionsEditorModal";
@@ -302,6 +303,30 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, []);
 
+  // Global "stop the agent" hotkey: Cmd+. on macOS, Ctrl+. elsewhere.
+  // Fires `shell_cancel` regardless of focus, so the user can abort a
+  // running turn from Settings, the file picker, or anywhere else
+  // without having to click back into Chat or Terminal first. Backend
+  // request_cancel is idempotent — calling it when no turn is running
+  // is a harmless no-op (cancel flag is reset before each new turn).
+  // Convention borrowed from Xcode / Logic / Cursor where Cmd+. =
+  // "stop whatever you're doing right now".
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.startsWith("Mac");
+      const modOk = isMac
+        ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+        : e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+      if (!modOk) return;
+      if (e.key !== ".") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      send({ type: "shell_cancel" });
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, []);
+
   const [started, setStarted] = useState(false);
   const [currentCwd, setCurrentCwd] = useState("");
   const [activeTab, setActiveTab] = useState<Tab>("terminal");
@@ -465,6 +490,11 @@ export default function App() {
             );
           })}
         </div>
+        {/* Plan-mode sidebar (M1). Renders nothing when no plan is
+            active — plan_state's broadcaster fires `chat_plan_update`
+            with `null` to clear it on `/new` / `/load` of a plan-less
+            session. Mounted on the right by design (Cowork pattern). */}
+        <PlanSidebar />
       </div>
 
       {/* Status bar */}

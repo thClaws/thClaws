@@ -125,4 +125,102 @@ mod tests {
             "{{product}} placeholder leaked into rendered prompt"
         );
     }
+
+    #[test]
+    fn default_system_prompt_distinguishes_todowrite_from_submitplan() {
+        // Both surfaces must appear in the system prompt with their
+        // distinct roles spelled out, so the model picks the right
+        // tool without us having to teach it from scratch every turn.
+        // Regression guard for M6.6 — the casual-vs-structured
+        // distinction was the load-bearing addition.
+        let s = defaults::SYSTEM;
+        assert!(
+            s.contains("SubmitPlan"),
+            "SubmitPlan not mentioned: missing in system prompt"
+        );
+        assert!(
+            s.contains("TodoWrite"),
+            "TodoWrite not mentioned: missing in system prompt"
+        );
+        assert!(
+            s.contains("scratchpad"),
+            "TodoWrite must be framed as a scratchpad in the system prompt",
+        );
+        assert!(
+            s.contains("sidebar"),
+            "SubmitPlan's sidebar/visibility property must be named so the model knows when to use it",
+        );
+    }
+
+    #[test]
+    fn default_system_prompt_routes_user_plan_word_correctly() {
+        // Users routinely say "plan to do X" colloquially — meaning
+        // "let's organize this work", NOT "enter formal plan mode".
+        // The system prompt must teach the model to decide on the
+        // *work*, not the literal word — small jobs → TodoWrite,
+        // big jobs (real per-step actions + runnable verifications)
+        // → EnterPlanMode + SubmitPlan. Regression guard for M6.6:
+        // user explicitly called this out as load-bearing.
+        let s = defaults::SYSTEM;
+        assert!(
+            s.contains("Picking the right one when the user says \"plan\""),
+            "section header for plan-routing missing: should be present in system prompt",
+        );
+        assert!(
+            s.contains("Don't reflexively enter plan mode"),
+            "anti-reflex guidance missing — model must not auto-enter plan mode on every \"plan\" mention",
+        );
+        assert!(
+            s.contains("Small job") && s.contains("TodoWrite"),
+            "small-job → TodoWrite branch missing",
+        );
+        assert!(
+            s.contains("Big job") && s.contains("SubmitPlan"),
+            "big-job → SubmitPlan branch missing",
+        );
+        // Concrete examples — these anchor the abstract rule.
+        assert!(
+            s.contains("plan to rename") || s.contains("plan to add"),
+            "TodoWrite-side example missing",
+        );
+        assert!(
+            s.contains("plan to build a webapp") || s.contains("plan to migrate"),
+            "SubmitPlan-side example missing",
+        );
+    }
+
+    #[test]
+    fn default_system_prompt_tells_model_to_check_todos_md_at_session_start() {
+        // The "resume from existing todos.md" behaviour was the user's
+        // specific ask in M6.6 — the system prompt must instruct the
+        // model to look for the file and surface incomplete items
+        // before starting fresh work. Sharpened post-test (gpt-4.1
+        // didn't follow the original conditional wording) — the
+        // directive is now unconditional and front-loaded.
+        let s = defaults::SYSTEM;
+        assert!(
+            s.contains(".thclaws/todos.md"),
+            "system prompt must name the todos file path",
+        );
+        assert!(
+            s.contains("BEFORE asking the user"),
+            "must instruct to check todos.md BEFORE asking for context",
+        );
+        assert!(
+            s.contains("ALWAYS check"),
+            "must use unconditional ALWAYS framing",
+        );
+        assert!(
+            s.to_lowercase().contains("incomplete"),
+            "must mention incomplete items as the resume target",
+        );
+        assert!(
+            s.contains("resume"),
+            "must offer resume as the option for existing todos",
+        );
+        assert!(
+            s.contains("Don't ask"),
+            "must explicitly forbid asking when a todo file already has answers",
+        );
+    }
 }

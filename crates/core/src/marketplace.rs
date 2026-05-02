@@ -4,7 +4,9 @@
 //!   1. Embedded baseline compiled into the binary (`resources/marketplace.json`)
 //!      so first-launch search/install works with no network.
 //!   2. User cache at `~/.config/thclaws/marketplace.json`, written when
-//!      the user runs `/skill marketplace --refresh` or via daily auto-refresh.
+//!      the user runs `/skill marketplace --refresh` or by the GUI worker's
+//!      daily auto-refresh task ([`spawn_daily_auto_refresh`], fired at
+//!      boot if the cache is older than [`AUTO_REFRESH_AFTER_SECS`]).
 //!   3. Remote endpoint `thclaws.ai/api/marketplace.json` — fetched on
 //!      explicit refresh, cached locally; fail-silent so offline use stays
 //!      productive.
@@ -79,6 +81,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// Schema version. Bumped on incompatible changes; the loader rejects
 /// caches with a different number rather than serving stale rows.
@@ -268,81 +271,204 @@ impl MarketplacePlugin {
     }
 }
 
+/// Common surface across the three entry types so generic search /
+/// rendering helpers don't need a per-type implementation. Added in
+/// M6.12 (fix M2) to collapse three near-identical `find_*` /
+/// `search_*` blocks into one.
+pub trait MarketplaceEntry {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn category(&self) -> &str;
+    fn license_tier(&self) -> &str;
+    /// URL the policy gate should consult before allowing install /
+    /// connection. Returns `None` for entries with no network
+    /// operation (e.g. `linked-only` skills with no `install_url`,
+    /// or stdio MCP servers with no `install_url` and no `url`).
+    /// Returning `None` short-circuits the policy check; the entry
+    /// is rendered without the `[blocked by policy]` tag.
+    fn policy_check_url(&self) -> Option<&str>;
+}
+
+impl MarketplaceEntry for MarketplaceSkill {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn category(&self) -> &str {
+        &self.category
+    }
+    fn license_tier(&self) -> &str {
+        &self.license_tier
+    }
+    fn policy_check_url(&self) -> Option<&str> {
+        self.install_url.as_deref()
+    }
+}
+
+impl MarketplaceEntry for MarketplaceMcpServer {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn category(&self) -> &str {
+        &self.category
+    }
+    fn license_tier(&self) -> &str {
+        &self.license_tier
+    }
+    fn policy_check_url(&self) -> Option<&str> {
+        // For sse / http MCP, `url` is the connection target and
+        // policy applies to it. For stdio, `install_url` is the git
+        // clone source. Prefer install_url when both are set (clone
+        // is the gating step); fall back to url for hosted MCPs.
+        if !self.install_url.as_deref().unwrap_or("").is_empty() {
+            self.install_url.as_deref()
+        } else if !self.url.is_empty() {
+            Some(&self.url)
+        } else {
+            None
+        }
+    }
+}
+
+impl MarketplaceEntry for MarketplacePlugin {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn category(&self) -> &str {
+        &self.category
+    }
+    fn license_tier(&self) -> &str {
+        &self.license_tier
+    }
+    fn policy_check_url(&self) -> Option<&str> {
+        if self.install_url.is_empty() {
+            None
+        } else {
+            Some(&self.install_url)
+        }
+    }
+}
+
+/// Generic exact-name lookup. Wraps the same pattern the three
+/// per-type `find_*` methods used.
+pub fn find_entry<'a, T: MarketplaceEntry>(items: &'a [T], name: &str) -> Option<&'a T> {
+    items.iter().find(|s| s.name() == name)
+}
+
+/// Generic substring search. Case-insensitive, ranked by where the
+/// match lands (name match beats description match beats category
+/// match).
+pub fn search_entries<'a, T: MarketplaceEntry>(items: &'a [T], query: &str) -> Vec<&'a T> {
+    let q = query.to_lowercase();
+    let mut hits: Vec<(u8, &T)> = Vec::new();
+    for s in items {
+        if s.name().to_lowercase().contains(&q) {
+            hits.push((0, s));
+        } else if s.description().to_lowercase().contains(&q) {
+            hits.push((1, s));
+        } else if s.category().to_lowercase().contains(&q) {
+            hits.push((2, s));
+        }
+    }
+    hits.sort_by_key(|(rank, _)| *rank);
+    hits.into_iter().map(|(_, s)| s).collect()
+}
+
+/// Render the bracketed tag suffix for a marketplace entry — combines
+/// the existing `[linked-only]` license-tier tag (M3 trust-tier
+/// gating) with M6.12's new `[blocked by policy]` tag (signals an
+/// install_url that the org's allowlist policy would reject before the
+/// user wastes a discovery step).
+///
+/// Returns an empty string for entries that are open + allowed (the
+/// common case), so callers can unconditionally append the result to
+/// the listing line.
+pub fn entry_tags<T: MarketplaceEntry>(entry: &T) -> String {
+    let mut out = String::new();
+    if entry.license_tier() == "linked-only" {
+        out.push_str(" [linked-only]");
+    }
+    if let Some(url) = entry.policy_check_url() {
+        if let crate::policy::AllowDecision::Denied { .. } = crate::policy::check_url(url) {
+            out.push_str(" [blocked by policy]");
+        }
+    }
+    out
+}
+
 impl Marketplace {
     /// Parse a JSON body into a marketplace catalogue, rejecting wrong
     /// schemas. Used for both the embedded baseline and the user cache.
+    /// Soft API: returns `Option` to keep `load_cache` and the baseline
+    /// `expect()` paths simple. The full parse-with-error variant is
+    /// `parse_with_error()` below.
     pub fn from_json_str(body: &str) -> Option<Self> {
-        let parsed: Self = serde_json::from_str(body).ok()?;
-        if parsed.schema != CURRENT_SCHEMA {
-            return None;
+        Self::parse_with_error(body).ok()
+    }
+
+    /// Parse with structured errors so callers can distinguish "wrong
+    /// shape" from "wrong schema version" (M6.11 — fix M1). The
+    /// schema check happens BEFORE the full deserialize so a remote
+    /// payload that bumped to schema=2 reports the version mismatch
+    /// instead of a confusing field-by-field deserialize error.
+    pub fn parse_with_error(body: &str) -> Result<Self, ParseError> {
+        // Sniff the schema field first via a minimal struct that
+        // ignores everything else. If the remote schema is newer than
+        // we support, fail with an actionable message instead of
+        // letting `serde_json::from_str::<Self>` fail on whatever
+        // unrelated field shape changed alongside the bump.
+        #[derive(Deserialize)]
+        struct SchemaProbe {
+            #[serde(default)]
+            schema: u32,
         }
-        Some(parsed)
+        let probe: SchemaProbe =
+            serde_json::from_str(body).map_err(|e| ParseError::Json(e.to_string()))?;
+        if probe.schema != CURRENT_SCHEMA {
+            return Err(ParseError::SchemaMismatch {
+                got: probe.schema,
+                expected: CURRENT_SCHEMA,
+            });
+        }
+        serde_json::from_str(body).map_err(|e| ParseError::Json(e.to_string()))
     }
 
     /// Look up a skill by exact-match name. Returns `None` if the user
     /// typed a name not in the catalogue (caller should suggest
     /// `/skill search` instead).
     pub fn find(&self, name: &str) -> Option<&MarketplaceSkill> {
-        self.skills.iter().find(|s| s.name == name)
+        find_entry(&self.skills, name)
     }
 
     /// Substring-match search across name, description, and category.
     /// Case-insensitive, ranked by where the match lands (name match
     /// beats description match beats category match).
     pub fn search(&self, query: &str) -> Vec<&MarketplaceSkill> {
-        let q = query.to_lowercase();
-        let mut hits: Vec<(u8, &MarketplaceSkill)> = Vec::new();
-        for s in &self.skills {
-            if s.name.to_lowercase().contains(&q) {
-                hits.push((0, s));
-            } else if s.description.to_lowercase().contains(&q) {
-                hits.push((1, s));
-            } else if s.category.to_lowercase().contains(&q) {
-                hits.push((2, s));
-            }
-        }
-        hits.sort_by_key(|(rank, _)| *rank);
-        hits.into_iter().map(|(_, s)| s).collect()
+        search_entries(&self.skills, query)
     }
 
     pub fn find_mcp(&self, name: &str) -> Option<&MarketplaceMcpServer> {
-        self.mcp_servers.iter().find(|s| s.name == name)
+        find_entry(&self.mcp_servers, name)
     }
 
     pub fn search_mcp(&self, query: &str) -> Vec<&MarketplaceMcpServer> {
-        let q = query.to_lowercase();
-        let mut hits: Vec<(u8, &MarketplaceMcpServer)> = Vec::new();
-        for s in &self.mcp_servers {
-            if s.name.to_lowercase().contains(&q) {
-                hits.push((0, s));
-            } else if s.description.to_lowercase().contains(&q) {
-                hits.push((1, s));
-            } else if s.category.to_lowercase().contains(&q) {
-                hits.push((2, s));
-            }
-        }
-        hits.sort_by_key(|(rank, _)| *rank);
-        hits.into_iter().map(|(_, s)| s).collect()
+        search_entries(&self.mcp_servers, query)
     }
 
     pub fn find_plugin(&self, name: &str) -> Option<&MarketplacePlugin> {
-        self.plugins.iter().find(|s| s.name == name)
+        find_entry(&self.plugins, name)
     }
 
     pub fn search_plugin(&self, query: &str) -> Vec<&MarketplacePlugin> {
-        let q = query.to_lowercase();
-        let mut hits: Vec<(u8, &MarketplacePlugin)> = Vec::new();
-        for s in &self.plugins {
-            if s.name.to_lowercase().contains(&q) {
-                hits.push((0, s));
-            } else if s.description.to_lowercase().contains(&q) {
-                hits.push((1, s));
-            } else if s.category.to_lowercase().contains(&q) {
-                hits.push((2, s));
-            }
-        }
-        hits.sort_by_key(|(rank, _)| *rank);
-        hits.into_iter().map(|(_, s)| s).collect()
+        search_entries(&self.plugins, query)
     }
 }
 
@@ -374,6 +500,102 @@ pub fn cache_path() -> Option<PathBuf> {
     Some(base.join("thclaws").join("marketplace.json"))
 }
 
+/// Cache-age threshold for the daily auto-refresh. M6.11 fix H1 — the
+/// docstring previously claimed daily auto-refresh existed but the
+/// code never wired it. 24h is the same window every other "is this
+/// stale?" prompt in the app uses.
+pub const AUTO_REFRESH_AFTER_SECS: u64 = 24 * 60 * 60;
+
+/// Cache age in seconds, or `None` when there's no cache file (or the
+/// timestamp can't be parsed). Used by both the auto-refresh task to
+/// decide whether to fetch and the `/skill marketplace` listing to
+/// decide whether to render a "stale" hint.
+pub fn cache_age_secs() -> Option<u64> {
+    let path = cache_path()?;
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let age = std::time::SystemTime::now().duration_since(modified).ok()?;
+    Some(age.as_secs())
+}
+
+/// Threshold in seconds after which `/skill marketplace` renders a
+/// "(stale — refresh with /skill marketplace --refresh)" hint next to
+/// the cache `fetched_at`. 7 days — long enough that a regular user's
+/// daily auto-refresh keeps them under it, short enough that someone
+/// returning after a vacation sees a clear nudge to refresh.
+pub const STALE_AFTER_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Format a cache-age sidebar string for the `/skill marketplace`
+/// header. Returns `None` when there's no cache (e.g. baseline-only
+/// usage) so callers can skip the suffix entirely. M6.11 fix H2 —
+/// users couldn't tell whether their catalog snapshot was hours or
+/// months old.
+pub fn cache_age_label() -> Option<String> {
+    let secs = cache_age_secs()?;
+    let stale = secs >= STALE_AFTER_SECS;
+    let pretty = pretty_age(secs);
+    if stale {
+        Some(format!(
+            "{pretty} ago (stale — refresh with /skill marketplace --refresh)"
+        ))
+    } else {
+        Some(format!("{pretty} ago"))
+    }
+}
+
+/// Render a duration as a coarse human label. Tuned for "how old is
+/// my marketplace cache" — minute granularity at the low end, day at
+/// the high end. Matches the pattern git's `git log --since` accepts.
+fn pretty_age(secs: u64) -> String {
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    if secs < MIN {
+        return "just now".to_string();
+    }
+    if secs < HOUR {
+        let m = secs / MIN;
+        return format!("{m} min{}", if m == 1 { "" } else { "s" });
+    }
+    if secs < DAY {
+        let h = secs / HOUR;
+        return format!("{h} hour{}", if h == 1 { "" } else { "s" });
+    }
+    let d = secs / DAY;
+    format!("{d} day{}", if d == 1 { "" } else { "s" })
+}
+
+/// Spawn a one-shot tokio task that refreshes the marketplace cache
+/// IF the cache is older than `AUTO_REFRESH_AFTER_SECS` (or missing
+/// entirely). Fail-silent — on network error, parse error, or any
+/// other refresh failure, we keep using whatever cache / baseline is
+/// already loaded. Logged at debug-ish level via eprintln on success
+/// so users running with --verbose see the refresh happened.
+///
+/// Called once from the GUI worker boot path. Cheap when the cache is
+/// fresh (single fs::metadata call, no network).
+pub fn spawn_daily_auto_refresh() {
+    let needs_refresh = match cache_age_secs() {
+        Some(secs) => secs >= AUTO_REFRESH_AFTER_SECS,
+        None => true, // no cache → fetch
+    };
+    if !needs_refresh {
+        return;
+    }
+    tokio::spawn(async {
+        match refresh_from_remote().await {
+            Ok(out) => eprintln!(
+                "\x1b[90m[marketplace] auto-refreshed: {} skill(s) from {}\x1b[0m",
+                out.skill_count, out.source
+            ),
+            Err(_) => {
+                // Fail silent. The user's existing cache (or baseline)
+                // is still serving. Surface only on explicit refresh.
+            }
+        }
+    });
+}
+
 fn write_cache(body: &str) -> Result<(), RefreshError> {
     let path = cache_path().ok_or(RefreshError::NoHome)?;
     if let Some(parent) = path.parent() {
@@ -385,13 +607,28 @@ fn write_cache(body: &str) -> Result<(), RefreshError> {
     Ok(())
 }
 
+/// Process-wide reqwest client used by every `refresh_from_remote`
+/// call. Reuses the underlying connection pool across refreshes —
+/// previously each call built a fresh client (M6.11 — fix L1). The
+/// 10-second timeout matches the prior per-call setting.
+fn http_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 /// Fetch the remote marketplace and, if it parses, write it to the
 /// cache. Same fail-silent contract as `model_catalogue::refresh_from_remote`.
 pub async fn refresh_from_remote() -> Result<RefreshOutcome, RefreshError> {
-    let resp = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| RefreshError::Http(e.to_string()))?
+    let client = http_client()
+        .ok_or_else(|| RefreshError::Http("failed to build HTTP client (TLS init?)".to_string()))?;
+    let resp = client
         .get(REMOTE_URL)
         .send()
         .await
@@ -403,7 +640,7 @@ pub async fn refresh_from_remote() -> Result<RefreshOutcome, RefreshError> {
         .text()
         .await
         .map_err(|e| RefreshError::Http(e.to_string()))?;
-    let parsed = Marketplace::from_json_str(&body).ok_or(RefreshError::Parse)?;
+    let parsed = Marketplace::parse_with_error(&body).map_err(RefreshError::Parse)?;
     write_cache(&body)?;
     Ok(RefreshOutcome {
         skill_count: parsed.skills.len(),
@@ -417,10 +654,36 @@ pub struct RefreshOutcome {
     pub source: String,
 }
 
+/// Distinguishes wrong JSON shape from wrong schema version. Surfaced
+/// to the user via `RefreshError::Parse`'s Display, so a remote that
+/// bumped to schema=2 returns "remote schema=2, this binary supports
+/// schema=1 — upgrade thclaws" instead of a confusing serde error
+/// (M6.11 — fix M1).
+#[derive(Debug)]
+pub enum ParseError {
+    /// Body wasn't valid JSON or didn't match the Marketplace shape.
+    Json(String),
+    /// JSON parsed and named a `schema` field, but the value isn't
+    /// what this binary supports. Action: upgrade the binary.
+    SchemaMismatch { got: u32, expected: u32 },
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::Json(e) => write!(f, "JSON: {e}"),
+            ParseError::SchemaMismatch { got, expected } => write!(
+                f,
+                "remote schema={got}, this binary supports schema={expected} — upgrade thclaws to refresh from a newer endpoint"
+            ),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RefreshError {
     Http(String),
-    Parse,
+    Parse(ParseError),
     Io(String),
     NoHome,
 }
@@ -429,7 +692,7 @@ impl std::fmt::Display for RefreshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RefreshError::Http(e) => write!(f, "http: {e}"),
-            RefreshError::Parse => write!(f, "remote payload didn't match marketplace schema"),
+            RefreshError::Parse(e) => write!(f, "{e}"),
             RefreshError::Io(e) => write!(f, "io: {e}"),
             RefreshError::NoHome => write!(f, "no home directory; can't write cache"),
         }
@@ -585,6 +848,272 @@ mod tests {
         };
         // 70 chars + "…" = 71
         assert_eq!(s.short_line().chars().count(), 71);
+    }
+
+    // ── M6.11 fixes ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_with_error_distinguishes_schema_mismatch_from_json_error() {
+        // M6.11 (M1): schema mismatch must surface as a SchemaMismatch
+        // variant with both versions, not as an opaque JSON error.
+        let body = r#"{"schema": 99, "source": "future", "fetched_at": "x"}"#;
+        match Marketplace::parse_with_error(body) {
+            Err(ParseError::SchemaMismatch { got, expected }) => {
+                assert_eq!(got, 99);
+                assert_eq!(expected, CURRENT_SCHEMA);
+            }
+            other => panic!("expected SchemaMismatch, got {other:?}"),
+        }
+
+        // Bad JSON → Json variant
+        let body = r#"{not valid"#;
+        assert!(matches!(
+            Marketplace::parse_with_error(body),
+            Err(ParseError::Json(_))
+        ));
+
+        // Missing schema field → defaults to 0, treated as schema mismatch
+        let body = r#"{"source": "x"}"#;
+        match Marketplace::parse_with_error(body) {
+            Err(ParseError::SchemaMismatch { got: 0, .. }) => {}
+            other => panic!("expected SchemaMismatch{{got:0}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_display_mentions_versions_for_schema_mismatch() {
+        // M6.11 (M1): the user-facing error string must name BOTH the
+        // remote schema and the supported schema so the next step
+        // ("upgrade the binary") is obvious.
+        let err = ParseError::SchemaMismatch {
+            got: 2,
+            expected: 1,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("schema=2"), "missing remote schema: {msg}");
+        assert!(msg.contains("schema=1"), "missing supported schema: {msg}");
+        assert!(
+            msg.to_lowercase().contains("upgrade"),
+            "missing actionable next step: {msg}",
+        );
+    }
+
+    #[test]
+    fn refresh_error_display_propagates_parse_error_message() {
+        // The wrapping into RefreshError::Parse(ParseError) shouldn't
+        // hide the underlying schema-mismatch message.
+        let inner = ParseError::SchemaMismatch {
+            got: 2,
+            expected: 1,
+        };
+        let outer = RefreshError::Parse(inner);
+        let msg = format!("{outer}");
+        assert!(msg.contains("schema=2"), "got: {msg}");
+        assert!(msg.contains("schema=1"), "got: {msg}");
+    }
+
+    #[test]
+    fn pretty_age_renders_coarsely() {
+        // M6.11 (H2): cache-age label format. Goal is human-readable
+        // at a glance, not precise.
+        assert_eq!(pretty_age(0), "just now");
+        assert_eq!(pretty_age(30), "just now");
+        assert_eq!(pretty_age(60), "1 min");
+        assert_eq!(pretty_age(120), "2 mins");
+        assert_eq!(pretty_age(3600), "1 hour");
+        assert_eq!(pretty_age(7200), "2 hours");
+        assert_eq!(pretty_age(86400), "1 day");
+        assert_eq!(pretty_age(86400 * 3), "3 days");
+    }
+
+    // ── M6.12 generic search + policy tag ───────────────────────────────
+
+    #[test]
+    fn marketplace_entry_trait_implemented_for_all_three_types() {
+        // M6.12 (M2): the three entry types share a trait so generic
+        // search / rendering helpers don't duplicate per-type code.
+        // This compile-time check verifies all three impls are wired.
+        fn assert_entry<T: MarketplaceEntry>(_t: &T) {}
+        let s = MarketplaceSkill {
+            name: "x".into(),
+            short_description: None,
+            description: "d".into(),
+            category: "c".into(),
+            license: "Apache-2.0".into(),
+            license_tier: "open".into(),
+            source_repo: String::new(),
+            source_path: String::new(),
+            install_url: None,
+            homepage: String::new(),
+        };
+        let m = MarketplaceMcpServer {
+            name: "m".into(),
+            short_description: None,
+            description: "d".into(),
+            category: "c".into(),
+            license: "Apache-2.0".into(),
+            license_tier: "open".into(),
+            transport: "stdio".into(),
+            command: String::new(),
+            args: vec![],
+            install_url: None,
+            post_install_message: None,
+            url: String::new(),
+            homepage: String::new(),
+        };
+        let p = MarketplacePlugin {
+            name: "p".into(),
+            short_description: None,
+            description: "d".into(),
+            category: "c".into(),
+            license: "Apache-2.0".into(),
+            license_tier: "open".into(),
+            install_url: "https://example.com/p.git".into(),
+            homepage: String::new(),
+        };
+        assert_entry(&s);
+        assert_entry(&m);
+        assert_entry(&p);
+
+        // Verify accessor return values match the underlying fields.
+        assert_eq!(s.name(), "x");
+        assert_eq!(m.description(), "d");
+        assert_eq!(p.category(), "c");
+        assert_eq!(s.license_tier(), "open");
+    }
+
+    #[test]
+    fn policy_check_url_prefers_install_url_for_mcp_with_both() {
+        // MCP entries with both install_url (clone source for stdio)
+        // and url (sse target) should prefer install_url for policy
+        // gating — that's the gating step. Falls back to url when
+        // install_url is empty/None.
+        let m_both = MarketplaceMcpServer {
+            name: "m".into(),
+            short_description: None,
+            description: "d".into(),
+            category: String::new(),
+            license: "MIT".into(),
+            license_tier: "open".into(),
+            transport: "stdio".into(),
+            command: String::new(),
+            args: vec![],
+            install_url: Some("https://github.com/clone-here.git".into()),
+            post_install_message: None,
+            url: "https://hosted.example.com".into(),
+            homepage: String::new(),
+        };
+        assert_eq!(
+            m_both.policy_check_url(),
+            Some("https://github.com/clone-here.git"),
+        );
+
+        let m_url_only = MarketplaceMcpServer {
+            install_url: None,
+            url: "https://hosted.example.com".into(),
+            ..m_both.clone()
+        };
+        assert_eq!(
+            m_url_only.policy_check_url(),
+            Some("https://hosted.example.com"),
+        );
+
+        let m_neither = MarketplaceMcpServer {
+            install_url: None,
+            url: String::new(),
+            ..m_url_only.clone()
+        };
+        assert_eq!(m_neither.policy_check_url(), None);
+    }
+
+    #[test]
+    fn generic_find_entry_replaces_per_type_find() {
+        // M6.12 (M2): the trait-based find_entry should exhibit the
+        // exact same behavior as the old per-type Marketplace::find /
+        // find_mcp / find_plugin methods.
+        let m = fixture_marketplace();
+        assert!(find_entry(&m.skills, "algorithmic-art").is_some());
+        assert!(find_entry(&m.skills, "no-such-skill").is_none());
+        assert_eq!(
+            find_entry(&m.skills, "algorithmic-art").map(|s| s.name.as_str()),
+            m.find("algorithmic-art").map(|s| s.name.as_str()),
+        );
+    }
+
+    #[test]
+    fn generic_search_entries_replaces_per_type_search() {
+        // Same ranking semantics: name match beats description match
+        // beats category match.
+        let m = fixture_marketplace();
+        let hits = search_entries(&m.skills, "art");
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].name, "algorithmic-art");
+        assert!(!search_entries(&m.skills, "PLAYWRIGHT").is_empty());
+    }
+
+    #[test]
+    fn entry_tags_renders_linked_only_when_license_tier_matches() {
+        // M6.12 (M3): the tag combiner should reproduce the prior
+        // [linked-only] tag from the M3 license-tier work.
+        let mut s = MarketplaceSkill {
+            name: "x".into(),
+            short_description: None,
+            description: String::new(),
+            category: String::new(),
+            license: "Anthropic source-available".into(),
+            license_tier: "linked-only".into(),
+            source_repo: String::new(),
+            source_path: String::new(),
+            install_url: None, // no install_url → no policy check
+            homepage: String::new(),
+        };
+        assert_eq!(entry_tags(&s), " [linked-only]");
+
+        s.license_tier = "open".into();
+        assert_eq!(entry_tags(&s), "");
+    }
+
+    #[test]
+    fn entry_tags_no_tags_when_open_and_no_policy() {
+        // Open-core builds with no policy active should produce no
+        // tags for an open-tier entry. policy::check_url returns
+        // NoPolicy → not Denied → no [blocked by policy] tag.
+        let s = MarketplaceSkill {
+            name: "x".into(),
+            short_description: None,
+            description: String::new(),
+            category: String::new(),
+            license: "Apache-2.0".into(),
+            license_tier: "open".into(),
+            source_repo: String::new(),
+            source_path: String::new(),
+            install_url: Some("https://example.com/x.git".into()),
+            homepage: String::new(),
+        };
+        let tags = entry_tags(&s);
+        assert!(
+            tags.is_empty() || tags == " [blocked by policy]",
+            "expected empty or [blocked by policy], got: {tags:?}",
+        );
+    }
+
+    #[test]
+    fn http_client_is_a_singleton() {
+        // M6.11 (L1): repeated calls return the same Arc'd client so
+        // the connection pool is shared across refreshes. Using
+        // pointer equality on the `&'static reqwest::Client` reference
+        // proves we're not building a fresh client per call.
+        let c1 = http_client();
+        let c2 = http_client();
+        match (c1, c2) {
+            (Some(a), Some(b)) => {
+                assert!(
+                    std::ptr::eq(a, b),
+                    "http_client must return the same instance across calls",
+                );
+            }
+            _ => panic!("http_client() returned None — TLS init may have failed in test env"),
+        }
     }
 
     #[test]

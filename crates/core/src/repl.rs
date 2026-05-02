@@ -29,6 +29,8 @@ const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_CYAN: &str = "\x1b[36m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_BOLD: &str = "\x1b[1m";
+const COLOR_RED: &str = "\x1b[31m";
+
 const REPL_PROMPT: &str = "❯ ";
 
 fn readline_config() -> rustyline::Config {
@@ -37,6 +39,109 @@ fn readline_config() -> rustyline::Config {
     let builder = builder.behavior(rustyline::Behavior::PreferTerm);
     builder.build()
 }
+/// Render the current plan as a coloured ANSI block for the CLI
+/// terminal — analogue of the right-side `PlanSidebar` component the
+/// GUI chat tab gets. M5 CLI parity. Called from the agent loop after
+/// any plan-tool ToolCallResult so the user sees the live state inline:
+///
+/// ```text
+/// ─── plan: 4 steps · 2 done · current step 3 ───────
+///   ✓ 1. Scaffold project
+///   ✓ 2. Install dependencies
+///   ◉ 3. Run tests
+///     4. Deploy
+/// ─────────────────────────────────────────────────
+/// ```
+///
+/// Status glyphs: ✓ done · ◉ in_progress (yellow) · ✕ failed (red) ·
+/// space todo. Notes (failure reasons, "skipped by user") render
+/// dim-italic-ish below the step.
+fn format_plan_for_cli(plan: &crate::tools::plan_state::Plan) -> String {
+    use crate::tools::plan_state::StepStatus;
+    let total = plan.steps.len();
+    let done = plan
+        .steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Done)
+        .count();
+    let current = plan
+        .steps
+        .iter()
+        .position(|s| s.status == StepStatus::InProgress);
+
+    let header = match current {
+        Some(idx) => format!(
+            "─── plan: {total} step{plural} · {done} done · current step {n} ───",
+            plural = if total == 1 { "" } else { "s" },
+            n = idx + 1,
+        ),
+        None if done == total => format!("─── plan: {total} steps · all complete ───"),
+        None => format!(
+            "─── plan: {total} step{plural} · {done} done ───",
+            plural = if total == 1 { "" } else { "s" },
+        ),
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("\n{COLOR_CYAN}{header}{COLOR_RESET}\n"));
+    for (i, step) in plan.steps.iter().enumerate() {
+        let (glyph, color) = match step.status {
+            StepStatus::Done => ("✓", COLOR_GREEN),
+            StepStatus::InProgress => ("◉", COLOR_YELLOW),
+            StepStatus::Failed => ("✕", COLOR_RED),
+            StepStatus::Todo => (" ", COLOR_DIM),
+        };
+        out.push_str(&format!(
+            "  {color}{glyph}{COLOR_RESET} {dim}{n}.{COLOR_RESET} {title}\n",
+            n = i + 1,
+            dim = if step.status == StepStatus::Todo {
+                COLOR_DIM
+            } else {
+                ""
+            },
+            title = step.title,
+        ));
+        if let Some(note) = &step.note {
+            if !note.trim().is_empty() {
+                let note_color = if step.status == StepStatus::Failed {
+                    COLOR_RED
+                } else {
+                    COLOR_DIM
+                };
+                out.push_str(&format!("       {note_color}({note}){COLOR_RESET}\n"));
+            }
+        }
+        // M6.3: render the cross-step output below the title for Done
+        // steps so the user can see what each step produced. Truncate
+        // long values for the CLI; the sidebar gets to show more.
+        if let Some(output) = &step.output {
+            if !output.trim().is_empty() {
+                let preview: String = output.chars().take(120).collect();
+                let suffix = if output.chars().count() > 120 {
+                    "…"
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "       {COLOR_DIM}→ {preview}{suffix}{COLOR_RESET}\n",
+                ));
+            }
+        }
+    }
+    let footer = "─".repeat(header.chars().count());
+    out.push_str(&format!("{COLOR_CYAN}{footer}{COLOR_RESET}\n"));
+    out
+}
+
+/// Set of tool names that mutate plan state — used to gate the CLI
+/// plan-block render so we don't print a plan after every Read or
+/// Bash. Matches the registry names exactly.
+const PLAN_TOOL_NAMES: &[&str] = &[
+    "SubmitPlan",
+    "UpdatePlanStep",
+    "EnterPlanMode",
+    "ExitPlanMode",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
@@ -168,6 +273,11 @@ pub enum SlashCommand {
     /// `/plugin info <name>` — detail for a marketplace plugin entry.
     PluginInfo(String),
     Permissions(String),
+    /// `/plan` — toggle plan mode (M2). With no args, flips the
+    /// session into plan mode (mutating tools blocked, sidebar opens
+    /// when SubmitPlan fires). `/plan exit` / `/plan cancel` clears
+    /// any active plan and restores the prior permission mode.
+    Plan(String),
     Team,
     Usage,
     Kms,
@@ -612,6 +722,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
             }
         }
         "permissions" | "perms" => SlashCommand::Permissions(args.to_string()),
+        "plan" => SlashCommand::Plan(args.trim().to_string()),
         "team" => SlashCommand::Team,
         "usage" => SlashCommand::Usage,
         "memory" => {
@@ -955,6 +1066,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "providers", description: "List all supported providers",              category: "Model", usage: "" },
         BuiltInCommand { name: "thinking",  description: "Set extended-thinking token budget",        category: "Model", usage: "BUDGET" },
         BuiltInCommand { name: "permissions", description: "Show or set the permission mode",         category: "Model", usage: "[auto|ask]" },
+        BuiltInCommand { name: "plan",        description: "Toggle plan mode (read-only + sidebar)", category: "Model", usage: "[enter|exit|status]" },
 
         // Context / memory / knowledge
         BuiltInCommand { name: "context",  description: "Show context-window usage breakdown",        category: "Context", usage: "" },
@@ -984,7 +1096,14 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
 }
 
 pub fn render_help() -> &'static str {
-    "Slash commands:\n  \
+    "Shell escape:\n  \
+     !<command>        Run <command> in a subshell — sandbox-restricted to \n  \
+                       the project directory, non-interactive env vars set \n  \
+                       (CI=1, NPM_CONFIG_YES, TERM=dumb, etc.). Output is \n  \
+                       displayed but NOT pushed to agent history. Use this \n  \
+                       for quick checks between turns (`!git status`, \n  \
+                       `!cargo check`). The agent doesn't see the output. \n\n\
+     Slash commands:\n  \
      /help             Show this help\n  \
      /quit             Exit\n  \
      /clear            Clear conversation history\n  \
@@ -1583,6 +1702,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     let ctx = ProjectContext::discover(&cwd)?;
     let memory_store = MemoryStore::default_path().map(MemoryStore::new);
 
+    // M6.11 (H1): daily auto-refresh of the marketplace catalog so
+    // CLI users get fresh entries without having to remember
+    // /skill marketplace --refresh. Same pattern the GUI worker uses;
+    // no-op when the cache is < 24h old.
+    crate::marketplace::spawn_daily_auto_refresh();
+
     // Append memory section to the project system prompt, if any memory exists.
     let system_fallback = if config.system_prompt.is_empty() {
         crate::prompts::defaults::SYSTEM
@@ -1740,8 +1865,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
              instructions using any args that appeared after the name.\n",
         );
         let skill_tool = crate::skills::SkillTool::new(skill_store);
-        skill_store_handle = Some(skill_tool.store_handle());
+        let store_handle = skill_tool.store_handle();
+        skill_store_handle = Some(store_handle.clone());
         tool_registry.register(Arc::new(skill_tool));
+        // dev-plan/06 P2: discovery tools register alongside Skill so
+        // the "names-only" / "discover-tool-only" strategies have
+        // something to point at. Always-registered for symmetry with
+        // the GUI worker.
+        tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
+            store_handle.clone(),
+        )));
+        tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
+            store_handle,
+        )));
     }
     let (mut mcp_clients, mut mcp_summary) =
         load_mcp_servers(&config.mcp_servers, &mut tool_registry).await;
@@ -2440,6 +2576,25 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         }
 
         if line.is_empty() {
+            continue;
+        }
+
+        // `!<cmd>` shell escape — user-initiated shell command, runs
+        // through BashTool (sandbox cwd, non-interactive env, etc.)
+        // and prints the output. Doesn't touch agent history. Mirrors
+        // the GUI handle_line path in shared_session.rs.
+        if let Some(cmd) = crate::shell_bang::parse_bang(&line) {
+            println!("{COLOR_DIM}[!] {cmd}{COLOR_RESET}");
+            match crate::shell_bang::run_bang_command(cmd).await {
+                Ok(output) => {
+                    if !output.is_empty() {
+                        println!("{output}");
+                    }
+                }
+                Err(e) => {
+                    println!("{COLOR_YELLOW}{e}{COLOR_RESET}");
+                }
+            }
             continue;
         }
 
@@ -3543,24 +3698,72 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 }
                 SlashCommand::Permissions(mode) => {
                     if mode.is_empty() {
+                        let cur = crate::permissions::current_mode();
+                        let label = match cur {
+                            PermissionMode::Auto => "auto",
+                            PermissionMode::Ask => "ask",
+                            PermissionMode::Plan => "plan",
+                        };
                         println!(
-                            "{COLOR_DIM}permissions: {} (auto = never prompt, ask = prompt on mutating tools){COLOR_RESET}",
-                            if agent.permission_mode == PermissionMode::Auto { "auto" } else { "ask" }
+                            "{COLOR_DIM}permissions: {label} (auto = never prompt, ask = prompt on mutating tools, plan = read-only exploration){COLOR_RESET}"
                         );
                     } else {
                         match mode.as_str() {
                             "auto" | "yolo" => {
                                 agent.permission_mode = PermissionMode::Auto;
+                                crate::permissions::set_current_mode_and_broadcast(PermissionMode::Auto);
                                 println!("{COLOR_DIM}permissions → auto (no prompts){COLOR_RESET}");
                             }
                             "ask" | "default" => {
                                 agent.permission_mode = PermissionMode::Ask;
+                                crate::permissions::set_current_mode_and_broadcast(PermissionMode::Ask);
                                 println!("{COLOR_DIM}permissions → ask{COLOR_RESET}");
                             }
                             _ => {
                                 println!("{COLOR_YELLOW}usage: /permissions auto|ask{COLOR_RESET}");
                             }
                         }
+                    }
+                }
+                SlashCommand::Plan(arg) => {
+                    let arg = arg.trim().to_lowercase();
+                    let cur = crate::permissions::current_mode();
+                    match arg.as_str() {
+                        "" | "on" | "enter" | "start" => {
+                            if matches!(cur, PermissionMode::Plan) {
+                                println!("{COLOR_DIM}Already in plan mode.{COLOR_RESET}");
+                            } else {
+                                crate::permissions::stash_pre_plan_mode(cur);
+                                crate::permissions::set_current_mode_and_broadcast(PermissionMode::Plan);
+                                println!(
+                                    "{COLOR_DIM}plan mode active — mutating tools blocked. Ask the model to call SubmitPlan.{COLOR_RESET}"
+                                );
+                            }
+                        }
+                        "exit" | "off" | "cancel" | "stop" | "abort" => {
+                            let restored = crate::permissions::take_pre_plan_mode()
+                                .unwrap_or(PermissionMode::Ask);
+                            crate::permissions::set_current_mode_and_broadcast(restored);
+                            crate::tools::plan_state::clear();
+                            println!(
+                                "{COLOR_DIM}plan mode cleared — restored to {restored:?}.{COLOR_RESET}"
+                            );
+                        }
+                        "status" | "show" => {
+                            let plan = crate::tools::plan_state::get();
+                            let summary = match plan {
+                                Some(p) => format!(
+                                    " — active plan {} ({} step(s))",
+                                    p.id,
+                                    p.steps.len()
+                                ),
+                                None => String::new(),
+                            };
+                            println!(
+                                "{COLOR_DIM}permission mode: {cur:?}{summary}{COLOR_RESET}"
+                            );
+                        }
+                        _ => println!("{COLOR_YELLOW}usage: /plan [enter | exit | status]{COLOR_RESET}"),
                     }
                 }
                 SlashCommand::Sso { sub } => {
@@ -3754,10 +3957,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                     let mp = crate::marketplace::load();
+                    let age_suffix = match crate::marketplace::cache_age_label() {
+                        Some(label) => format!(", {label}"),
+                        None => String::new(),
+                    };
                     println!(
-                        "{COLOR_DIM}marketplace ({}, {} skill(s)){COLOR_RESET}",
+                        "{COLOR_DIM}marketplace ({}, {} skill(s){age_suffix}){COLOR_RESET}",
                         mp.source,
-                        mp.skills.len()
+                        mp.skills.len(),
                     );
                     // Group by category so the listing reads like a catalog.
                     let mut by_cat: std::collections::BTreeMap<String, Vec<&crate::marketplace::MarketplaceSkill>> =
@@ -3773,12 +3980,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     for (cat, skills) in by_cat {
                         println!("{COLOR_DIM}── {cat} ──{COLOR_RESET}");
                         for s in skills {
-                            let tier_tag = match s.license_tier.as_str() {
-                                "linked-only" => " [linked-only]",
-                                _ => "",
-                            };
+                            let tags = crate::marketplace::entry_tags(s);
                             println!(
-                                "{COLOR_DIM}  {:<24}{tier_tag} — {}{COLOR_RESET}",
+                                "{COLOR_DIM}  {:<24}{tags} — {}{COLOR_RESET}",
                                 s.name,
                                 s.short_line()
                             );
@@ -3874,10 +4078,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                     let mp = crate::marketplace::load();
+                    let age_suffix = match crate::marketplace::cache_age_label() {
+                        Some(label) => format!(", {label}"),
+                        None => String::new(),
+                    };
                     println!(
-                        "{COLOR_DIM}MCP marketplace ({}, {} server(s)){COLOR_RESET}",
+                        "{COLOR_DIM}MCP marketplace ({}, {} server(s){age_suffix}){COLOR_RESET}",
                         mp.source,
-                        mp.mcp_servers.len()
+                        mp.mcp_servers.len(),
                     );
                     let mut by_cat: std::collections::BTreeMap<String, Vec<&crate::marketplace::MarketplaceMcpServer>> =
                         std::collections::BTreeMap::new();
@@ -3889,9 +4097,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         println!("{COLOR_DIM}── {cat} ──{COLOR_RESET}");
                         for s in servers {
                             let tport = if s.transport == "sse" { " [hosted]" } else { "" };
+                            let tags = crate::marketplace::entry_tags(s);
                             println!(
-                                "{COLOR_DIM}  {:<24}{tport} — {}{COLOR_RESET}",
-                                s.name, s.short_line()
+                                "{COLOR_DIM}  {:<24}{tport}{tags} — {}{COLOR_RESET}",
+                                s.name,
+                                s.short_line()
                             );
                         }
                     }
@@ -3977,10 +4187,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                     let mp = crate::marketplace::load();
+                    let age_suffix = match crate::marketplace::cache_age_label() {
+                        Some(label) => format!(", {label}"),
+                        None => String::new(),
+                    };
                     println!(
-                        "{COLOR_DIM}plugin marketplace ({}, {} plugin(s)){COLOR_RESET}",
+                        "{COLOR_DIM}plugin marketplace ({}, {} plugin(s){age_suffix}){COLOR_RESET}",
                         mp.source,
-                        mp.plugins.len()
+                        mp.plugins.len(),
                     );
                     let mut by_cat: std::collections::BTreeMap<String, Vec<&crate::marketplace::MarketplacePlugin>> =
                         std::collections::BTreeMap::new();
@@ -3991,9 +4205,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     for (cat, plugins) in by_cat {
                         println!("{COLOR_DIM}── {cat} ──{COLOR_RESET}");
                         for p in plugins {
+                            let tags = crate::marketplace::entry_tags(p);
                             println!(
-                                "{COLOR_DIM}  {:<24} — {}{COLOR_RESET}",
-                                p.name, p.short_line()
+                                "{COLOR_DIM}  {:<24}{tags} — {}{COLOR_RESET}",
+                                p.name,
+                                p.short_line()
                             );
                         }
                     }
@@ -4310,7 +4526,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {name}{detail}]{COLOR_RESET}");
                     let _ = std::io::stdout().flush();
                 }
-                Ok(AgentEvent::ToolCallResult { output, .. }) => {
+                Ok(AgentEvent::ToolCallResult { name, output, .. }) => {
                     match output {
                         Ok(_) => {
                             print!(" {COLOR_DIM}✓{COLOR_RESET}");
@@ -4319,6 +4535,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         Err(ref e) => {
                             print!(" {COLOR_YELLOW}✗ {e}{COLOR_RESET}");
                             lead_log!(" {COLOR_YELLOW}✗ {e}{COLOR_RESET}\n{COLOR_GREEN}");
+                        }
+                    }
+                    // CLI parity for plan-mode (M5). When a plan tool
+                    // mutates state, render the current plan as a
+                    // coloured ANSI block — analogue of the GUI
+                    // sidebar's live update. Only fires for the four
+                    // plan tools so we don't print a plan block
+                    // after every Read / Bash / Edit.
+                    if PLAN_TOOL_NAMES.contains(&name.as_str()) {
+                        if let Some(plan) = crate::tools::plan_state::get() {
+                            let block = format_plan_for_cli(&plan);
+                            print!("{block}");
+                            lead_log!("{block}");
                         }
                     }
                     print!("{COLOR_RESET}\n{COLOR_GREEN}");

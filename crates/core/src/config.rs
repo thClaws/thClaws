@@ -53,6 +53,33 @@ pub struct AppConfig {
     /// Default 200 — high enough for complex multi-step tasks.
     pub max_iterations: usize,
 
+    /// Plan-mode context strategy at step boundaries (M6).
+    /// - `"compact"` (default, M6.2): structurally trims pre-boundary
+    ///   non-plan tool_result content to a placeholder, keeping plan
+    ///   tool breadcrumbs and conversation shape intact.
+    /// - `"clear"` (M6.4 opt-in): wipes the agent's chat history at
+    ///   each step boundary, keeping only the original user prompt
+    ///   for grounding. Most aggressive — forces full reliance on
+    ///   `step.output` for cross-step data + the system reminder for
+    ///   plan structure. Recommended only for very long plans
+    ///   (20+ steps) where compaction alone isn't enough.
+    pub plan_context_strategy: String,
+
+    /// How installed skills are surfaced to the model (dev-plan/06 P2).
+    /// Trade-offs between system-prompt token cost and discoverability.
+    /// - `"full"` (default): every skill listed with name + description
+    ///   + when_to_use trigger. Highest token cost; highest "model
+    ///   always knows" coverage. Right for users with ≤20 skills.
+    /// - `"names-only"`: list only skill names + a hint to call the
+    ///   Skill / SkillSearch tools for detail. Constant per-skill cost
+    ///   (~30 chars vs ~200) so 100 skills add ~3KB instead of ~20KB.
+    /// - `"discover-tool-only"`: no skill names listed at all; system
+    ///   prompt only mentions the SkillList / SkillSearch tools.
+    ///   Constant-size prompt regardless of skill count. Risks model
+    ///   missing skills it should have invoked — only set when token
+    ///   budget matters more than guaranteed coverage.
+    pub skills_listing_strategy: String,
+
     /// MCP servers to spawn at REPL startup. Each server's discovered tools
     /// are registered into the `ToolRegistry` alongside the native built-ins,
     /// prefixed with the server name (e.g. `"filesystem.read_file"`).
@@ -88,6 +115,13 @@ impl Default for AppConfig {
             // teammate-orchestrated multi-agent flows, and surfaces
             // runaway loops earlier than the old 200.
             max_iterations: 50,
+            // M6.2 compact-between-steps is the safe default. M6.4
+            // opt-in `clear` requires explicit project config.
+            plan_context_strategy: "compact".to_string(),
+            // dev-plan/06 P2: "full" is the safe default — preserves
+            // pre-P2 behavior. Power users with many skills can opt
+            // into "names-only" or "discover-tool-only".
+            skills_listing_strategy: "full".to_string(),
             mcp_servers: Vec::new(),
             kms_active: Vec::new(),
         }
@@ -182,6 +216,16 @@ pub struct ProjectConfig {
     pub max_tokens: Option<u32>,
     #[serde(rename = "maxIterations")]
     pub max_iterations: Option<usize>,
+    /// M6.4 opt-in: plan-mode context strategy at step boundaries.
+    /// Accepts `"compact"` (default — see AppConfig docs) or `"clear"`.
+    /// Anything else falls back to `"compact"`.
+    #[serde(rename = "planContextStrategy")]
+    pub plan_context_strategy: Option<String>,
+    /// dev-plan/06 P2: how installed skills are surfaced in the
+    /// system prompt. Accepts `"full"` (default), `"names-only"`,
+    /// `"discover-tool-only"`. Anything else falls back to `"full"`.
+    #[serde(rename = "skillsListingStrategy")]
+    pub skills_listing_strategy: Option<String>,
     #[serde(rename = "thinkingBudget")]
     pub thinking_budget: Option<u32>,
     #[serde(rename = "searchEngine")]
@@ -243,6 +287,8 @@ impl Default for ProjectConfig {
             permissions: None,
             max_tokens: None,
             max_iterations: None,
+            plan_context_strategy: None,
+            skills_listing_strategy: None,
             thinking_budget: None,
             search_engine: None,
             allowed_tools: None,
@@ -342,6 +388,29 @@ impl ProjectConfig {
         }
         if let Some(n) = self.max_iterations {
             config.max_iterations = n;
+        }
+        if let Some(ref s) = self.plan_context_strategy {
+            // Validate at the merge boundary so unknown values are
+            // ignored (rather than reaching the driver and causing a
+            // silent fallback). The driver matches on this string.
+            match s.as_str() {
+                "compact" | "clear" => config.plan_context_strategy = s.clone(),
+                _ => {
+                    // Leave default; the warning surface here would be
+                    // a one-time stderr print on load, but config.rs
+                    // doesn't have a logging channel yet — defer.
+                }
+            }
+        }
+        if let Some(ref s) = self.skills_listing_strategy {
+            // Same merge-boundary validation as plan_context_strategy.
+            // Unknown values silently fall back to the default ("full").
+            match s.as_str() {
+                "full" | "names-only" | "discover-tool-only" => {
+                    config.skills_listing_strategy = s.clone()
+                }
+                _ => {}
+            }
         }
         if let Some(b) = self.thinking_budget {
             config.thinking_budget = Some(b);

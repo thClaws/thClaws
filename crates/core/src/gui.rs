@@ -161,9 +161,16 @@ fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
             "text": strip_ansi(text),
         })
         .to_string()],
-        ViewEvent::ToolCallStart { name: _, label } => vec![serde_json::json!({
+        ViewEvent::ToolCallStart { name, label, input } => vec![serde_json::json!({
             "type": "chat_tool_call",
             "name": strip_ansi(label),
+            // Tool name (unmangled, e.g. "TodoWrite") so the chat
+            // surface can pick a custom render (a todo-list card)
+            // instead of the generic one-line indicator. Plus the
+            // raw input so that custom renderer has the data it
+            // needs without a follow-up IPC round-trip.
+            "tool_name": name,
+            "input": input,
         })
         .to_string()],
         ViewEvent::ToolCallResult {
@@ -243,6 +250,48 @@ fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
         // function is called — see the `if matches!(...)` early-return
         // above. Listed here for match exhaustiveness only.
         ViewEvent::QuitRequested => vec![],
+        // Right-side plan sidebar update (M1). `None` clears the
+        // sidebar, `Some(plan)` repaints it. Wire format mirrors
+        // `Plan` directly — frontend deserialises into the same
+        // shape `PlanSidebar.tsx` consumes.
+        ViewEvent::PlanUpdate(plan) => {
+            let payload = serde_json::json!({
+                "type": "chat_plan_update",
+                "plan": plan,
+            });
+            vec![payload.to_string()]
+        }
+        // Permission-mode changed (M2). Frontend uses this to render
+        // a status pill (PLAN / AUTO / ASK) and to know whether the
+        // sidebar should show Approve / Cancel buttons.
+        ViewEvent::PermissionModeChanged(mode) => {
+            let mode_str = match mode {
+                crate::permissions::PermissionMode::Auto => "auto",
+                crate::permissions::PermissionMode::Ask => "ask",
+                crate::permissions::PermissionMode::Plan => "plan",
+            };
+            let payload = serde_json::json!({
+                "type": "chat_permission_mode",
+                "mode": mode_str,
+            });
+            vec![payload.to_string()]
+        }
+        // Stalled-turn detector tripped (M4.4). Sidebar renders a
+        // yellow "model seems stuck on step X (N turns)" banner
+        // with Continue / Abort buttons.
+        ViewEvent::PlanStalled {
+            step_id,
+            step_title,
+            turns,
+        } => {
+            let payload = serde_json::json!({
+                "type": "chat_plan_stalled",
+                "step_id": step_id,
+                "step_title": step_title,
+                "turns": turns,
+            });
+            vec![payload.to_string()]
+        }
     }
 }
 
@@ -408,7 +457,11 @@ fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> Opti
     // it can suppress / rewrite output without going through the
     // pending-newline flush path below.
     match ev {
-        ViewEvent::ToolCallStart { name: _, label } => {
+        ViewEvent::ToolCallStart {
+            name: _,
+            label,
+            input: _,
+        } => {
             if state.pending_newline_after_tool
                 && state.last_tool_label.as_deref() == Some(label.as_str())
                 && state.last_tool_count >= 1
@@ -543,6 +596,16 @@ fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> Opti
         // and forwarded to the tao loop; the terminal tab has nothing
         // to render for it.
         ViewEvent::QuitRequested => None,
+        // Plan-mode sidebar lives only in the chat-tab translator
+        // (M1). The terminal tab will get text-mode plan rendering
+        // in M5.
+        ViewEvent::PlanUpdate(_) => None,
+        // Mode badge is a chat-tab affordance. Terminal can show a
+        // status indicator in a future polish pass.
+        ViewEvent::PermissionModeChanged(_) => None,
+        // Stalled-plan banner is a chat-tab affordance (M4.4).
+        // Terminal will get text-mode rendering in M5.
+        ViewEvent::PlanStalled { .. } => None,
     };
 
     // Non-tool event finished. If we had a pending tool-result line
@@ -1304,6 +1367,20 @@ pub fn run_gui() {
                     "question": question,
                 });
                 let _ = proxy_for_ask.send_event(UserEvent::Dispatch(payload.to_string()));
+
+                // Also render the question as ANSI in the terminal tab
+                // so users on the Terminal surface aren't left wondering
+                // why a tool stalled silently. Cyan banner + the full
+                // question body, then a "↩ switch to Chat tab to reply"
+                // hint since we don't have an inline answer affordance
+                // in the terminal yet.
+                let terminal_block = format!(
+                    "\r\n\x1b[36m─── assistant asks ─────────────────────\x1b[0m\r\n\x1b[36m{}\x1b[0m\r\n\x1b[36m─── reply via the Chat tab ─────────────\x1b[0m\r\n",
+                    question.replace('\n', "\r\n"),
+                );
+                let _ = proxy_for_ask.send_event(UserEvent::Dispatch(
+                    terminal_data_envelope(&terminal_block),
+                ));
             }
         });
     });
@@ -1555,6 +1632,158 @@ pub fn run_gui() {
                     let _ = project.save();
                     let clamped = project.gui_scale.unwrap_or(scale);
                     let _ = proxy_for_ipc.send_event(UserEvent::ZoomChanged(clamped));
+                }
+                "plan_approve" => {
+                    // User clicked the sidebar Approve button (M3).
+                    // Approve = "execute this plan autonomously" — flip
+                    // mode to Auto so writes run unattended (no
+                    // per-call approval popups during step execution).
+                    // pre_plan_mode stays stashed; the prior mode is
+                    // restored automatically when the final step
+                    // transitions to Done (see plan_state::update_step
+                    // → fire_completion).
+                    //
+                    // M6.9 (Bug C2): defensive guard — only act if
+                    // there's actually a plan to approve. A malformed
+                    // IPC, a stale Approve click after Cancel, or a
+                    // race could otherwise flip mode and push "Begin
+                    // executing the plan." with no plan in scope —
+                    // confusing the model. Also guard against
+                    // approving an already-finished plan (Bug C1's
+                    // companion).
+                    use crate::tools::plan_state::StepStatus;
+                    let plan = crate::tools::plan_state::get();
+                    let has_unfinished_plan = plan
+                        .as_ref()
+                        .map(|p| p.steps.iter().any(|s| s.status != StepStatus::Done))
+                        .unwrap_or(false);
+                    if !has_unfinished_plan {
+                        // Nothing to approve. Don't flip mode, don't push.
+                        // `return` exits this IPC handler closure for
+                        // this single request; the next IPC will be
+                        // processed normally.
+                        return;
+                    }
+                    crate::permissions::set_current_mode_and_broadcast(
+                        crate::permissions::PermissionMode::Auto,
+                    );
+                    // Auto-nudge: kick off a turn so the model starts
+                    // executing immediately. Without this, the user
+                    // has to type "begin" / "go" to wake the agent
+                    // loop — the SubmitPlan turn ended when no further
+                    // tool calls were emitted, and permission flips
+                    // alone don't trigger a new turn.
+                    let _ = shared_for_ipc.input_tx.send(
+                        crate::shared_session::ShellInput::Line(
+                            "Begin executing the plan.".to_string(),
+                        ),
+                    );
+                }
+                "plan_cancel" => {
+                    // User clicked Cancel (M3). Execution never
+                    // started; clear the plan and restore the pre-plan
+                    // mode. Model gets `null` PlanUpdate on next turn.
+                    let restored = crate::permissions::take_pre_plan_mode()
+                        .unwrap_or(crate::permissions::PermissionMode::Ask);
+                    crate::permissions::set_current_mode_and_broadcast(restored);
+                    crate::tools::plan_state::clear();
+                }
+                "plan_retry_step" => {
+                    // User clicked Retry on a failed step (M4.2).
+                    // Failed → InProgress is a legal gate transition,
+                    // so this routes through the normal `update_step`
+                    // path. Auto-nudge a fresh turn so the model picks
+                    // up where it left off and retries.
+                    //
+                    // M6.7: only flip to InProgress when the step is
+                    // currently Failed. Earlier code unconditionally
+                    // called update_step regardless of state, which
+                    // produced the "illegal step transition InProgress
+                    // → InProgress" error when a race put the step
+                    // into InProgress before the IPC handler ran. The
+                    // status check makes Retry a no-op in that case
+                    // (the step is already running — what the user
+                    // wanted).
+                    let step_id = msg
+                        .get("step_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !step_id.is_empty() {
+                        use crate::tools::plan_state::StepStatus;
+                        let current = crate::tools::plan_state::get()
+                            .and_then(|p| p.step_by_id(&step_id).map(|s| s.status));
+                        if current == Some(StepStatus::Failed) {
+                            let _ = crate::tools::plan_state::update_step(
+                                &step_id,
+                                StepStatus::InProgress,
+                                None,
+                            );
+                            // M6.1: Retry is a user-initiated fresh
+                            // chance — reset the per-step attempt
+                            // counter so the driver doesn't immediately
+                            // force-Failed again on the next turn end.
+                            crate::tools::plan_state::reset_step_attempts_external();
+                            let _ = shared_for_ipc.input_tx.send(
+                                crate::shared_session::ShellInput::Line(format!(
+                                    "Retry the failed step (\"{step_id}\")."
+                                )),
+                            );
+                        }
+                        // If status is anything else (Todo, InProgress,
+                        // Done), Retry is a no-op — the step doesn't
+                        // need retrying or is already in progress.
+                    }
+                }
+                "plan_stalled_continue" => {
+                    // User clicked Continue on the "model seems stuck"
+                    // banner (M4.4). Reset the stall counter so the
+                    // banner disappears, and auto-nudge a fresh turn
+                    // so the model gets another shot at the current
+                    // step. If it stalls again, the detector will
+                    // re-trigger after the next 3 unproductive turns.
+                    crate::tools::plan_state::reset_stall_counter_external();
+                    // M6.1: also reset the per-step attempt counter —
+                    // the user has explicitly endorsed another round
+                    // on this step, so the retry budget should restart.
+                    crate::tools::plan_state::reset_step_attempts_external();
+                    let _ = shared_for_ipc.input_tx.send(
+                        crate::shared_session::ShellInput::Line(
+                            "Continue with the plan. If you're stuck, \
+                             commit to a UpdatePlanStep transition — \
+                             either advance the current step to done, \
+                             or mark it failed with a brief note so \
+                             the user can retry / skip / abort."
+                                .to_string(),
+                        ),
+                    );
+                }
+                "plan_skip_step" => {
+                    // User clicked Skip on a failed step (M4.2). Force
+                    // the step to Done with a "skipped by user" note —
+                    // this bypasses the normal gate (Failed → Done is
+                    // not legal through `update_step`) on purpose:
+                    // Skip is the user's deliberate override. The
+                    // audit note records the override. Auto-nudge a
+                    // fresh turn so the model moves on to the next
+                    // step.
+                    let step_id = msg
+                        .get("step_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !step_id.is_empty() {
+                        let _ = crate::tools::plan_state::force_step_done(
+                            &step_id,
+                            "skipped by user",
+                        );
+                        let _ = shared_for_ipc.input_tx.send(
+                            crate::shared_session::ShellInput::Line(format!(
+                                "Step (\"{step_id}\") was skipped by the user. \
+                                 Continue with the next step in the plan."
+                            )),
+                        );
+                    }
                 }
                 "request_all_models" => {
                     // Sidebar's inline model picker dropdown asking for
@@ -2997,6 +3226,7 @@ mod tool_coalesce_tests {
         ViewEvent::ToolCallStart {
             name: label.to_string(),
             label: label.to_string(),
+            input: serde_json::Value::Null,
         }
     }
 
@@ -3056,5 +3286,36 @@ mod tool_coalesce_tests {
                 .unwrap();
         assert!(text.starts_with("\r\n"));
         assert!(text.contains("Done."));
+    }
+
+    #[test]
+    fn chat_dispatch_carries_tool_name_and_input_for_todowrite() {
+        // Frontend keys on `tool_name === "TodoWrite"` to render the
+        // checklist card. The IPC envelope must carry both the
+        // unmangled tool name and the raw input so the renderer has
+        // everything it needs without a follow-up round-trip.
+        let ev = ViewEvent::ToolCallStart {
+            name: "TodoWrite".to_string(),
+            label: "TodoWrite".to_string(),
+            input: serde_json::json!({
+                "todos": [
+                    { "id": "1", "content": "Investigate bug", "status": "in_progress" },
+                    { "id": "2", "content": "Write fix", "status": "pending" },
+                ]
+            }),
+        };
+        let dispatches = render_chat_dispatches(&ev);
+        assert_eq!(dispatches.len(), 1);
+        let envelope: serde_json::Value =
+            serde_json::from_str(&dispatches[0]).expect("valid JSON envelope");
+        assert_eq!(envelope["type"], "chat_tool_call");
+        assert_eq!(
+            envelope["tool_name"], "TodoWrite",
+            "frontend keys on tool_name to pick the custom render path",
+        );
+        let todos = &envelope["input"]["todos"];
+        assert!(todos.is_array(), "todos array missing in input: {envelope}");
+        assert_eq!(todos[0]["content"], "Investigate bug");
+        assert_eq!(todos[0]["status"], "in_progress");
     }
 }

@@ -25,6 +25,7 @@ pub mod ls;
 pub mod pdf_create;
 pub mod pdf_read;
 pub mod plan;
+pub mod plan_state;
 pub mod pptx_create;
 pub mod pptx_edit;
 pub mod pptx_read;
@@ -50,7 +51,7 @@ pub use kms::{KmsReadTool, KmsSearchTool};
 pub use ls::LsTool;
 pub use pdf_create::PdfCreateTool;
 pub use pdf_read::PdfReadTool;
-pub use plan::{EnterPlanModeTool, ExitPlanModeTool};
+pub use plan::{EnterPlanModeTool, ExitPlanModeTool, SubmitPlanTool, UpdatePlanStepTool};
 pub use pptx_create::PptxCreateTool;
 pub use pptx_edit::PptxEditTool;
 pub use pptx_read::PptxReadTool;
@@ -144,6 +145,8 @@ impl ToolRegistry {
         r.register(Arc::new(TodoWriteTool));
         r.register(Arc::new(EnterPlanModeTool));
         r.register(Arc::new(ExitPlanModeTool));
+        r.register(Arc::new(SubmitPlanTool));
+        r.register(Arc::new(UpdatePlanStepTool));
         r
     }
 
@@ -243,7 +246,9 @@ mod tests {
                 "PptxEdit",
                 "PptxRead",
                 "Read",
+                "SubmitPlan",
                 "TodoWrite",
+                "UpdatePlanStep",
                 "WebFetch",
                 "WebSearch",
                 "Write",

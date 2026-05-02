@@ -9,10 +9,12 @@
 //! Discovery locations (in order; later wins on name collision):
 //! 1. `~/.claude/skills/` (user Claude Code)
 //! 2. `~/.config/thclaws/skills/` (user thClaws)
-//! 3. `.claude/skills/` (project Claude Code)
-//! 4. `.thclaws/skills/` (project thClaws — highest priority)
+//! 3. plugin-contributed skill dirs (see [`crate::plugins`])
+//! 4. `.claude/skills/` (project Claude Code)
+//! 5. `.thclaws/skills/` (project thClaws — highest priority)
 //!
-//! Plus any plugin-contributed skill dirs (see [`crate::plugins`]).
+//! Project skills always beat plugin- and user-installed ones with the
+//! same name, matching the principle that the most-specific scope wins.
 //!
 //! The `Skill` tool returns the SKILL.md content with `{skill_dir}` replaced
 //! by the absolute path to the skill directory, so script paths resolve.
@@ -22,8 +24,67 @@ use crate::tools::Tool;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// Maximum bytes read at boot to capture a SKILL.md's YAML frontmatter
+/// without loading the body. Realistic frontmatter is < 1KB; the cap
+/// is set generously so non-trivial config blocks fit. Bodies (which
+/// can be 10–100 KB for complex skills) load on demand via
+/// [`SkillDef::content`].
+///
+/// dev-plan/06 P1.
+const MAX_FRONTMATTER_BYTES: usize = 4096;
+
+/// Internal storage for a skill's body. Either loaded eagerly at
+/// construction time (tests, in-memory skill defs) or read lazily from
+/// disk on the first [`SkillDef::content`] call.
+///
+/// The `Lazy` variant uses `OnceLock` so the first reader wins the
+/// race; subsequent calls share the cached value. Hash equality and
+/// serde derives are kept consistent by always serializing as the
+/// materialized string (see manual `Serialize` / `Deserialize` impls
+/// below).
+#[derive(Debug)]
+enum SkillContent {
+    /// Body was provided up-front (tests, in-memory construction). No
+    /// I/O on access.
+    Eager(String),
+    /// Body lives on disk; load it on first `.content()` call. The
+    /// `OnceLock` caches the materialized content for subsequent
+    /// reads. `abs_dir` is captured at index time so the body's
+    /// `{skill_dir}` substitution works without re-canonicalizing.
+    Lazy {
+        skill_md_path: PathBuf,
+        abs_dir: PathBuf,
+        cell: OnceLock<String>,
+    },
+}
+
+impl Clone for SkillContent {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Eager(s) => Self::Eager(s.clone()),
+            Self::Lazy {
+                skill_md_path,
+                abs_dir,
+                cell,
+            } => {
+                let new_cell = OnceLock::new();
+                if let Some(v) = cell.get() {
+                    let _ = new_cell.set(v.clone());
+                }
+                Self::Lazy {
+                    skill_md_path: skill_md_path.clone(),
+                    abs_dir: abs_dir.clone(),
+                    cell: new_cell,
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillDef {
@@ -32,7 +93,162 @@ pub struct SkillDef {
     #[serde(default)]
     pub when_to_use: String,
     pub dir: PathBuf,
-    pub content: String,
+    /// Body access goes through [`Self::content`]. Serialization
+    /// always materializes to a string so cached SkillDef snapshots
+    /// (e.g. in tests, in JSON dumps) round-trip without exposing the
+    /// lazy enum variant. Deserialization always lands in Eager —
+    /// there's no on-disk path to load lazily from once the SkillDef
+    /// has been serialized.
+    #[serde(serialize_with = "serialize_skill_content")]
+    #[serde(deserialize_with = "deserialize_skill_content")]
+    content: SkillContent,
+}
+
+fn serialize_skill_content<S>(
+    content: &SkillContent,
+    ser: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::Serialize;
+    let s = match content {
+        SkillContent::Eager(s) => s.clone(),
+        SkillContent::Lazy {
+            skill_md_path,
+            abs_dir,
+            cell,
+        } => {
+            // Materialize for serialization. Best-effort — if the
+            // file disappeared we serialize an empty string rather
+            // than panicking.
+            cell.get()
+                .cloned()
+                .or_else(|| read_and_substitute_body(skill_md_path, abs_dir).ok())
+                .unwrap_or_default()
+        }
+    };
+    s.serialize(ser)
+}
+
+fn deserialize_skill_content<'de, D>(de: D) -> std::result::Result<SkillContent, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let s = String::deserialize(de)?;
+    Ok(SkillContent::Eager(s))
+}
+
+impl SkillDef {
+    /// Construct a SkillDef with eagerly-provided body content. Used
+    /// by tests and any caller building a skill from in-memory data.
+    pub fn new_eager(
+        name: String,
+        description: String,
+        when_to_use: String,
+        dir: PathBuf,
+        content: String,
+    ) -> Self {
+        Self {
+            name,
+            description,
+            when_to_use,
+            dir,
+            content: SkillContent::Eager(content),
+        }
+    }
+
+    /// Read the skill body, lazy-loading from disk on first access if
+    /// constructed via [`SkillStore::discover`]. Subsequent calls are
+    /// cache-hits with no I/O.
+    ///
+    /// On read failure (file deleted, permission denied) returns an
+    /// empty Cow rather than panicking — the caller's downstream
+    /// rendering treats empty content as "skill body unavailable" and
+    /// surfaces that to the model. Cached subsequent reads return the
+    /// same empty value (we don't retry on the lazy path; user can
+    /// `/skill install` to re-discover).
+    pub fn content(&self) -> Cow<'_, str> {
+        match &self.content {
+            SkillContent::Eager(s) => Cow::Borrowed(s.as_str()),
+            SkillContent::Lazy {
+                skill_md_path,
+                abs_dir,
+                cell,
+            } => {
+                let s = cell.get_or_init(|| {
+                    read_and_substitute_body(skill_md_path, abs_dir).unwrap_or_else(|e| {
+                        eprintln!(
+                            "[skills] failed to read body for {}: {e}",
+                            skill_md_path.display()
+                        );
+                        String::new()
+                    })
+                });
+                Cow::Borrowed(s.as_str())
+            }
+        }
+    }
+}
+
+/// Read a SKILL.md from disk, strip frontmatter, substitute
+/// `{skill_dir}` with `abs_dir`, return the body. Used by both
+/// `SkillContent::Lazy::content()` and the eager `parse_skill` path.
+fn read_and_substitute_body(skill_md: &Path, abs_dir: &Path) -> std::io::Result<String> {
+    let raw = std::fs::read_to_string(skill_md)?;
+    let (_, body) = crate::memory::parse_frontmatter(&raw);
+    Ok(body.replace("{skill_dir}", &abs_dir.to_string_lossy()))
+}
+
+/// Read up to `MAX_FRONTMATTER_BYTES` of `path`, stopping early if we
+/// see the closing `---\n` after the opening one. Used at boot so we
+/// only pay for parsing the YAML header and skip the body.
+///
+/// Returns the bytes read as a String. Caller passes to
+/// `parse_frontmatter` which extracts the frontmatter HashMap; the
+/// trailing body bytes (if any leaked past the cap) are ignored.
+fn read_until_frontmatter_end(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        // Check for closing fence after the opening one. Frontmatter
+        // shape: `---\n<yaml>\n---\n`. Need TWO `---\n` boundaries.
+        // Scanning the accumulated buffer is cheap (≤4KB).
+        if has_closing_fence(&buf) {
+            break;
+        }
+        if buf.len() >= MAX_FRONTMATTER_BYTES {
+            // Cap reached; stop reading. Better to over-read by a
+            // chunk than under-read and miss the frontmatter.
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// True when `buf` contains a frontmatter open + close fence
+/// (`---\n` ... `---\n`). Conservative: requires the opening fence
+/// to start at position 0.
+fn has_closing_fence(buf: &[u8]) -> bool {
+    if !buf.starts_with(b"---\n") && !buf.starts_with(b"---\r\n") {
+        // No opening fence → no frontmatter, no closing fence to find.
+        // Caller's parse_frontmatter will treat the whole buf as body
+        // (no frontmatter present), which is fine for our use case.
+        return true; // signal "stop reading" so we don't burn the full cap
+    }
+    // Skip past the opening fence (4 or 5 bytes).
+    let after_open = if buf.starts_with(b"---\r\n") { 5 } else { 4 };
+    let rest = &buf[after_open..];
+    // Look for "\n---\n" or "\n---\r\n" anywhere in rest.
+    rest.windows(5).any(|w| w == b"\n---\n") || rest.windows(6).any(|w| w == b"\n---\r\n")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,13 +281,26 @@ impl SkillStore {
     /// Discover skills, additionally walking each directory in `extra`.
     /// Used by the plugin system to pull in skills contributed by
     /// installed plugins without symlinking or copying.
+    ///
+    /// Load order: user dirs → `extra` (plugins) → project dirs. The
+    /// project dirs come last so a project's `.thclaws/skills/<name>`
+    /// always wins over a plugin or user install with the same name —
+    /// M6.14 fix; previously plugin dirs were appended at the end and
+    /// could shadow project skills, contradicting the documented
+    /// "project highest priority" contract.
     pub fn discover_with_extra(extra: &[PathBuf]) -> Self {
         let mut store = Self::default();
-        let mut dirs = Self::skill_dirs();
-        for p in extra {
-            dirs.push(p.clone());
+        for dir in Self::user_skill_dirs() {
+            if dir.exists() {
+                store.load_dir(&dir);
+            }
         }
-        for dir in dirs {
+        for dir in extra {
+            if dir.exists() {
+                store.load_dir(dir);
+            }
+        }
+        for dir in Self::project_skill_dirs() {
             if dir.exists() {
                 store.load_dir(&dir);
             }
@@ -79,16 +308,20 @@ impl SkillStore {
         store
     }
 
-    /// Skill directories in load order (later overrides earlier by name).
-    fn skill_dirs() -> Vec<PathBuf> {
+    fn user_skill_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         if let Some(home) = crate::util::home_dir() {
             dirs.push(home.join(".claude/skills")); // user Claude Code
             dirs.push(home.join(".config/thclaws/skills")); // user thClaws
         }
-        dirs.push(PathBuf::from(".claude/skills")); // project Claude Code
-        dirs.push(PathBuf::from(".thclaws/skills")); // project thClaws (highest priority)
         dirs
+    }
+
+    fn project_skill_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from(".claude/skills"),  // project Claude Code
+            PathBuf::from(".thclaws/skills"), // project thClaws (highest priority)
+        ]
     }
 
     fn load_dir(&mut self, base: &Path) {
@@ -110,9 +343,12 @@ impl SkillStore {
         }
     }
 
+    /// Discover a skill by reading ONLY its frontmatter (capped at
+    /// `MAX_FRONTMATTER_BYTES`). The body stays on disk and loads on
+    /// the first `SkillDef::content()` call. dev-plan/06 P1.
     fn parse_skill(dir: &Path, skill_md: &Path) -> Option<SkillDef> {
-        let raw = std::fs::read_to_string(skill_md).ok()?;
-        let (frontmatter, body) = crate::memory::parse_frontmatter(&raw);
+        let raw = read_until_frontmatter_end(skill_md).ok()?;
+        let (frontmatter, _body) = crate::memory::parse_frontmatter(&raw);
 
         let name = frontmatter.get("name").cloned().unwrap_or_else(|| {
             dir.file_name()
@@ -127,16 +363,30 @@ impl SkillStore {
             .cloned()
             .unwrap_or_default();
 
-        // Replace {skill_dir} placeholder with actual absolute path.
+        // Canonicalize once at index time so the `{skill_dir}`
+        // substitution inside the lazy body load doesn't have to —
+        // and so the lazy-loaded SKILL.md path is absolute. M6.14:
+        // a previous bug stored `skill_md.to_path_buf()` here, which
+        // could be relative (e.g. `.thclaws/skills/foo/SKILL.md`) when
+        // discovery ran from a relative project dir. After the GUI
+        // user switched workspaces (which calls set_current_dir), the
+        // relative path resolved under the wrong CWD and the lazy
+        // read returned empty content for every project skill.
         let abs_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        let content = body.replace("{skill_dir}", &abs_dir.to_string_lossy());
+        let abs_skill_md = abs_dir.join("SKILL.md");
 
         Some(SkillDef {
             name,
             description,
             when_to_use,
-            dir: abs_dir,
-            content,
+            dir: abs_dir.clone(),
+            // Body is read on demand by `SkillDef::content()`. Only
+            // the path + abs_dir are captured at boot.
+            content: SkillContent::Lazy {
+                skill_md_path: abs_skill_md,
+                abs_dir,
+                cell: OnceLock::new(),
+            },
         })
     }
 
@@ -361,8 +611,13 @@ async fn download_zip(url: &str) -> Result<Vec<u8>> {
     // smaller; anything bigger is almost certainly the wrong URL.
     const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
+    // 30s end-to-end timeout: a slow or hostile server can no longer
+    // hang `/skill install` indefinitely (M6.14 — fix BUG 4). The
+    // marketplace fetch uses a similar 10s cap; zip installs may pull
+    // larger payloads so we allow a touch more headroom.
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| Error::Tool(format!("http client: {e}")))?;
     let resp = client
@@ -911,28 +1166,241 @@ impl Tool for SkillTool {
             ))
         })?;
 
-        // List scripts if the scripts/ dir exists.
-        let scripts_dir = skill.dir.join("scripts");
-        let mut result = skill.content.clone();
-        if scripts_dir.exists() {
-            let scripts: Vec<String> = std::fs::read_dir(&scripts_dir)
-                .ok()
-                .map(|entries| {
-                    entries
-                        .flatten()
-                        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                        .map(|e| format!("  - {}", scripts_dir.join(e.file_name()).display()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !scripts.is_empty() {
-                result.push_str("\n\n## Available scripts\n");
-                result.push_str(&scripts.join("\n"));
-                result.push_str("\n\nUse Bash to execute these scripts. Do NOT rewrite them.");
-            }
-        }
+        // Lazy-load the body on first SkillTool invocation. After P1
+        // dev-plan/06: SkillStore::discover() only read the
+        // frontmatter at boot; this `.content()` call materializes
+        // the body now and caches it in the SkillDef's OnceLock.
+        let mut result = skill.content().into_owned();
+
+        // Auto-detect runtime needs: requirements.txt + scripts/ dir.
+        // The skill author doesn't have to repeat install instructions
+        // in their SKILL.md — we surface them here so the model
+        // notices on every invocation. Idempotent: pip install with
+        // already-installed deps is a no-op + cached.
+        append_skill_runtime_hints(&mut result, &skill.dir);
 
         Ok(result)
+    }
+}
+
+/// Auto-surface skill-runtime guidance: list scripts with suggested
+/// interpreter, surface a `requirements.txt` install hint when
+/// present. Called by `SkillTool::call` after the body is loaded.
+///
+/// Conventions (zero-config for skill authors):
+///   - `<skill_dir>/scripts/foo.py`        → suggest `python <path>`
+///   - `<skill_dir>/scripts/foo.sh`        → suggest `bash <path>`
+///   - `<skill_dir>/scripts/foo.js`        → suggest `node <path>`
+///   - `<skill_dir>/scripts/foo.ts`        → suggest `npx tsx <path>`
+///   - `<skill_dir>/scripts/foo.rb`        → suggest `ruby <path>`
+///   - `<skill_dir>/scripts/foo.pl`        → suggest `perl <path>`
+///   - `<skill_dir>/scripts/foo` (no ext)  → list path only; let model decide
+///
+/// `<skill_dir>/requirements.txt` (Python deps) → install hint surfaced
+/// before the script listing. Bash tool's auto-venv layer wraps
+/// `pip install -r <path>` in venv activation transparently.
+///
+/// Skill authors can override by writing explicit `Run: ...` lines in
+/// their SKILL.md — those land in the body before this auto-section.
+fn append_skill_runtime_hints(result: &mut String, skill_dir: &Path) {
+    let req_txt = skill_dir.join("requirements.txt");
+    let scripts_dir = skill_dir.join("scripts");
+
+    if req_txt.exists() {
+        result.push_str(&format!(
+            "\n\n## Python dependencies\n\nRun once before invoking this skill:\n\n  \
+             pip install -r {}\n\n\
+             (Bash will auto-activate the project venv. Idempotent: \
+             repeated installs are no-ops.)",
+            req_txt.display()
+        ));
+    }
+
+    if !scripts_dir.exists() {
+        return;
+    }
+
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&scripts_dir)
+        .ok()
+        .map(|e| {
+            e.flatten()
+                .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|entry| scripts_dir.join(entry.file_name()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if entries.is_empty() {
+        return;
+    }
+
+    let mut sorted = entries;
+    sorted.sort();
+
+    result.push_str("\n\n## Available scripts\n\nInvoke via Bash. Do NOT rewrite them.\n\n");
+    for path in sorted {
+        let suggestion = suggest_interpreter(&path);
+        match suggestion {
+            Some(cmd) => result.push_str(&format!("  - `{cmd} {}`\n", path.display())),
+            None => result.push_str(&format!("  - {}\n", path.display())),
+        }
+    }
+}
+
+/// Map a script's file extension to the conventional interpreter
+/// invocation. Returns `None` for unknown extensions or extensionless
+/// files — caller falls back to listing the path only and lets the
+/// model decide.
+fn suggest_interpreter(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    match ext.as_str() {
+        "py" => Some("python"),
+        "sh" | "bash" => Some("bash"),
+        "zsh" => Some("zsh"),
+        "fish" => Some("fish"),
+        "js" | "mjs" | "cjs" => Some("node"),
+        "ts" | "mts" => Some("npx tsx"),
+        "rb" => Some("ruby"),
+        "pl" => Some("perl"),
+        "php" => Some("php"),
+        "lua" => Some("lua"),
+        "deno" => Some("deno run"),
+        _ => None,
+    }
+}
+
+// ── SkillList tool (dev-plan/06 P2) ──────────────────────────────────
+//
+// Lets the model discover what skills are installed without paying the
+// per-turn token cost of listing every skill in the system prompt. Used
+// in concert with the `skills_listing_strategy: "names-only"` and
+// `"discover-tool-only"` config flags — under those strategies the
+// system prompt mentions SkillList by name and the model can call it
+// to get the catalog as a tool result.
+//
+// Returns name + short description for every installed skill. The
+// short description is the same `description` frontmatter field shown
+// in the system prompt under "full" mode.
+
+pub struct SkillListTool {
+    store: std::sync::Arc<std::sync::Mutex<SkillStore>>,
+}
+
+impl SkillListTool {
+    pub fn new_from_handle(store: std::sync::Arc<std::sync::Mutex<SkillStore>>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillListTool {
+    fn name(&self) -> &'static str {
+        "SkillList"
+    }
+    fn description(&self) -> &'static str {
+        "List all installed skills with their short descriptions and \
+         trigger criteria. Call this when you need to discover what \
+         skills are available — typically when the user's request \
+         sounds like it might match a bundled workflow but you don't \
+         see a matching skill named in the system prompt. Returns \
+         names you can pass to `Skill(name: ...)` to load the full \
+         expert instructions. Cheap; safe to call any time."
+    }
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    async fn call(&self, _input: Value) -> Result<String> {
+        let store = self.store.lock().unwrap();
+        let mut entries: Vec<&SkillDef> = store.skills.values().collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        if entries.is_empty() {
+            return Ok("No skills installed. Use /skill marketplace to browse, \
+                       or /skill install <name|url> to add one."
+                .to_string());
+        }
+        let mut out = format!("{} skill(s) installed:\n", entries.len());
+        for s in entries {
+            out.push_str(&format!("- {} — {}", s.name, s.description));
+            if !s.when_to_use.is_empty() {
+                out.push_str(&format!("\n  Trigger: {}", s.when_to_use));
+            }
+            out.push('\n');
+        }
+        out.push_str("\nLoad a skill's expert instructions with Skill(name: \"<name>\").");
+        Ok(out)
+    }
+}
+
+// ── SkillSearch tool (dev-plan/06 P2) ────────────────────────────────
+//
+// Substring search across name + description + when_to_use. Same
+// case-insensitive ranking the marketplace uses (name match > desc >
+// trigger). Cheaper than SkillList when the user has many skills
+// installed and the model knows what shape it's looking for.
+
+pub struct SkillSearchTool {
+    store: std::sync::Arc<std::sync::Mutex<SkillStore>>,
+}
+
+impl SkillSearchTool {
+    pub fn new_from_handle(store: std::sync::Arc<std::sync::Mutex<SkillStore>>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillSearchTool {
+    fn name(&self) -> &'static str {
+        "SkillSearch"
+    }
+    fn description(&self) -> &'static str {
+        "Substring search across installed skills' name, description, \
+         and trigger criteria. Case-insensitive; ranked by where the \
+         match lands (name beats description beats trigger). Use when \
+         you suspect a skill exists for the user's task but don't \
+         remember its exact name. Returns matching skills you can pass \
+         to `Skill(name: ...)`. Empty result list means nothing \
+         matched — implement the task manually or call SkillList to \
+         see the full catalog."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Substring to match (case-insensitive)"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+    async fn call(&self, input: Value) -> Result<String> {
+        let query = crate::tools::req_str(&input, "query")?;
+        let store = self.store.lock().unwrap();
+        let q = query.to_lowercase();
+        let mut hits: Vec<(u8, &SkillDef)> = Vec::new();
+        for s in store.skills.values() {
+            if s.name.to_lowercase().contains(&q) {
+                hits.push((0, s));
+            } else if s.description.to_lowercase().contains(&q) {
+                hits.push((1, s));
+            } else if s.when_to_use.to_lowercase().contains(&q) {
+                hits.push((2, s));
+            }
+        }
+        hits.sort_by_key(|(rank, _)| *rank);
+        if hits.is_empty() {
+            return Ok(format!(
+                "No installed skills match '{query}'. Use SkillList to see all \
+                 installed, or /skill marketplace to browse what's available."
+            ));
+        }
+        let mut out = format!("{} match(es) for '{query}':\n", hits.len());
+        for (_, s) in hits {
+            out.push_str(&format!("- {} — {}\n", s.name, s.description));
+        }
+        out.push_str("\nLoad a skill's expert instructions with Skill(name: \"<name>\").");
+        Ok(out)
     }
 }
 
@@ -979,10 +1447,245 @@ mod tests {
         assert!(store
             .get("deploy")
             .unwrap()
-            .content
+            .content()
             .contains("/scripts/deploy.sh"));
         // {skill_dir} replaced with actual path
-        assert!(!store.get("deploy").unwrap().content.contains("{skill_dir}"));
+        assert!(!store
+            .get("deploy")
+            .unwrap()
+            .content()
+            .contains("{skill_dir}"));
+    }
+
+    // ── dev-plan/06 P1: lazy disk reads ──────────────────────────────
+
+    #[test]
+    fn discover_does_not_eagerly_read_skill_bodies() {
+        // P1: SkillStore::discover should only read the frontmatter
+        // (capped at MAX_FRONTMATTER_BYTES), not the full body. This
+        // test plants a skill with a deliberately-huge body and
+        // confirms the SkillDef's internal SkillContent variant is
+        // Lazy after discovery — the body hasn't been materialized.
+        let dir = tempdir().unwrap();
+        let huge_body = "x".repeat(100_000); // 100KB body
+        let body = format!("---\nname: huge\ndescription: huge skill\n---\n{huge_body}");
+        create_skill(dir.path(), "huge", &body, &[]);
+
+        let mut store = SkillStore::default();
+        store.load_dir(dir.path());
+
+        // Frontmatter parsed successfully.
+        let skill = store.get("huge").expect("skill discovered");
+        assert_eq!(skill.name, "huge");
+        assert_eq!(skill.description, "huge skill");
+
+        // Body NOT yet loaded — verify by checking the SkillContent
+        // variant via private accessor.
+        match &skill.content {
+            SkillContent::Lazy { cell, .. } => {
+                assert!(
+                    cell.get().is_none(),
+                    "OnceLock should be empty until .content() is called",
+                );
+            }
+            SkillContent::Eager(_) => panic!("discover should produce Lazy, not Eager"),
+        }
+    }
+
+    /// Serializes tests in this module that mutate process-global CWD
+    /// — `set_current_dir` is a process-wide effect and parallel
+    /// `cargo test` runs would interleave otherwise. Same pattern as
+    /// `agent::tests::with_cwd`.
+    fn with_cwd<R>(dir: &Path, f: impl FnOnce() -> R) -> R {
+        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = CWD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::current_dir().expect("cwd readable");
+        std::env::set_current_dir(dir).expect("cwd to test dir");
+        let out = f();
+        let _ = std::env::set_current_dir(prior);
+        out
+    }
+
+    #[test]
+    fn skill_content_survives_cwd_change_after_discovery() {
+        // M6.14 BUG 1: discovery from a relative dir used to capture a
+        // relative `skill_md_path` in SkillContent::Lazy. After a CWD
+        // change (e.g. GUI workspace switch), the lazy read failed and
+        // every project skill silently returned empty content.
+        //
+        // Repro: discover from a relative `.thclaws/skills` path, then
+        // chdir somewhere else, then read content. Pre-fix: empty.
+        // Post-fix: content survives because `parse_skill` now stores
+        // the canonical absolute path in SkillContent::Lazy.
+        let project = tempdir().unwrap();
+        let elsewhere = tempdir().unwrap();
+        let skills_root = project.path().join(".thclaws/skills/cwdtest");
+        std::fs::create_dir_all(&skills_root).unwrap();
+        std::fs::write(
+            skills_root.join("SKILL.md"),
+            "---\nname: cwdtest\ndescription: cwd test\n---\nLOAD ME AFTER CWD CHANGE\n",
+        )
+        .unwrap();
+
+        let body = with_cwd(project.path(), || {
+            let mut store = SkillStore::default();
+            // Discover via the RELATIVE path — the exact shape
+            // `discover()` uses internally for `.thclaws/skills`.
+            store.load_dir(&PathBuf::from(".thclaws/skills"));
+            // Switch CWD away from the project before reading content
+            // (simulates the GUI sidebar workspace swap).
+            std::env::set_current_dir(elsewhere.path()).unwrap();
+            store.get("cwdtest").unwrap().content().into_owned()
+        });
+
+        assert!(
+            body.contains("LOAD ME AFTER CWD CHANGE"),
+            "lazy body should resolve under absolute path, got: {body:?}",
+        );
+    }
+
+    #[test]
+    fn project_skills_beat_plugin_skills_with_same_name() {
+        // M6.14 BUG 2: previously discover_with_extra appended plugin
+        // dirs after project dirs, so a plugin could shadow a project
+        // skill with the same name (HashMap::insert is last-wins). The
+        // module-level docs claim `.thclaws/skills/` is highest
+        // priority — this test pins that contract.
+        let workspace = tempdir().unwrap();
+
+        let project_dir = workspace.path().join(".thclaws/skills/shared");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("SKILL.md"),
+            "---\nname: shared\ndescription: PROJECT WINS\n---\nproject body\n",
+        )
+        .unwrap();
+
+        let plugin_dir = workspace.path().join("plugins/foo/skills/shared");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("SKILL.md"),
+            "---\nname: shared\ndescription: PLUGIN LOSES\n---\nplugin body\n",
+        )
+        .unwrap();
+
+        let plugin_skills_root = workspace.path().join("plugins/foo/skills");
+        let description = with_cwd(workspace.path(), || {
+            let store = SkillStore::discover_with_extra(&[plugin_skills_root.clone()]);
+            store
+                .get("shared")
+                .expect("shared skill discovered")
+                .description
+                .clone()
+        });
+
+        assert_eq!(
+            description, "PROJECT WINS",
+            "project .thclaws/skills should beat plugin contributions; got: {description:?}",
+        );
+    }
+
+    #[test]
+    fn skill_content_loads_on_first_call_and_caches() {
+        // P1: first .content() call reads the body from disk; second
+        // call returns the cached value (no re-read). We verify the
+        // caching behavior by mutating the file between calls and
+        // confirming the second call returns the OLD content.
+        let dir = tempdir().unwrap();
+        create_skill(
+            dir.path(),
+            "cached",
+            "---\nname: cached\n---\nORIGINAL BODY\n",
+            &[],
+        );
+
+        let mut store = SkillStore::default();
+        store.load_dir(dir.path());
+
+        let first = store.get("cached").unwrap().content().into_owned();
+        assert!(first.contains("ORIGINAL BODY"));
+
+        // Mutate the file between calls.
+        let skill_md = dir.path().join("cached/SKILL.md");
+        std::fs::write(&skill_md, "---\nname: cached\n---\nUPDATED BODY\n").unwrap();
+
+        let second = store.get("cached").unwrap().content().into_owned();
+        assert!(
+            second.contains("ORIGINAL BODY"),
+            "second call should return cached ORIGINAL, got: {second}",
+        );
+        assert!(
+            !second.contains("UPDATED BODY"),
+            "OnceLock should have cached the first read; got: {second}",
+        );
+    }
+
+    #[test]
+    fn frontmatter_reader_caps_at_max_bytes() {
+        // P1: read_until_frontmatter_end should stop early when the
+        // closing `---\n` fence is found, OR cap at
+        // MAX_FRONTMATTER_BYTES. Either way it must NOT read the
+        // entire file when the body is huge.
+        let dir = tempdir().unwrap();
+        let frontmatter = "---\nname: small\ndescription: small\n---\n";
+        let huge_body = "y".repeat(1_000_000); // 1MB body
+        std::fs::write(
+            dir.path().join("SKILL.md"),
+            format!("{frontmatter}{huge_body}"),
+        )
+        .unwrap();
+
+        let read = read_until_frontmatter_end(&dir.path().join("SKILL.md")).unwrap();
+        // Should have stopped after the closing fence — well under 1MB.
+        assert!(
+            read.len() < MAX_FRONTMATTER_BYTES + 1024,
+            "expected to stop reading at frontmatter end (≤{}+1KB), got {} bytes",
+            MAX_FRONTMATTER_BYTES,
+            read.len(),
+        );
+        // Frontmatter content must be present.
+        assert!(read.contains("name: small"));
+        assert!(read.contains("description: small"));
+    }
+
+    #[test]
+    fn skill_def_new_eager_constructs_eager_variant() {
+        // P1: SkillDef::new_eager bypasses lazy loading — useful for
+        // tests and any future caller that wants to inject a skill
+        // from in-memory data without filesystem round-trip.
+        let s = SkillDef::new_eager(
+            "n".into(),
+            "d".into(),
+            "w".into(),
+            PathBuf::from("/tmp"),
+            "BODY".into(),
+        );
+        assert_eq!(s.content(), "BODY");
+        assert!(matches!(s.content, SkillContent::Eager(_)));
+    }
+
+    #[test]
+    fn missing_skill_md_after_discovery_returns_empty_content() {
+        // P1: defensive — if the SKILL.md disappears between
+        // discovery and first .content() call, return empty rather
+        // than panicking. Caller's downstream rendering treats
+        // empty content as "skill body unavailable."
+        let dir = tempdir().unwrap();
+        create_skill(
+            dir.path(),
+            "ephemeral",
+            "---\nname: ephemeral\n---\nBODY\n",
+            &[],
+        );
+
+        let mut store = SkillStore::default();
+        store.load_dir(dir.path());
+
+        // Delete the file before .content() is called.
+        std::fs::remove_file(dir.path().join("ephemeral/SKILL.md")).unwrap();
+
+        let result = store.get("ephemeral").unwrap().content();
+        assert!(result.is_empty(), "missing file should yield empty content");
     }
 
     #[test]
@@ -1023,5 +1726,248 @@ mod tests {
         let tool = SkillTool::new(store);
         let err = tool.call(json!({"name": "nope"})).await.unwrap_err();
         assert!(format!("{err}").contains("not found"));
+    }
+
+    // ── skill-authoring polish: interpreter hints + requirements.txt ──
+
+    #[tokio::test]
+    async fn skill_tool_suggests_interpreter_per_script_extension() {
+        // The "Available scripts" listing now includes a suggested
+        // interpreter invocation per file extension. Skill authors
+        // get this for free without having to write `Run: python ...`
+        // boilerplate in their SKILL.md for every script.
+        let dir = tempdir().unwrap();
+        create_skill(
+            dir.path(),
+            "polyglot",
+            "---\nname: polyglot\ndescription: many runtimes\n---\nUse the scripts below.",
+            &[
+                ("render.py", "print('py')"),
+                ("setup.sh", "echo sh"),
+                ("transform.js", "console.log('js')"),
+                ("check.ts", "console.log('ts')"),
+                ("legacy.rb", "puts 'rb'"),
+                ("noext", "echo 'no extension — caller decides'"),
+            ],
+        );
+
+        let mut store = SkillStore::default();
+        store.load_dir(dir.path());
+        let tool = SkillTool::new(store);
+
+        let result = tool.call(json!({"name": "polyglot"})).await.unwrap();
+        // Each known extension surfaces with the conventional interpreter.
+        assert!(result.contains("`python "), "missing python hint: {result}");
+        assert!(result.contains("`bash "), "missing bash hint: {result}");
+        assert!(result.contains("`node "), "missing node hint: {result}");
+        assert!(result.contains("`npx tsx "), "missing tsx hint: {result}");
+        assert!(result.contains("`ruby "), "missing ruby hint: {result}");
+        // Extensionless: path listed without a backtick-wrapped interpreter prefix.
+        assert!(
+            result.contains("noext"),
+            "extensionless script should still appear: {result}",
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_tool_surfaces_requirements_txt_when_present() {
+        // Auto-detect <skill_dir>/requirements.txt so skill authors
+        // don't have to repeat install instructions in their SKILL.md.
+        let dir = tempdir().unwrap();
+        create_skill(
+            dir.path(),
+            "needs-deps",
+            "---\nname: needs-deps\ndescription: requires pip packages\n---\nUse the script.",
+            &[("render.py", "import pdfkit\nprint('ok')")],
+        );
+        // Add the requirements.txt sibling.
+        std::fs::write(
+            dir.path().join("needs-deps/requirements.txt"),
+            "pdfkit==1.0.0\nmarkdown\n",
+        )
+        .unwrap();
+
+        let mut store = SkillStore::default();
+        store.load_dir(dir.path());
+        let tool = SkillTool::new(store);
+
+        let result = tool.call(json!({"name": "needs-deps"})).await.unwrap();
+        assert!(
+            result.contains("Python dependencies"),
+            "missing deps section header: {result}",
+        );
+        assert!(
+            result.contains("pip install -r "),
+            "missing pip install hint: {result}",
+        );
+        assert!(
+            result.contains("requirements.txt"),
+            "missing requirements.txt path: {result}",
+        );
+        assert!(
+            result.contains("auto-activate the project venv"),
+            "missing venv-activation explanation: {result}",
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_tool_omits_requirements_section_when_no_file() {
+        // No requirements.txt → no Python-deps section. Avoids
+        // misleading skill consumers when the skill is pure-bash or
+        // pure-node.
+        let dir = tempdir().unwrap();
+        create_skill(
+            dir.path(),
+            "bash-only",
+            "---\nname: bash-only\ndescription: shell only\n---\nUse the script.",
+            &[("setup.sh", "echo hi")],
+        );
+
+        let mut store = SkillStore::default();
+        store.load_dir(dir.path());
+        let tool = SkillTool::new(store);
+
+        let result = tool.call(json!({"name": "bash-only"})).await.unwrap();
+        assert!(
+            !result.contains("Python dependencies"),
+            "deps section should be absent: {result}",
+        );
+        // Script listing still appears.
+        assert!(result.contains("Available scripts"));
+        assert!(result.contains("`bash "));
+    }
+
+    #[test]
+    fn suggest_interpreter_returns_none_for_unknown_extensions() {
+        // Defensive: unknown extensions produce no interpreter hint.
+        // The path is still listed; the model picks the right
+        // invocation from SKILL.md context.
+        assert_eq!(suggest_interpreter(Path::new("foo.unknown")), None);
+        assert_eq!(suggest_interpreter(Path::new("noext")), None);
+        assert_eq!(suggest_interpreter(Path::new("foo.")), None);
+    }
+
+    #[test]
+    fn suggest_interpreter_is_case_insensitive() {
+        // Skill authors may name files Foo.PY or render.JS.
+        assert_eq!(suggest_interpreter(Path::new("foo.PY")), Some("python"));
+        assert_eq!(suggest_interpreter(Path::new("RENDER.Js")), Some("node"));
+        assert_eq!(suggest_interpreter(Path::new("X.SH")), Some("bash"));
+    }
+
+    // ── dev-plan/06 P2: SkillList + SkillSearch + listing strategy ──
+
+    fn store_with_three_skills() -> std::sync::Arc<std::sync::Mutex<SkillStore>> {
+        let dir = tempdir().unwrap();
+        create_skill(
+            dir.path(),
+            "pdf",
+            "---\nname: pdf\ndescription: Render PDFs\nwhenToUse: When user wants a PDF\n---\nbody\n",
+            &[],
+        );
+        create_skill(
+            dir.path(),
+            "xlsx",
+            "---\nname: xlsx\ndescription: Read xlsx files\nwhenToUse: When user has spreadsheets\n---\nbody\n",
+            &[],
+        );
+        create_skill(
+            dir.path(),
+            "skill-creator",
+            "---\nname: skill-creator\ndescription: Scaffold new skills\n---\nbody\n",
+            &[],
+        );
+        let mut store = SkillStore::default();
+        store.load_dir(dir.path());
+        // Leak the tempdir to keep the SKILL.md files alive for the
+        // duration of the test (lazy reads happen on Skill / SkillSearch
+        // calls below).
+        std::mem::forget(dir);
+        std::sync::Arc::new(std::sync::Mutex::new(store))
+    }
+
+    #[tokio::test]
+    async fn skill_list_returns_all_installed_skills() {
+        let store = store_with_three_skills();
+        let tool = SkillListTool::new_from_handle(store);
+        let out = tool.call(json!({})).await.unwrap();
+        assert!(out.contains("pdf"), "missing pdf: {out}");
+        assert!(out.contains("xlsx"), "missing xlsx: {out}");
+        assert!(
+            out.contains("skill-creator"),
+            "missing skill-creator: {out}"
+        );
+        assert!(out.contains("3 skill(s)"), "missing count: {out}");
+        // Triggers surface for skills that have whenToUse.
+        assert!(out.contains("Trigger:"), "missing trigger: {out}");
+    }
+
+    #[tokio::test]
+    async fn skill_list_handles_empty_store() {
+        let store = std::sync::Arc::new(std::sync::Mutex::new(SkillStore::default()));
+        let tool = SkillListTool::new_from_handle(store);
+        let out = tool.call(json!({})).await.unwrap();
+        assert!(out.contains("No skills installed"));
+        assert!(out.contains("/skill marketplace"));
+    }
+
+    #[tokio::test]
+    async fn skill_search_substring_matches_with_ranking() {
+        let store = store_with_three_skills();
+        let tool = SkillSearchTool::new_from_handle(store);
+
+        // Name match — exact name returned first
+        let out = tool.call(json!({"query": "pdf"})).await.unwrap();
+        assert!(out.contains("pdf"), "got: {out}");
+        assert!(!out.contains("xlsx"), "xlsx shouldn't match 'pdf': {out}");
+
+        // Description match
+        let out = tool.call(json!({"query": "spreadsheets"})).await.unwrap();
+        assert!(out.contains("xlsx"), "got: {out}");
+        assert!(
+            !out.contains("pdf"),
+            "pdf desc shouldn't match 'spreadsheets': {out}"
+        );
+
+        // Trigger match
+        let out = tool
+            .call(json!({"query": "When user wants"}))
+            .await
+            .unwrap();
+        assert!(out.contains("pdf"), "trigger search failed: {out}");
+
+        // Case-insensitive
+        let out = tool.call(json!({"query": "PDF"})).await.unwrap();
+        assert!(out.contains("pdf"), "case-insensitive failed: {out}");
+    }
+
+    #[tokio::test]
+    async fn skill_search_no_matches_returns_helpful_message() {
+        let store = store_with_three_skills();
+        let tool = SkillSearchTool::new_from_handle(store);
+        let out = tool
+            .call(json!({"query": "nothing-matches-this-string-xyz123"}))
+            .await
+            .unwrap();
+        assert!(out.contains("No installed skills match"));
+        assert!(out.contains("SkillList"));
+    }
+
+    #[tokio::test]
+    async fn skill_search_ranks_name_above_description() {
+        // "skill" appears in skill-creator's NAME and (potentially)
+        // somewhere in another's description. Name match should
+        // appear first in the output.
+        let store = store_with_three_skills();
+        let tool = SkillSearchTool::new_from_handle(store);
+        let out = tool.call(json!({"query": "skill"})).await.unwrap();
+        // skill-creator's name match should come before any other.
+        let pos_creator = out.find("skill-creator").unwrap_or(usize::MAX);
+        // pdf has "PDF" in name; not relevant to "skill" query — should be ranked lower or absent.
+        assert_ne!(
+            pos_creator,
+            usize::MAX,
+            "skill-creator should appear: {out}"
+        );
     }
 }

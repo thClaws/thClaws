@@ -53,6 +53,19 @@ struct RenameEvent {
     timestamp: u64,
 }
 
+/// Append-only snapshot of the active plan (M1+). Each `submit` /
+/// `update_step` / `clear` writes one of these. On load, the latest
+/// snapshot wins — `null` plan means "active plan was cleared". Keeps
+/// the JSONL strictly append-only; older snapshots stay on disk for
+/// audit and time-travel restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlanSnapshotEvent {
+    #[serde(rename = "type")]
+    kind: String, // always "plan_snapshot"
+    plan: Option<crate::tools::plan_state::Plan>,
+    timestamp: u64,
+}
+
 /// Append-only checkpoint marking that the preceding message events
 /// have been compacted (via `/compact` or similar). On load, the most
 /// recent checkpoint "wins" — its `messages` list is used as the
@@ -92,6 +105,13 @@ pub struct Session {
     /// How many messages have already been persisted to disk.
     #[serde(default)]
     pub last_saved_count: usize,
+    /// Active plan (M1+). `None` when no plan-mode work is in flight.
+    /// Persisted with the session JSONL so `/load` restores the plan
+    /// alongside history — the right-side sidebar comes back populated.
+    /// Cleared explicitly via `/plan cancel` or the sidebar Cancel
+    /// button (not by `/load` itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::tools::plan_state::Plan>,
 }
 
 impl PartialEq for Session {
@@ -126,6 +146,7 @@ impl Session {
             messages: Vec::new(),
             title: None,
             last_saved_count: 0,
+            plan: None,
         }
     }
 
@@ -187,6 +208,20 @@ impl Session {
         self.append_to(path)
     }
 
+    /// Append a plan snapshot to the JSONL. Called from the GUI worker
+    /// after every `plan_state` mutation so a `/load` restores the
+    /// most recent plan along with the conversation history. M1+.
+    pub fn append_plan_snapshot_to(
+        &mut self,
+        path: &Path,
+        plan: Option<&crate::tools::plan_state::Plan>,
+    ) -> Result<()> {
+        append_plan_snapshot(path, plan)?;
+        self.plan = plan.cloned();
+        self.updated_at = now_secs();
+        Ok(())
+    }
+
     /// Load a session from a JSONL file. Reads the header + all message events.
     pub fn load_from(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path)?;
@@ -196,6 +231,7 @@ impl Session {
         let mut messages = Vec::new();
         let mut last_timestamp = 0u64;
         let mut title: Option<String> = None;
+        let mut plan: Option<crate::tools::plan_state::Plan> = None;
 
         for (line_num, line_result) in reader.lines().enumerate() {
             let line = line_result?;
@@ -237,6 +273,20 @@ impl Session {
                 } else {
                     Some(trimmed.to_string())
                 };
+            } else if kind == "plan_snapshot" {
+                // Latest snapshot wins. `null` plan means the active
+                // plan was cleared (M1+).
+                let ev: PlanSnapshotEvent = serde_json::from_value(val).map_err(|e| {
+                    Error::Config(format!(
+                        "session plan_snapshot parse ({}:{}): {e}",
+                        path.display(),
+                        line_num + 1
+                    ))
+                })?;
+                if ev.timestamp > last_timestamp {
+                    last_timestamp = ev.timestamp;
+                }
+                plan = ev.plan;
             } else if kind == "compaction" {
                 // Replay checkpoint: everything accumulated so far is
                 // archived-on-disk but gets replaced in memory by the
@@ -326,6 +376,7 @@ impl Session {
             messages,
             title,
             last_saved_count: msg_count,
+            plan,
         })
     }
 
@@ -390,6 +441,29 @@ impl Session {
         self.updated_at = event.timestamp;
         Ok(())
     }
+}
+
+/// Free-function form of [`Session::append_plan_snapshot_to`] for
+/// callers that don't have an owned `&mut Session` handy — typically
+/// the GUI's plan-state broadcaster, which fires from a closure that
+/// only has the JSONL path. Same wire format as the method; no
+/// in-memory state to update. M1+.
+pub fn append_plan_snapshot(
+    path: &Path,
+    plan: Option<&crate::tools::plan_state::Plan>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let event = PlanSnapshotEvent {
+        kind: "plan_snapshot".into(),
+        plan: plan.cloned(),
+        timestamp: now_secs(),
+    };
+    let line = serde_json::to_string(&event)?;
+    writeln!(file, "{}", line)?;
+    Ok(())
 }
 
 /// Directory-backed store for sessions.

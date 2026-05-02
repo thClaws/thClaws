@@ -28,12 +28,101 @@ pub enum PermissionMode {
     Auto,
     /// Prompt on any tool whose `requires_approval` returns true.
     Ask,
+    /// Plan mode (M2+) — read-only exploration. Any tool whose
+    /// `requires_approval` returns true is BLOCKED at dispatch with a
+    /// structured tool_result telling the model "use Read/Grep/Glob, not
+    /// Write/Edit/Bash; when ready, call SubmitPlan". The model self-
+    /// corrects on the next turn. The user retains the sidebar Cancel
+    /// button as a per-plan escape hatch.
+    Plan,
 }
 
 impl Default for PermissionMode {
     fn default() -> Self {
         PermissionMode::Ask
     }
+}
+
+/// Process-wide current permission mode. Reads are dynamic so tools
+/// that mutate the mode mid-turn (EnterPlanMode, ExitPlanMode, the
+/// sidebar Approve button, the `/plan` slash command) take effect on
+/// the very next tool dispatch — not on the next user message. The
+/// agent loop consults `current_mode()` at each `requires_approval`
+/// gate. Initialised by the worker at startup from config; cleared on
+/// session swap.
+fn current_mode_slot() -> &'static Mutex<PermissionMode> {
+    static SLOT: std::sync::OnceLock<Mutex<PermissionMode>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(PermissionMode::default()))
+}
+
+/// Snapshot of the active mode. Cheap — just a Mutex read.
+pub fn current_mode() -> PermissionMode {
+    current_mode_slot()
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(PermissionMode::Ask)
+}
+
+/// Set the active mode. Used by `EnterPlanMode` / `ExitPlanMode`,
+/// `/plan` slash command, sidebar Approve / Cancel, and the worker's
+/// startup-from-config init.
+pub fn set_current_mode(mode: PermissionMode) {
+    if let Ok(mut g) = current_mode_slot().lock() {
+        *g = mode;
+    }
+}
+
+/// Stash for "the mode we were in before EnterPlanMode flipped us into
+/// Plan". `ExitPlanMode` and the sidebar Cancel button pop this so the
+/// user lands back where they were (Ask → Plan → Ask, not Ask → Plan
+/// → Auto). `Some(mode)` only while a plan-mode session is active.
+fn pre_plan_mode_slot() -> &'static Mutex<Option<PermissionMode>> {
+    static SLOT: std::sync::OnceLock<Mutex<Option<PermissionMode>>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+pub fn stash_pre_plan_mode(mode: PermissionMode) {
+    if let Ok(mut g) = pre_plan_mode_slot().lock() {
+        *g = Some(mode);
+    }
+}
+
+pub fn take_pre_plan_mode() -> Option<PermissionMode> {
+    pre_plan_mode_slot().lock().ok().and_then(|mut g| g.take())
+}
+
+/// Broadcaster registered by the GUI worker — fires on every
+/// `set_current_mode` so the sidebar / status pill reflects the
+/// change live without polling. Same pattern as
+/// `crate::tools::plan_state::set_broadcaster`.
+type ModeBroadcaster = Box<dyn Fn(PermissionMode) + Send + Sync>;
+
+fn broadcaster_slot() -> &'static Mutex<Option<ModeBroadcaster>> {
+    static SLOT: std::sync::OnceLock<Mutex<Option<ModeBroadcaster>>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_mode_broadcaster<F>(f: F)
+where
+    F: Fn(PermissionMode) + Send + Sync + 'static,
+{
+    if let Ok(mut g) = broadcaster_slot().lock() {
+        *g = Some(Box::new(f));
+    }
+}
+
+fn fire_mode_changed(mode: PermissionMode) {
+    if let Ok(g) = broadcaster_slot().lock() {
+        if let Some(f) = g.as_ref() {
+            f(mode);
+        }
+    }
+}
+
+/// Convenience: set + broadcast in one call. Most callers want both.
+pub fn set_current_mode_and_broadcast(mode: PermissionMode) {
+    set_current_mode(mode);
+    fire_mode_changed(mode);
 }
 
 #[derive(Debug, Clone)]

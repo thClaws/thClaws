@@ -208,6 +208,15 @@ async fn run_shell_command(
         .stderr(Stdio::piped())
         .current_dir(cwd);
 
+    // M6.8 B1: signal "I'm not interactive" to common CLI tools so
+    // they don't open prompts the sandbox can't answer (`pnpm create
+    // vite` had been failing with `└ Operation cancelled` because its
+    // interactive picker hit EOF on stdin). Most modern Node / Python
+    // / package-manager CLIs respect at least one of these. The env
+    // is additive; user shells can still override per-command via
+    // `VAR=value cmd` syntax.
+    apply_noninteractive_env(&mut cmd);
+
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Tool(format!("spawn: {e}")))?;
@@ -236,14 +245,44 @@ async fn run_shell_command(
     match wait_result {
         Err(_) if is_server => {
             // Server command — timeout is expected. Server keeps running.
-            // DON'T await reader tasks (pipes still open, would block forever).
-            drop(stdout_task);
-            drop(stderr_task);
-            Ok(format!(
+            //
+            // M6.8: drain stdout/stderr with a short sub-timeout so we
+            // capture boot-log output (port number, ready banner) and,
+            // critically, surface anything a misclassified scaffolder
+            // printed before getting stuck. Earlier code dropped both
+            // reader tasks here, which silently lost the actual output
+            // when `is_server_command` had a false positive. The
+            // 200ms drain window is long enough to flush typical
+            // banner output without blocking on a quiet server's
+            // long-lived pipe.
+            let drain = Duration::from_millis(200);
+            let stdout_drained = tokio::time::timeout(drain, stdout_task).await;
+            let stderr_drained = tokio::time::timeout(drain, stderr_task).await;
+            let stdout_bytes = stdout_drained.ok().and_then(|r| r.ok()).unwrap_or_default();
+            let stderr_bytes = stderr_drained.ok().and_then(|r| r.ok()).unwrap_or_default();
+            let stdout = String::from_utf8_lossy(&stdout_bytes);
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+            let mut parts: Vec<String> = Vec::new();
+            parts.push(
                 "Server started and running in background.\n\
                  The process will continue after this tool returns.\n\
                  Use `curl localhost:PORT` or a browser to verify."
-            ))
+                    .to_string(),
+            );
+            // Append captured boot output if any — the model gets to
+            // see ready banners, port numbers, or (on a misfire) the
+            // actual scaffolder output that explains what really
+            // happened.
+            let trimmed_out = stdout.trim_end_matches('\n');
+            let trimmed_err = stderr.trim_end_matches('\n');
+            if !trimmed_out.is_empty() {
+                parts.push(format!("\n[stdout]\n{trimmed_out}"));
+            }
+            if !trimmed_err.is_empty() {
+                parts.push(format!("\n[stderr]\n{trimmed_err}"));
+            }
+            Ok(parts.join(""))
         }
         Err(_) => {
             let _ = child.kill().await;
@@ -630,6 +669,16 @@ pub fn is_destructive_command(cmd: &str) -> bool {
 }
 
 /// Detect commands that start long-running server processes.
+///
+/// Token-aware (M6.8): walks past package-manager / runner prefixes
+/// (`npx`, `pnpm exec`, `yarn exec`, `bun x`, `python -m`) to the real
+/// leaf command, then checks whether the leaf + sub-command names a
+/// known server. Bias is toward FALSE on ambiguous cases — false
+/// positives silently corrupt output (we drop stdout/stderr and tell
+/// the model "Server started" when the command actually scaffolded
+/// files, as `npx vite init` did in the test session at
+/// sess-18ab8129d6eafbd8.jsonl). False negatives just hit the regular
+/// timeout with a clear error.
 pub fn is_server_command(cmd: &str) -> bool {
     let lower = cmd.to_lowercase();
     // Only match if NOT already backgrounded.
@@ -637,68 +686,153 @@ pub fn is_server_command(cmd: &str) -> bool {
         return false;
     }
 
-    let patterns = [
-        "uvicorn ",
-        "gunicorn ",
-        "hypercorn ",
-        "flask run",
-        "django runserver",
-        "manage.py runserver",
-        "npm run dev",
-        "npm start",
-        "npx ",
-        "yarn dev",
-        "pnpm dev",
-        "node server",
-        "node index",
-        "node app",
-        "cargo run", // often a server in web projects
-        "python -m http.server",
-        "python3 -m http.server",
-        "python -m uvicorn",
-        "python3 -m uvicorn",
-        "python -m flask",
-        "python3 -m flask",
-        "php -S ",
-        "php artisan serve",
-        "ruby server",
-        "rails server",
-        "rails s",
-        "go run ",
-        "docker compose up",
-        "docker-compose up",
-        "kubectl port-forward",
-        "ngrok ",
-        "cloudflared tunnel",
-        "serve ",
-        "live-server",
-        "http-server",
-        "next dev",
-        "vite",
-        "webpack serve",
-    ];
-    if patterns.iter().any(|p| lower.contains(p)) {
-        return true;
+    // Look at the LAST segment of an `&&` or `;` chain — earlier
+    // segments are typically `cd X` / `mkdir -p Y` / dependency
+    // installs that exit. Only the last command can be persistent.
+    let last_chain = lower.rsplit("&&").next().unwrap_or(&lower).trim();
+    let last = last_chain.rsplit(';').next().unwrap_or(last_chain).trim();
+
+    let tokens: Vec<&str> = last.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
     }
 
-    // `python app.py`, `python main.py`, `python server.py`, `python run.py`
-    // are almost always web servers in agentic coding contexts.
-    // We match the script name as a standalone word (preceded by space).
-    if lower.starts_with("python ") || lower.starts_with("python3 ") {
-        let py_scripts = [
-            " app.py",
-            " main.py",
-            " server.py",
-            " run.py",
-            " wsgi.py",
-            " asgi.py",
-        ];
-        if py_scripts.iter().any(|p| lower.contains(p)) {
-            return true;
+    let leaf_idx = find_leaf_command(&tokens);
+    let leaf_raw = tokens.get(leaf_idx).copied().unwrap_or("");
+    // Strip npm-style version suffix from the leaf so `vite@latest` /
+    // `next@14` / `eslint@^8` resolve to the bare command name.
+    let leaf = leaf_raw.split('@').next().unwrap_or(leaf_raw);
+    let sub = tokens.get(leaf_idx + 1).copied().unwrap_or("");
+    let third = tokens.get(leaf_idx + 2).copied().unwrap_or("");
+
+    classify_leaf_as_server(leaf, sub, third)
+}
+
+/// Walk past package-manager / runner prefixes to find the actual
+/// leaf command. Returns the index of the leaf in the tokens slice.
+///
+/// Examples (returns index of marked token):
+///   `npx vite dev`              → 1 (`vite`)
+///   `bun x vite dev`            → 2 (`vite`)
+///   `pnpm exec vite build`      → 2 (`vite`)
+///   `pnpm dlx create-vite`      → 2 (`create-vite`)
+///   `yarn exec vite preview`    → 2 (`vite`)
+///   `python -m http.server`     → 2 (`http.server`)
+///   Otherwise                   → 0 (no walk past)
+fn find_leaf_command(tokens: &[&str]) -> usize {
+    if tokens.is_empty() {
+        return 0;
+    }
+    let first = tokens[0];
+
+    // npx <cmd>
+    if first == "npx" || first == "bunx" {
+        return 1.min(tokens.len().saturating_sub(1));
+    }
+
+    // bun x <cmd>
+    if first == "bun" && tokens.get(1) == Some(&"x") {
+        return 2.min(tokens.len().saturating_sub(1));
+    }
+
+    // pnpm exec / pnpm dlx / yarn exec
+    if (first == "pnpm" && matches!(tokens.get(1), Some(&"exec") | Some(&"dlx")))
+        || (first == "yarn" && tokens.get(1) == Some(&"exec"))
+    {
+        return 2.min(tokens.len().saturating_sub(1));
+    }
+
+    // python -m <module>
+    if (first == "python" || first == "python3") && tokens.get(1) == Some(&"-m") {
+        return 2.min(tokens.len().saturating_sub(1));
+    }
+
+    0
+}
+
+/// Classify a resolved leaf command (after walking past runners) plus
+/// its first two sub-args as either a server or not.
+///
+/// This is the table that replaces the prior loose `lower.contains()`
+/// pattern list. Each entry names the server *mode* explicitly so
+/// scaffolders / build commands using the same binary (e.g.
+/// `vite init` / `vite build` / `webpack --watch`) don't false-positive.
+fn classify_leaf_as_server(leaf: &str, sub: &str, third: &str) -> bool {
+    match leaf {
+        // Direct, unambiguous server programs (no sub-arg required).
+        "uvicorn" | "gunicorn" | "hypercorn" | "ngrok" | "live-server" | "http-server" => true,
+
+        // Frontend frameworks: sub-command discriminates. Bare `vite`
+        // (with no sub) defaults to dev — server. `vite build` / `vite
+        // init` / `vite optimize` etc. are not servers.
+        "vite" | "next" | "nuxt" | "remix" | "astro" => {
+            matches!(sub, "" | "dev" | "preview" | "start" | "serve" | "watch")
         }
-    }
 
-    false
+        // webpack: only `webpack serve` is a server.
+        "webpack" => sub == "serve",
+
+        // Package managers: sub-command names the script.
+        "npm" => match sub {
+            "start" => true,
+            "run" => matches!(third, "dev" | "start" | "serve" | "watch" | "preview"),
+            _ => false,
+        },
+        // yarn / pnpm / bun: bare `pnpm dev` and `pnpm run dev` are
+        // both legal forms. Match either shape — directly via the
+        // sub-arg, OR via `run <script>` where script is a server
+        // mode.
+        "yarn" | "pnpm" | "bun" => {
+            matches!(sub, "dev" | "start" | "serve" | "watch" | "preview")
+                || (sub == "run"
+                    && matches!(third, "dev" | "start" | "serve" | "watch" | "preview"))
+        }
+
+        // Python web frameworks
+        "flask" => sub == "run",
+        "django-admin" => sub == "runserver",
+        "python" | "python3" => matches!(
+            sub,
+            "app.py" | "main.py" | "server.py" | "run.py" | "wsgi.py" | "asgi.py"
+        ),
+        // After `python -m`, the leaf becomes the module name.
+        "http.server" => true,
+
+        // Ruby
+        "rails" => matches!(sub, "server" | "s"),
+        "ruby" => sub == "server",
+
+        // PHP
+        "php" => sub == "-s" || (sub == "artisan" && third == "serve"),
+
+        // Go
+        "go" => sub == "run",
+
+        // Docker
+        "docker" => sub == "compose" && third == "up",
+        "docker-compose" => sub == "up",
+
+        // Kubernetes
+        "kubectl" => sub == "port-forward",
+        "cloudflared" => sub == "tunnel",
+
+        // `serve <dir>` — the `serve` npm package serves static files.
+        // Only treat as server when there's a path argument.
+        "serve" => !sub.is_empty(),
+
+        // Bare `cargo run` is often a web server. With `--bin <name>`
+        // / `--example <name>` it could be either; bias toward false
+        // so output isn't silently swallowed.
+        "cargo" => sub == "run" && (third.is_empty() || third.starts_with("--release")),
+
+        // Direct node invocations — only canonical server filenames.
+        "node" => matches!(
+            sub,
+            "server" | "server.js" | "index.js" | "app.js" | "start"
+        ),
+
+        _ => false,
+    }
 }
 
 fn format_output(stdout: &str, stderr: &str, exit_code: i32) -> String {
@@ -712,11 +846,86 @@ fn format_output(stdout: &str, stderr: &str, exit_code: i32) -> String {
     if exit_code != 0 {
         parts.push(format!("[exit code {exit_code}]"));
     }
-    if parts.is_empty() {
+    let body = if parts.is_empty() {
         String::new()
     } else {
         parts.join("\n")
+    };
+
+    // M6.8 B2: prepend a hint when the output looks like the command
+    // failed because it required an interactive TTY. The sandbox
+    // spawns with stdin = /dev/null, so any prompt that tries to
+    // read stdin gets EOF and the CLI typically prints "Operation
+    // cancelled" / "Aborted" / similar and exits non-zero. Without
+    // this hint the model retries the same command verbatim (the
+    // test session showed `pnpm create vite` retried twice). With
+    // the hint the model has enough signal to switch to a
+    // non-interactive variant or different scaffolder.
+    if exit_code != 0 && looks_like_tty_required(stdout, stderr) {
+        let hint = "[hint: this command appears to require an interactive TTY \
+                    — the sandbox runs with stdin=/dev/null. Try non-interactive \
+                    flags (e.g. --yes, --no-input, --skip-prompts) or a different \
+                    scaffolder. Common: `pnpm create vite <dir> --template \
+                    react-ts` and similar `create-*` CLIs need a target dir + \
+                    template flag, not a current-dir invocation.]\n";
+        format!("{hint}{body}")
+    } else {
+        body
     }
+}
+
+/// Detect output patterns that suggest the command failed because it
+/// required interactive stdin. Used by `format_output` to prepend a
+/// helpful hint instead of leaving the model staring at a cryptic
+/// "Operation cancelled" line.
+fn looks_like_tty_required(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{stdout}\n{stderr}").to_lowercase();
+    // Common error fragments emitted by interactive CLIs when stdin
+    // is closed mid-prompt. Conservative — only fire on phrases that
+    // unambiguously mean "I needed input and didn't get it."
+    const FRAGMENTS: &[&str] = &[
+        "operation cancelled",
+        "operation canceled", // US spelling
+        "operation aborted",
+        "user aborted",
+        "input is required",
+        "tty is not available",
+        "no tty",
+        "stdin is not a tty",
+        "interactive mode is not supported",
+        "cannot prompt",
+        "would prompt for",
+        "no input available",
+    ];
+    FRAGMENTS.iter().any(|f| combined.contains(f))
+}
+
+/// Apply non-interactive environment variables to a child command.
+/// Most modern CLIs honour at least one of these to skip prompts and
+/// auto-accept defaults. M6.8 B1 — workaround for the lack of a real
+/// PTY in the Bash sandbox.
+fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {
+    // CI=1 is the most-respected signal. npm, pnpm, yarn, vite, jest,
+    // ESLint, Prettier, Cypress, etc. all use it.
+    cmd.env("CI", "1");
+    // Some tools key on this stronger Yarn/Berry-style flag.
+    cmd.env("CI_JOB_ID", "thclaws-sandbox");
+    // npm's "auto-yes" for confirmation prompts.
+    cmd.env("NPM_CONFIG_YES", "true");
+    // pnpm honours its own confirm setting.
+    cmd.env("PNPM_CONFIRM", "no");
+    // apt / debconf — relevant when the model sudo-installs a package.
+    cmd.env("DEBIAN_FRONTEND", "noninteractive");
+    // Broad TTY signal — many tools fall back to non-interactive
+    // behaviour when TERM=dumb (no curses, no progress bars, no
+    // interactive prompts).
+    cmd.env("TERM", "dumb");
+    // homebrew honours this on macOS for its install/upgrade prompts.
+    cmd.env("HOMEBREW_NO_AUTO_UPDATE", "1");
+    cmd.env("HOMEBREW_NO_INSTALL_CLEANUP", "1");
+    // pip's "yes to everything" + suppress interactive upgrade pitch.
+    cmd.env("PIP_YES", "1");
+    cmd.env("PIP_DISABLE_PIP_VERSION_CHECK", "1");
 }
 
 #[cfg(test)]
@@ -1050,6 +1259,221 @@ mod tests {
         assert!(!is_server_command("python setup.py install"));
         // Already backgrounded.
         assert!(!is_server_command("python app.py &"));
+    }
+
+    // ── M6.8 Bug A: classifier false-positive narrowing ────────────────
+
+    #[test]
+    fn is_server_distinguishes_vite_dev_from_vite_init() {
+        // The exact false-positive that broke the test session at
+        // sess-18ab8129d6eafbd8.jsonl: `npx vite init` was flagged as
+        // a server because the old classifier matched the bare
+        // substring "vite". Now the classifier walks past `npx` to
+        // the leaf `vite` and checks the sub-command.
+        assert!(
+            !is_server_command("npx vite@latest init --template react-ts"),
+            "vite init is a synchronous scaffolder, not a server",
+        );
+        assert!(
+            !is_server_command("npx vite@latest init . --template react-ts --force"),
+            "even with --force, init scaffolds and exits",
+        );
+        assert!(
+            !is_server_command("pnpm exec vite build"),
+            "vite build is not a server",
+        );
+        assert!(
+            !is_server_command("vite optimize"),
+            "vite optimize is not a server",
+        );
+
+        // Real server invocations still match.
+        assert!(is_server_command("vite"), "bare vite defaults to dev");
+        assert!(is_server_command("vite dev"));
+        assert!(is_server_command("vite preview"));
+        assert!(is_server_command("npx vite@latest dev --port 3000"));
+        assert!(is_server_command("pnpm exec vite preview"));
+    }
+
+    #[test]
+    fn is_server_walks_past_runner_prefixes() {
+        // Each of these resolves through find_leaf_command to the
+        // real leaf: only the leaf + sub-command should drive the
+        // classification. `npx <build-tool> build` must return false.
+        assert!(!is_server_command("npx webpack --mode production"));
+        assert!(!is_server_command(
+            "pnpm dlx create-vite my-app --template react"
+        ));
+        assert!(!is_server_command("bun x next build"));
+        assert!(!is_server_command("yarn exec next build"));
+
+        // …but the dev-mode equivalents pass through correctly.
+        assert!(is_server_command("npx webpack serve"));
+        assert!(is_server_command("bun x next dev"));
+        assert!(is_server_command("yarn exec next dev"));
+    }
+
+    #[test]
+    fn is_server_npm_run_only_for_dev_scripts() {
+        // `npm run` is a dispatcher — only some scripts are servers.
+        assert!(is_server_command("npm run dev"));
+        assert!(is_server_command("npm run start"));
+        assert!(is_server_command("npm run serve"));
+        assert!(is_server_command("npm run watch"));
+        assert!(is_server_command("npm run preview"));
+        assert!(is_server_command("npm start"));
+
+        // `npm run build` / `test` / `lint` are NOT servers.
+        assert!(!is_server_command("npm run build"));
+        assert!(!is_server_command("npm run test"));
+        assert!(!is_server_command("npm run lint"));
+        assert!(!is_server_command("npm run typecheck"));
+        assert!(!is_server_command("npm install"));
+        assert!(!is_server_command("npm test"));
+    }
+
+    #[test]
+    fn is_server_uses_last_chained_segment() {
+        // Setup commands chained via && should be ignored — only the
+        // final segment can be persistent.
+        assert!(is_server_command("cd app && pnpm install && pnpm run dev"));
+        assert!(!is_server_command(
+            "cd app && pnpm install && pnpm run build"
+        ));
+        // Last segment is the scaffolder, not a server.
+        assert!(!is_server_command(
+            "mkdir -p webapp && cd webapp && pnpm create vite . --template react-ts"
+        ));
+    }
+
+    #[test]
+    fn is_server_cargo_run_with_explicit_bin_is_not_classified() {
+        // `cargo run` (no args) — assume server in web projects.
+        assert!(is_server_command("cargo run"));
+        assert!(is_server_command("cargo run --release"));
+        // `cargo run --bin <name>` could be either; bias toward false
+        // so output isn't silently dropped on a misclassification.
+        assert!(!is_server_command("cargo run --bin migrator"));
+        assert!(!is_server_command("cargo run --example demo"));
+    }
+
+    // ── M6.8 Bug B2: TTY-required output detection ─────────────────────
+
+    #[test]
+    fn looks_like_tty_required_matches_common_phrases() {
+        assert!(looks_like_tty_required("", "└  Operation cancelled"));
+        assert!(looks_like_tty_required(
+            "Setting up project...",
+            "Operation cancelled by user",
+        ));
+        assert!(looks_like_tty_required("", "Error: stdin is not a TTY"));
+        assert!(looks_like_tty_required("", "Input is required to continue"));
+        assert!(looks_like_tty_required(
+            "",
+            "Cannot prompt: no TTY available"
+        ));
+    }
+
+    #[test]
+    fn looks_like_tty_required_does_not_misfire_on_normal_output() {
+        // Normal compile errors / test failures shouldn't trigger the
+        // hint. Conservative — only the unambiguous fragments fire.
+        assert!(!looks_like_tty_required(
+            "",
+            "Error: cannot find module 'foo'"
+        ));
+        assert!(!looks_like_tty_required(
+            "FAIL src/x.test.ts",
+            "Test suite failed to run"
+        ));
+        assert!(!looks_like_tty_required("", "Permission denied"));
+        assert!(!looks_like_tty_required("✓ build succeeded", ""));
+    }
+
+    #[test]
+    fn format_output_prepends_tty_hint_when_detected() {
+        let out = format_output("", "└  Operation cancelled\n", 1);
+        assert!(out.contains("[hint:"), "hint should prepend: {out}");
+        assert!(
+            out.contains("interactive TTY"),
+            "hint must name the cause: {out}",
+        );
+        assert!(
+            out.contains("--yes") || out.contains("--no-input"),
+            "hint must suggest non-interactive flags: {out}",
+        );
+        // The original output is preserved below the hint.
+        assert!(out.contains("Operation cancelled"));
+    }
+
+    #[test]
+    fn format_output_skips_hint_when_command_succeeded() {
+        // Even if the output happens to contain a "cancelled" word
+        // (e.g. a test name like `test_operation_cancelled`), don't
+        // prepend the hint when the command exited 0.
+        let out = format_output("test_operation_cancelled passed\n", "", 0);
+        assert!(!out.contains("[hint:"));
+    }
+
+    #[test]
+    fn format_output_skips_hint_for_normal_failures() {
+        // Compile error, no TTY phrases — no hint.
+        let out = format_output("", "error: expected `;`\n", 1);
+        assert!(!out.contains("[hint:"));
+        assert!(out.contains("expected"));
+    }
+
+    // ── M6.8 Bug B1: non-interactive env vars reach the child ──────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ci_env_var_is_set_for_spawned_command() {
+        // The most-respected non-interactive signal — every modern
+        // npm/pnpm/yarn/vite/jest/ESLint/Prettier respects `CI=1`.
+        // If this env var doesn't reach the child, all the other
+        // workarounds in M6.8 B1 are also broken, so this acts as
+        // the canary for the whole apply_noninteractive_env path.
+        let out = BashTool
+            .call(json!({"command": "echo \"CI=$CI\""}))
+            .await
+            .unwrap();
+        assert!(
+            out.contains("CI=1"),
+            "CI=1 must reach the spawned child: got {out:?}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn term_dumb_reaches_child() {
+        // TERM=dumb is the broad signal for "no curses, no progress
+        // bars, no interactive prompts." Tools like `less` /
+        // `git log` / `vim` use it to skip pager / fall back to
+        // non-interactive behaviour.
+        let out = BashTool
+            .call(json!({"command": "echo \"TERM=$TERM\""}))
+            .await
+            .unwrap();
+        assert!(
+            out.contains("TERM=dumb"),
+            "TERM=dumb must reach the spawned child: got {out:?}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn npm_config_yes_reaches_child() {
+        // npm respects this for confirmation prompts. Sample test
+        // ensures the env var array stays in sync with the code
+        // (a future refactor that drops it should fail this test).
+        let out = BashTool
+            .call(json!({"command": "echo \"NPM_CONFIG_YES=$NPM_CONFIG_YES\""}))
+            .await
+            .unwrap();
+        assert!(
+            out.contains("NPM_CONFIG_YES=true"),
+            "NPM_CONFIG_YES=true must reach the spawned child: got {out:?}",
+        );
     }
 
     #[test]

@@ -62,6 +62,590 @@ pub enum AgentEvent {
     },
 }
 
+/// Build the dynamic plan-mode reminder appended to the system prompt
+/// at the start of each turn. Returns `None` when no reminder applies
+/// (mode != Plan and no active plan).
+///
+/// State machine:
+///
+///   (Plan, no plan)         → exploration phase: tell model to use
+///                             read-only tools, then SubmitPlan.
+///   (Plan, plan submitted)  → user-approval window: model waits.
+///   (not-Plan, plan exists) → execution phase: Layer-2 narrowed view.
+///                             Only the **current step's description**
+///                             is shown; remaining steps appear as
+///                             titles only so the model can't reason
+///                             ahead and start debating future work
+///                             (M4.1). Already-done steps reduced to a
+///                             single comma-separated line.
+///   (not-Plan, no plan)     → no reminder.
+///
+/// Extracted to a free function so the reminder shape is unit-testable
+/// without spinning up the agent loop. Pure — reads `mode` and `plan`,
+/// returns the formatted string.
+pub fn build_plan_reminder(
+    mode: crate::permissions::PermissionMode,
+    plan: Option<&crate::tools::plan_state::Plan>,
+) -> Option<String> {
+    use crate::permissions::PermissionMode;
+
+    match (mode, plan) {
+        (PermissionMode::Plan, None) => Some(
+            "## Plan mode is active\n\n\
+             Mutating tools (Write, Edit, Bash, document editors, etc.) \
+             are BLOCKED. Use Read / Grep / Glob / Ls to explore the \
+             codebase. When you have enough context, call SubmitPlan \
+             with an ordered list of concrete, testable steps. The \
+             user will review the plan in the right-side sidebar and \
+             approve before execution.\n\n\
+             Do NOT call TodoWrite in plan mode — SubmitPlan is the \
+             structured replacement that the user can see live.\n\n\
+             ### What makes a good plan\n\n\
+             **Step count: as many as needed; no caps.** A plan is \
+             correctly decomposed when EVERY step satisfies all three:\n\
+             1. ONE action — a single command, edit, or generation. \
+             \"Scaffold the project\" is one action; \"scaffold AND \
+             install deps\" is two.\n\
+             2. ONE shell-runnable verification — exit code, file \
+             existence, regex match, HTTP probe, or test runner. If \
+             you wrote two verifications (build exits 0 AND tests \
+             pass), it's two steps.\n\
+             3. PRESERVED across the next step — if step N's output \
+             gets overwritten or replaced by step N+1, merge them. \
+             Throwaway work shouldn't be a step.\n\n\
+             If a 30-step plan satisfies all three rules, ship it. The \
+             driver runs one step at a time with bounded retries; long \
+             plans don't burn context because history is compacted at \
+             every step boundary. Bundling steps to fit a small count \
+             makes the plan WORSE — when a combined step fails, the \
+             user can't tell which half failed.\n\n\
+             Floor: a plan needs at least 2 steps. A 1-step plan isn't \
+             a plan, it's a tool call — just do the work without \
+             entering plan mode.\n\n\
+             **Build-and-run, implement-and-test, refactor-and-smoke- \
+             test are all TWO steps each.** When a combined step \
+             fails, the user can't tell which half failed; the sidebar \
+             just shows ✕ on a vague label. Keep one action per step.\n\n\
+             **Verifications must be shell-runnable.** Every \
+             verification is one of:\n\
+             - Shell exit code: `cargo build --release` exits 0\n\
+             - File existence: `test -f target/release/foo` or `ls \
+             dist/index.html`\n\
+             - Regex match: `grep -q 'useState' src/App.tsx`\n\
+             - HTTP probe: `curl -fsS localhost:8080/healthz`\n\
+             - Test runner: `pnpm test`, `cargo test --test integration`\n\n\
+             NO human-eye checks: \"in browser\", \"visually clear\", \
+             \"feels right\", \"the UI works\" — an autonomous agent \
+             can't verify these. If a step's only check is human-eye, \
+             reframe it as \"file matches grep pattern X\" or \"build \
+             exits 0\" or split it so a different step has the runnable \
+             check.\n\n\
+             **Long-running processes are NOT verifications.** \
+             `pnpm run dev` / `cargo run --release` / `python -m \
+             http.server` are servers — they don't exit. The Bash tool \
+             can't sit on them. Use the equivalent build/test command \
+             instead: `pnpm run build` (static check), `cargo build \
+             --release` (compile only), `python -c \"import …\"` \
+             (import smoke).\n\n\
+             **No bootstrap-then-overwrite steps.** If step N+1 will \
+             replace what step N produced, merge them. Test: would \
+             step N's output survive into step N+1? If no, step N is \
+             throwaway. Example: \"step 1: pnpm init\" + \"step 2: \
+             pnpm create vite . --force\" — step 2 overwrites step 1's \
+             package.json, so step 1 is throwaway. Use the canonical \
+             scaffolder as one step.\n\n\
+             **Default to canonical scaffolders.** When the goal needs \
+             a Vite / Next / Nuxt / cargo project, use the official \
+             non-interactive scaffolder as ONE step (`pnpm create \
+             vite@latest <dir> --template react-ts`, `cargo new <dir> \
+             --bin`, etc.) — don't decompose it into \"init package, \
+             add deps, configure tooling\". Scaffolders exist for a \
+             reason. Avoid commands that require an interactive TTY \
+             prompt; the Bash tool can't answer them.\n\n\
+             **Name cross-step artifacts in descriptions.** When step \
+             N+1 depends on a file step N produced, BOTH descriptions \
+             must name the file. \"Step 3 edits src/App.tsx\" requires \
+             step 2's description to name `src/App.tsx` as an output. \
+             Surfaces implicit deps and lets the user audit the chain \
+             before approving.\n\n\
+             **When executing the step, ACTUALLY RUN the verification \
+             before marking it done.** The flow is:\n\
+             1. UpdatePlanStep(id, \"in_progress\")\n\
+             2. Perform the step's main action (Edit / Write / Bash)\n\
+             3. **Run the verification** (Bash / Read / curl — whatever \
+             you specified)\n\
+             4. If verification passes → UpdatePlanStep(id, \"done\")\n\
+             5. If verification fails → UpdatePlanStep(id, \"failed\", \
+             note: \"<what failed, ideally one line>\")\n\n\
+             Do NOT skip the verification and call \"done\" anyway. The \
+             gate will accept it (the agent can't tell whether you \
+             actually ran the check), but the user is going to find out \
+             on the next step or in production, and trust degrades.\n\n\
+             On failure, mark the step Failed — don't paper over a \
+             broken build by marking it done and moving on. The user \
+             has Retry / Skip / Abort buttons in the sidebar; that's \
+             the right path when something legitimately broke.\n\n\
+             **Titles: imperative verb + outcome.** \"Add /healthz \
+             endpoint to web server\", not \"Endpoint work\" or \"I \
+             will add an endpoint\". User skims titles; make them \
+             scannable.\n\n\
+             **Descriptions: name the files, the operations, and the \
+             verification.** \"Edit src/routes.rs: add GET /healthz \
+             handler returning {ok: true}. Verify: `curl \
+             localhost:8080/healthz | jq .ok` returns true.\"\n\n\
+             **Order by dependency, then by risk.** Step N+1 must be \
+             safe to start only after step N succeeds — that's how the \
+             gate works. Within dependency constraints, tackle \
+             risky / uncertain work early so failures surface before \
+             half the plan is committed. Don't put \"deploy to \
+             production\" before \"run the test suite\".\n\n\
+             **Read before planning.** Drafted-from-imagination plans \
+             miss real constraints — function signatures, build \
+             configs, existing patterns. If your plan involves editing \
+             a file you haven't read, read it now before calling \
+             SubmitPlan.\n\n\
+             **Ask before submitting if the stack is undetermined.** \
+             AskUserQuestion is REQUIRED — not optional — when a key \
+             decision can't be resolved from the code or the user's \
+             prompt alone (which framework? which storage backend? \
+             which deployment target?). A wrong assumption forces a \
+             full replan, wastes the user's review time, and burns \
+             execution attempts on the wrong target. Ask BEFORE \
+             SubmitPlan.\n\n\
+             **No \"maybe\" / \"optional\" steps.** Either a step is \
+             needed and you'll do it, or it isn't and you skip it. The \
+             gate has Done / Failed, not Maybe.\n\n\
+             ### Audit BEFORE calling SubmitPlan\n\n\
+             After drafting the plan, run this self-audit. If any \
+             check fails, revise — don't submit a plan you wouldn't \
+             approve yourself.\n\n\
+             1. **Goal coverage** — Read the user's original ask. Does \
+             executing every step in order actually deliver what they \
+             asked for? If a step is missing (a feature, a build \
+             check, a final smoke test), add it.\n\
+             2. **Atomic steps** — Apply the three-rule test (one \
+             action, one shell-runnable verification, output preserved \
+             across the next step) to EVERY step. Split any that fail.\n\
+             3. **Bash-runnable verifications** — Re-read every \
+             `Verify:` line. Could you run that as a shell command \
+             right now? If a verification mentions \"browser\", \
+             \"visually\", or \"feels\", replace it with a grep / curl \
+             / build check, or split the step.\n\
+             4. **Cross-step dependencies named** — For every step \
+             that edits a file, confirm the file's existence is \
+             established by an earlier step's description (or by the \
+             current code). If step 3 needs `src/App.tsx` and the \
+             plan never names where that comes from, fix step 2's \
+             description.\n\
+             5. **No throwaway steps** — Walk pairs (step N, step \
+             N+1). Will step N+1 overwrite or replace step N's \
+             output? If yes, merge them.\n\
+             6. **No long-running servers as verifications** — Search \
+             your verification lines for `pnpm run dev`, `cargo run`, \
+             `npm start`, `python -m http.server`. Replace each with \
+             the build-only equivalent.\n\
+             7. **Stack decisions made** — Did you assume a framework \
+             / storage / deploy target the user didn't specify? If so, \
+             call AskUserQuestion BEFORE SubmitPlan.\n\n\
+             Only call SubmitPlan once all seven checks pass. The user \
+             trusts the plan you submit; submitting a plan you'd flag \
+             as weak yourself wastes their approval and your retry \
+             budget."
+                .to_string(),
+        ),
+        (PermissionMode::Plan, Some(p)) => {
+            // M6.9 (Bug C1): if the prior plan finished and the user
+            // re-entered plan mode for a NEW task, the slot still
+            // holds the all-done plan. Treat that case as "plan mode
+            // is active, no plan yet" so the model gets the right
+            // exploration/SubmitPlan reminder instead of "awaiting
+            // approval" of a finished plan. The sidebar's Approve
+            // button is also gated on !allDone so it doesn't show
+            // either.
+            use crate::tools::plan_state::StepStatus;
+            let all_done = p.steps.iter().all(|s| s.status == StepStatus::Done);
+            if all_done {
+                // Recurse with effectively-no-plan to get the
+                // (Plan, None) reminder. Cheaper than duplicating
+                // the long string here.
+                return build_plan_reminder(mode, None);
+            }
+            Some(format!(
+                "## Plan mode — awaiting user approval\n\n\
+                 You have submitted a plan ({} steps). The user is reviewing \
+                 it in the right-side sidebar. They will click **Approve** to \
+                 begin execution, or **Cancel** to discard the plan.\n\n\
+                 While waiting for approval, do NOT:\n\
+                 - Call **any other tools** — not Read, Grep, Edit, Bash, \
+                 UpdatePlanStep, or ExitPlanMode. The agent loop will block \
+                 these and surface a tool-result error if you try.\n\
+                 - Call **SubmitPlan again** unless the user explicitly asks \
+                 for a different plan.\n\
+                 - Tell the user to **type anything** to start (\"type 'go' \
+                 / 'start' / 'begin' to proceed\"). The buttons are the \
+                 contract — there is no chat-input route to approve. If you \
+                 tell them to type something, they will, and the system will \
+                 block your follow-up tool calls anyway.\n\n\
+                 Just emit a brief one-line confirmation that the plan is \
+                 ready for review (or stay silent) and stop. The sidebar \
+                 buttons are how the user moves the workflow forward, not \
+                 chat messages.",
+                p.steps.len(),
+            ))
+        }
+        (_, Some(p)) => Some(build_execution_reminder(p)),
+        (_, None) => None,
+    }
+}
+
+/// Layer-2 narrowed view (M4.1). The model sees:
+///   - the current step's title + full description
+///   - remaining steps as titles only (no descriptions)
+///   - completed steps as a single comma-separated tally
+///   - per-step protocol + the M3 "execute autonomously" wording
+///
+/// Goal: focus the model on the one step it's working on. Hiding step
+/// descriptions for upcoming work prevents the model from coordinating
+/// across step boundaries (e.g. "let me also do step 5 while I'm here")
+/// and reduces the urge to ask the user "shall I proceed?" between
+/// steps — there's nothing to debate when only one step is visible in
+/// detail.
+fn build_execution_reminder(plan: &crate::tools::plan_state::Plan) -> String {
+    use crate::tools::plan_state::StepStatus;
+
+    let total = plan.steps.len();
+
+    // Pick the focus step:
+    //   1. The InProgress step, if any (model already started)
+    //   2. The Failed step, if any (recovery state)
+    //   3. The first Todo step (about to start)
+    //   4. None — all steps Done
+    let focus_idx = plan
+        .steps
+        .iter()
+        .position(|s| s.status == StepStatus::InProgress)
+        .or_else(|| {
+            plan.steps
+                .iter()
+                .position(|s| s.status == StepStatus::Failed)
+        })
+        .or_else(|| plan.steps.iter().position(|s| s.status == StepStatus::Todo));
+
+    let mut out = String::new();
+    out.push_str("## Executing approved plan");
+    if let Some(idx) = focus_idx {
+        out.push_str(&format!(" — step {} of {}\n\n", idx + 1, total));
+        let step = &plan.steps[idx];
+
+        // Heading line: title + status hint when relevant.
+        let status_hint = match step.status {
+            StepStatus::InProgress => "  Current step:",
+            StepStatus::Failed => "  Failed step (awaiting user retry / skip / abort):",
+            StepStatus::Todo => "  Next step (call UpdatePlanStep with \"in_progress\" to begin):",
+            StepStatus::Done => "  Step:",
+        };
+        out.push_str(&format!("{status_hint} \"{}\"\n\n", step.title));
+
+        if !step.description.trim().is_empty() {
+            // Indent the description so it visually clusters with the
+            // current step block.
+            for line in step.description.lines() {
+                out.push_str("  ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+
+        if let Some(note) = &step.note {
+            if !note.trim().is_empty() {
+                out.push_str(&format!("  (note: {note})\n\n"));
+            }
+        }
+
+        // Already complete: short tally line.
+        let done_titles: Vec<String> = plan
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.status == StepStatus::Done)
+            .map(|(i, s)| format!("{}. {}", i + 1, s.title))
+            .collect();
+        if !done_titles.is_empty() {
+            out.push_str("Already complete: ");
+            out.push_str(&done_titles.join(" · "));
+            out.push_str("\n\n");
+        }
+
+        // Remaining steps: titles only, NO descriptions. The whole
+        // point of Layer-2 — model can see the shape of what's coming
+        // but can't preview details and start working on later steps.
+        let remaining: Vec<String> = plan
+            .steps
+            .iter()
+            .enumerate()
+            .skip(idx + 1)
+            .filter(|(_, s)| s.status != StepStatus::Done)
+            .map(|(i, s)| format!("  • {}. {}", i + 1, s.title))
+            .collect();
+        if !remaining.is_empty() {
+            out.push_str("Remaining (titles only, do NOT preview):\n");
+            out.push_str(&remaining.join("\n"));
+            out.push_str("\n\n");
+        }
+
+        // M6.3: surface cross-step outputs from completed steps so the
+        // model can read prior data (generated ids, hashes, paths)
+        // even after step-boundary compaction has trimmed the chat
+        // history. Only completed Done steps with a populated `output`
+        // field are listed.
+        let prior_outputs = collect_prior_step_outputs(plan, &step.id);
+        if !prior_outputs.is_empty() {
+            out.push_str("Outputs from prior steps (use these instead of guessing):\n");
+            for (i, title, output) in &prior_outputs {
+                out.push_str(&format!("  - Step {i} ({title}): {output}\n"));
+            }
+            out.push('\n');
+        }
+
+        // Per-step protocol — references the focus step's id directly.
+        let protocol = match step.status {
+            StepStatus::InProgress => format!(
+                "Per-step protocol:\n\
+                 - You're already on this step. Focus on completing it.\n\
+                 - **Run the verification before marking done.** The plan's description \
+                 for this step should specify what to check (build exits 0, test passes, \
+                 endpoint returns 200, etc.). Actually run that check.\n\
+                 - If verification passes: UpdatePlanStep(\"{id}\", \"done\")\n\
+                 - If verification fails: UpdatePlanStep(\"{id}\", \"failed\", note: \"<one-line reason>\")\n\
+                 - Don't paper over a failure by marking it done — the user has Retry / \
+                 Skip / Abort buttons in the sidebar for the Failed path.",
+                id = step.id,
+            ),
+            StepStatus::Todo => format!(
+                "Per-step protocol:\n\
+                 - Begin: UpdatePlanStep(\"{id}\", \"in_progress\")\n\
+                 - Perform the step's main action.\n\
+                 - **Run the verification** specified in the step's description.\n\
+                 - If verification passes: UpdatePlanStep(\"{id}\", \"done\")\n\
+                 - If verification fails: UpdatePlanStep(\"{id}\", \"failed\", note: \"<one-line reason>\")",
+                id = step.id,
+            ),
+            StepStatus::Failed => "Per-step protocol:\n\
+                 - This step is in Failed state. The user has Retry / Skip / Abort \
+                 buttons in the sidebar. Do NOT call UpdatePlanStep again unless \
+                 the user explicitly retries — wait for their next message."
+                .to_string(),
+            StepStatus::Done => String::new(),
+        };
+        if !protocol.is_empty() {
+            out.push_str(&protocol);
+            out.push_str("\n\n");
+        }
+    } else {
+        // All steps Done.
+        out.push_str(" — all steps complete\n\n");
+        out.push_str(
+            "Every step is Done. Wrap up the conversation with a brief \
+             summary of what was accomplished. Do not call any further \
+             tools unless the user requests follow-up work.\n\n",
+        );
+    }
+
+    // Trailing autonomous-execution wording — same as M3.
+    out.push_str(
+        "**Execute autonomously.** The user has already approved this \
+         plan by clicking the sidebar Approve button — do NOT pause to \
+         ask \"shall I proceed?\" / \"should I do X?\" / \"continue with \
+         the next step?\". Step transitions are the contract; the user \
+         monitors progress via the sidebar checkmarks, not via chat \
+         confirmations. Run end-to-end without intermediate user \
+         checkpoints.\n\n\
+         Only stop to ask the user (via AskUserQuestion or plain chat) \
+         if you hit a genuine blocker — missing credentials, an ambiguous \
+         decision the plan didn't resolve, or a destructive action that \
+         materially exceeds the plan's scope. Otherwise: keep going.\n\n\
+         Plans are strictly sequential — focus only on the current \
+         step. The gate will reject any out-of-order transition.",
+    );
+    out
+}
+
+/// M6.1 Ralph-loop per-step continuation prompt. Used by the worker's
+/// plan-execution driver to wake the agent loop with a focused user
+/// message after a turn ends mid-plan. Terse on purpose — the heavy
+/// lifting (full per-step protocol, sequential-gate rules, autonomous-
+/// execution wording) is already in the system reminder built by
+/// `build_execution_reminder`. This message just says "you have one
+/// step to work on right now, go".
+///
+/// `attempt` is 1 on the first nudge for a step, 2 on the second
+/// retry, etc. Higher attempt numbers escalate the wording so the
+/// model knows it's been spinning and should commit to a transition.
+pub fn build_step_continuation_prompt(
+    plan: &crate::tools::plan_state::Plan,
+    step: &crate::tools::plan_state::PlanStep,
+    attempt: usize,
+) -> String {
+    use crate::tools::plan_state::StepStatus;
+
+    let total = plan.steps.len();
+    let position = plan
+        .steps
+        .iter()
+        .position(|s| s.id == step.id)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    let action_hint = match step.status {
+        StepStatus::Todo => format!(
+            "Begin: UpdatePlanStep(\"{}\", \"in_progress\"). Then perform the step's action, run the verification, and finish with UpdatePlanStep(\"{}\", \"done\") or UpdatePlanStep(\"{}\", \"failed\", note: \"<reason>\").",
+            step.id, step.id, step.id,
+        ),
+        StepStatus::InProgress => format!(
+            "You're already on this step. Run the verification specified in the step's description, then call UpdatePlanStep(\"{}\", \"done\") if it passed, or UpdatePlanStep(\"{}\", \"failed\", note: \"<reason>\") if it didn't.",
+            step.id, step.id,
+        ),
+        StepStatus::Failed | StepStatus::Done => {
+            // Driver shouldn't be picking these as the next-actionable
+            // step, but be defensive — return a no-op-ish prompt.
+            return format!(
+                "Plan step \"{}\" is in state {:?}. Wait for the user to retry, skip, or abort via the sidebar.",
+                step.title, step.status,
+            );
+        }
+    };
+
+    // M6.3: surface prior step outputs so the model can read data from
+    // earlier steps without relying on chat history (which gets
+    // compacted between steps in M6.2). Only Done steps with a
+    // populated `output` field are listed.
+    let prior_outputs = collect_prior_step_outputs(plan, &step.id);
+    let outputs_block = if prior_outputs.is_empty() {
+        String::new()
+    } else {
+        let mut s = String::from("\n\nOutputs from prior steps:\n");
+        for (i, title, out) in prior_outputs {
+            s.push_str(&format!("  - Step {i} ({title}): {out}\n"));
+        }
+        s
+    };
+
+    if attempt <= 1 {
+        format!(
+            "Continue plan execution. Focus: step {position}/{total} \"{}\".\n\n{}{outputs_block}",
+            step.title, action_hint,
+        )
+    } else {
+        // Escalate. The model has had at least one turn on this step
+        // without committing; remind it that the retry budget is
+        // bounded and that "failed" with a one-line note is a valid
+        // outcome the user can recover from.
+        format!(
+            "Continue plan execution — attempt {attempt} on step {position}/{total} \"{}\". \
+             You have at most {} attempts per step; after that the driver \
+             will mark this step Failed automatically. Commit to a \
+             transition this turn: do the work and call \
+             UpdatePlanStep(\"{}\", \"done\"), OR if the step can't be \
+             finished, call UpdatePlanStep(\"{}\", \"failed\", note: \
+             \"<one-line reason>\") so the user can retry / skip / \
+             abort via the sidebar.\n\n{}",
+            step.title,
+            crate::tools::plan_state::MAX_RETRIES_PER_STEP,
+            step.id,
+            step.id,
+            action_hint,
+        )
+    }
+}
+
+/// Read `.thclaws/todos.md` from the working directory and, if it
+/// exists and has any incomplete items (`[ ]` pending or `[-]`
+/// in_progress), return a system-reminder string surfacing the list.
+/// Returns `None` if the file is missing, empty, or has only completed
+/// items — no point nagging the model with a fully-checked list.
+///
+/// This is the programmatic counterpart to the system-prompt directive
+/// that says "check `.thclaws/todos.md` BEFORE asking for context."
+/// Real-world testing showed that prompt-only guidance isn't enough on
+/// some models — gpt-4.1 in particular still asks the user instead of
+/// reading the file. Auto-injecting the contents removes the model's
+/// option to ignore the rule.
+///
+/// Mirrors Claude Code's `todo_reminder` attachment shape (see
+/// claude-code-src/utils/messages.ts:3663) but always-on instead of
+/// every-N-turns — we don't have the turn-count tracking, and the
+/// content is small enough (~200 bytes for a typical 3–5 item list)
+/// that always-on is acceptable.
+pub fn build_todos_reminder() -> Option<String> {
+    let path = std::env::current_dir()
+        .ok()?
+        .join(".thclaws")
+        .join("todos.md");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    // Quick check: any incomplete checkbox (`[ ]` pending or `[-]`
+    // in_progress)? If everything is `[x]` completed, skip the
+    // reminder — the model doesn't need to be reminded about a
+    // closed-out list.
+    let has_incomplete = raw
+        .lines()
+        .any(|l| l.trim_start().starts_with("- [ ]") || l.trim_start().starts_with("- [-]"));
+    if !has_incomplete {
+        return None;
+    }
+    Some(format!(
+        "## Existing todos (.thclaws/todos.md)\n\n\
+         A scratchpad todo list from a prior session is present in this \
+         workspace. Surface this to the user before asking what to work \
+         on, and offer to resume incomplete items (`[ ]` pending or \
+         `[-]` in_progress) or replace the list. Don't ask \"what \
+         should we do?\" while these answers are sitting in front of \
+         you.\n\n\
+         Current contents:\n\n\
+         ```markdown\n{raw}```\n\n\
+         If the user wants to resume, mark the next pending item as \
+         `in_progress` via TodoWrite (passing the full list with that \
+         one item flipped) and start work on it. If they want a fresh \
+         start, write an updated list via TodoWrite that reflects the \
+         new direction.",
+        raw = raw.trim_end()
+    ))
+}
+
+/// Collect (position, title, output) tuples for completed steps that
+/// have a populated `output` field, for steps prior to `current_step_id`.
+/// Used by both the per-step continuation prompt and the system
+/// reminder to expose the cross-step data channel (M6.3).
+fn collect_prior_step_outputs(
+    plan: &crate::tools::plan_state::Plan,
+    current_step_id: &str,
+) -> Vec<(usize, String, String)> {
+    use crate::tools::plan_state::StepStatus;
+    let current_idx = plan
+        .steps
+        .iter()
+        .position(|s| s.id == current_step_id)
+        .unwrap_or(plan.steps.len());
+    plan.steps
+        .iter()
+        .enumerate()
+        .take(current_idx)
+        .filter_map(|(i, s)| {
+            if s.status != StepStatus::Done {
+                return None;
+            }
+            let out = s.output.as_ref()?.trim();
+            if out.is_empty() {
+                return None;
+            }
+            Some((i + 1, s.title.clone(), out.to_string()))
+        })
+        .collect()
+}
+
 /// Max tool result size kept in context. Excess is saved to disk with a preview.
 pub const TOOL_RESULT_CONTEXT_LIMIT: usize = 50_000;
 
@@ -174,13 +758,43 @@ impl Agent {
         let provider = self.provider.clone();
         let tools = self.tools.clone();
         let model = self.model.clone();
-        let system = self.system.clone();
+        // Compose the per-turn system prompt: base + dynamic plan-mode
+        // reminder + dynamic todos reminder so the model sees fresh
+        // state every turn (plan mode active? plan submitted but not
+        // approved? existing todos.md from a prior session?). Cheap —
+        // just a string concat per turn.
+        let system = {
+            let base = self.system.clone();
+            let mode = crate::permissions::current_mode();
+            let active_plan = crate::tools::plan_state::get();
+            let plan_reminder = build_plan_reminder(mode, active_plan.as_ref());
+            let todos_reminder = build_todos_reminder();
+            // Chain reminders. Plan reminder dominates when active —
+            // it has the strongest per-turn discipline and would be
+            // redundant with todos guidance. Otherwise surface todos
+            // when a list exists.
+            let chained = match (plan_reminder, todos_reminder) {
+                (Some(p), Some(t)) => Some(format!("{p}\n\n{t}")),
+                (Some(p), None) => Some(p),
+                (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
+            match chained {
+                Some(r) if !base.is_empty() => format!("{base}\n\n{r}"),
+                Some(r) => r,
+                None => base,
+            }
+        };
         let budget_tokens = self.budget_tokens;
         let base_max_tokens = self.max_tokens;
         let max_iterations = self.max_iterations;
         let max_retries = self.max_retries;
         let thinking_budget = self.thinking_budget;
-        let permission_mode = self.permission_mode;
+        // Captured here only as the *fallback* default when no global mode
+        // has been set yet. The actual gate at tool-dispatch time reads
+        // `permissions::current_mode()` so EnterPlanMode / ExitPlanMode /
+        // `/plan` flips take effect mid-turn rather than next-message.
+        let permission_mode_default = self.permission_mode;
         let approver = self.approver.clone();
         let history = self.history.clone();
 
@@ -351,6 +965,128 @@ impl Agent {
                             continue;
                         }
                     };
+
+                    // Read the mode dynamically — EnterPlanMode (or the
+                    // sidebar Approve / `/plan` slash) may have flipped it
+                    // mid-turn, and we want that to take effect on the
+                    // very next dispatch. `permission_mode_default` only
+                    // matters when nothing has set the global yet.
+                    let permission_mode = {
+                        let m = crate::permissions::current_mode();
+                        if matches!(m, PermissionMode::Ask) && permission_mode_default == PermissionMode::Auto {
+                            // Worker startup before init — fall back to
+                            // the agent's constructed default rather than
+                            // accidentally prompting on a bare-Ask Mutex
+                            // default.
+                            permission_mode_default
+                        } else {
+                            m
+                        }
+                    };
+
+                    // Plan-mode block (M2): mutating tools are off-limits
+                    // during plan-mode exploration. Return a structured
+                    // tool_result the model reads on the next turn and
+                    // self-corrects ("oh, I'm in plan mode — call Read
+                    // instead, then SubmitPlan when ready"). The whole
+                    // dispatch path is short-circuited — no approval
+                    // popup, no actual call. Plan tools themselves
+                    // (SubmitPlan, UpdatePlanStep, EnterPlanMode,
+                    // ExitPlanMode) have requires_approval=false and so
+                    // sail through.
+                    if matches!(permission_mode, PermissionMode::Plan)
+                        && tool.requires_approval(input)
+                    {
+                        let blocked = format!(
+                            "Blocked: {name} is not available in plan mode. \
+                             Use Read / Grep / Glob / Ls to explore the codebase. \
+                             When you have enough context, call SubmitPlan with an \
+                             ordered list of concrete steps. The user will review \
+                             and approve before execution."
+                        );
+                        result_blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: blocked.clone().into(),
+                            is_error: true,
+                        });
+                        yield AgentEvent::ToolCallResult {
+                            id: id.clone(),
+                            name: name.clone(),
+                            output: Err(blocked),
+                            ui_resource: None,
+                        };
+                        continue;
+                    }
+
+                    // TodoWrite is hidden in plan mode — SubmitPlan /
+                    // UpdatePlanStep are the structured replacement and
+                    // letting both coexist confused the model in tests
+                    // (it would TodoWrite a draft list AND SubmitPlan
+                    // the same content). Match by tool name rather than
+                    // a flag to keep it data-free.
+                    if matches!(permission_mode, PermissionMode::Plan)
+                        && name == "TodoWrite"
+                    {
+                        let blocked = "Blocked: TodoWrite is the casual scratchpad outside plan mode. \
+                                       In plan mode, call SubmitPlan to publish your plan to the \
+                                       sidebar — UpdatePlanStep tracks progress per step.";
+                        result_blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: blocked.to_string().into(),
+                            is_error: true,
+                        });
+                        yield AgentEvent::ToolCallResult {
+                            id: id.clone(),
+                            name: name.clone(),
+                            output: Err(blocked.to_string()),
+                            ui_resource: None,
+                        };
+                        continue;
+                    }
+
+                    // Approval-window gate (bug fix after M5 testing):
+                    // while a plan is submitted but the user hasn't
+                    // approved yet, the model must NOT progress steps
+                    // (UpdatePlanStep) or unilaterally exit plan mode
+                    // (ExitPlanMode). Both bypass the user's review
+                    // window — the model could call ExitPlanMode
+                    // interpreting a casual "Start" as approval, flip
+                    // mode to Auto on its own, and start writing files
+                    // before the user has reviewed the plan.
+                    //
+                    // The sole legal path out of "plan submitted,
+                    // awaiting approval" is the user clicking the
+                    // sidebar Approve / Cancel button (which fire
+                    // plan_approve / plan_cancel IPCs from the GUI).
+                    // Re-submitting via SubmitPlan stays allowed —
+                    // that's the model's "I changed my mind" channel
+                    // and the new plan also waits for approval.
+                    if matches!(permission_mode, PermissionMode::Plan)
+                        && (name == "UpdatePlanStep" || name == "ExitPlanMode")
+                        && crate::tools::plan_state::get().is_some()
+                    {
+                        let blocked = format!(
+                            "Blocked: {name} is not available while waiting for the user to \
+                             approve the plan. The user reviews the plan in the right-side \
+                             sidebar and clicks Approve to begin execution (or Cancel to \
+                             discard it). Do NOT instruct the user to type anything — the \
+                             buttons are the contract. While you wait, do not call any other \
+                             tools either; just stop emitting tool calls and let the sidebar \
+                             speak for itself.",
+                        );
+                        result_blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: blocked.clone().into(),
+                            is_error: true,
+                        });
+                        yield AgentEvent::ToolCallResult {
+                            id: id.clone(),
+                            name: name.clone(),
+                            output: Err(blocked),
+                            ui_resource: None,
+                        };
+                        continue;
+                    }
 
                     // Approval gate.
                     let needs_approval = matches!(permission_mode, PermissionMode::Ask)
@@ -532,6 +1268,679 @@ mod tests {
     use futures::stream;
     use std::collections::VecDeque;
     use tempfile::tempdir;
+
+    // ── Layer-2 plan reminder shape tests (M4.1) ───────────────────────
+    //
+    // Pure-function tests on `build_plan_reminder` — they don't touch
+    // global state, just feed a `Plan` snapshot in and assert the
+    // resulting string mentions / hides the right things.
+
+    fn step(
+        id: &str,
+        title: &str,
+        description: &str,
+        status: crate::tools::plan_state::StepStatus,
+    ) -> crate::tools::plan_state::PlanStep {
+        crate::tools::plan_state::PlanStep {
+            id: id.into(),
+            title: title.into(),
+            description: description.into(),
+            status,
+            note: None,
+            output: None,
+        }
+    }
+
+    fn make_plan(steps: Vec<crate::tools::plan_state::PlanStep>) -> crate::tools::plan_state::Plan {
+        crate::tools::plan_state::Plan {
+            id: "plan-test".into(),
+            steps,
+        }
+    }
+
+    #[test]
+    fn reminder_layer2_hides_descriptions_for_remaining_steps() {
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![
+            step(
+                "s1",
+                "Scaffold project",
+                "scaffold detail",
+                StepStatus::Done,
+            ),
+            step(
+                "s2",
+                "Install deps",
+                "install detail HIDE FROM MODEL",
+                StepStatus::InProgress,
+            ),
+            step(
+                "s3",
+                "Configure Vite",
+                "vite detail SHOULD-NOT-LEAK",
+                StepStatus::Todo,
+            ),
+            step(
+                "s4",
+                "Add tests",
+                "tests detail ALSO-HIDDEN",
+                StepStatus::Todo,
+            ),
+        ]);
+        let r = build_plan_reminder(PermissionMode::Auto, Some(&plan)).unwrap();
+
+        // Current step's description IS shown.
+        assert!(
+            r.contains("install detail HIDE FROM MODEL"),
+            "current step description must appear: {r}"
+        );
+
+        // Future steps' descriptions are NOT shown (titles only).
+        assert!(
+            !r.contains("vite detail SHOULD-NOT-LEAK"),
+            "step 3 description leaked: {r}"
+        );
+        assert!(
+            !r.contains("tests detail ALSO-HIDDEN"),
+            "step 4 description leaked: {r}"
+        );
+
+        // Future steps' titles ARE shown so the model knows the shape.
+        assert!(r.contains("Configure Vite"), "step 3 title missing: {r}");
+        assert!(r.contains("Add tests"), "step 4 title missing: {r}");
+
+        // Already-complete tally line.
+        assert!(r.contains("Already complete:"));
+        assert!(r.contains("1. Scaffold project"));
+
+        // Per-step protocol references the focus step's id.
+        assert!(
+            r.contains("UpdatePlanStep(\"s2\""),
+            "protocol must name the focus step id: {r}"
+        );
+    }
+
+    #[test]
+    fn reminder_layer2_picks_failed_step_as_focus() {
+        use crate::tools::plan_state::StepStatus;
+        let mut s2 = step("s2", "Install deps", "doesn't matter", StepStatus::Failed);
+        s2.note = Some("ENOTFOUND registry.npmjs.org".into());
+        let plan = make_plan(vec![
+            step("s1", "Scaffold", "", StepStatus::Done),
+            s2,
+            step("s3", "Configure", "", StepStatus::Todo),
+        ]);
+        let r = build_plan_reminder(PermissionMode::Auto, Some(&plan)).unwrap();
+
+        assert!(r.contains("Failed step"), "failed status hint missing: {r}");
+        assert!(
+            r.contains("ENOTFOUND registry"),
+            "failure note missing: {r}"
+        );
+        // Model is told to wait for user retry/skip/abort, not to call UpdatePlanStep.
+        assert!(
+            r.contains("user retry / skip / abort"),
+            "retry hint missing: {r}"
+        );
+    }
+
+    #[test]
+    fn reminder_layer2_all_done_wraps_up() {
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![
+            step("s1", "A", "", StepStatus::Done),
+            step("s2", "B", "", StepStatus::Done),
+        ]);
+        let r = build_plan_reminder(PermissionMode::Auto, Some(&plan)).unwrap();
+        assert!(r.contains("all steps complete"));
+        assert!(r.contains("Wrap up"));
+        // No per-step protocol — nothing to do.
+        assert!(!r.contains("UpdatePlanStep("));
+    }
+
+    #[test]
+    fn reminder_plan_mode_with_no_plan_tells_model_to_explore() {
+        let r = build_plan_reminder(PermissionMode::Plan, None).unwrap();
+        assert!(r.contains("Plan mode is active"));
+        assert!(r.contains("Read / Grep"));
+        assert!(r.contains("SubmitPlan"));
+        assert!(r.contains("Do NOT call TodoWrite"));
+    }
+
+    #[test]
+    fn reminder_plan_mode_includes_step_quality_guidance() {
+        // The (Plan, no plan) reminder should give the model concrete
+        // guidance on what makes a good plan — this is the cure for
+        // the bug where the model wrote a single "Build and run the
+        // webapp" step that hid which half failed. Each of these
+        // checks asserts a specific guidance dimension is present.
+        let r = build_plan_reminder(PermissionMode::Plan, None).unwrap();
+
+        // M6.5: step count is no longer capped at 3–10. The
+        // split-until-atomic rule replaces it. The cap was actively
+        // making plans worse — models bundled actions to fit the
+        // window. Now the test asserts the cap is GONE and the
+        // three-rule decomposition test is present.
+        assert!(
+            !r.contains("3–10") && !r.contains("3-10"),
+            "step-count cap should be removed: {r}",
+        );
+        assert!(
+            r.contains("as many as needed"),
+            "no-cap step-count guidance missing: {r}",
+        );
+        assert!(
+            r.contains("ONE action") && r.contains("ONE shell-runnable verification"),
+            "split-until-atomic three-rule test missing: {r}",
+        );
+        assert!(
+            r.contains("PRESERVED across the next step"),
+            "preservation rule missing: {r}",
+        );
+
+        // Floor: 1-step plan isn't a plan.
+        assert!(
+            r.contains("at least 2 steps"),
+            "floor of 2 steps missing: {r}",
+        );
+
+        // No-combination rule, the user's specific ask: build and run
+        // must be separate steps.
+        assert!(
+            r.contains("Build-and-run") || r.contains("\"Build and run\" is TWO steps"),
+            "build-and-run separation rule missing: {r}",
+        );
+
+        // M6.5: Bash-runnable verifications.
+        assert!(
+            r.contains("Verifications must be shell-runnable"),
+            "shell-runnable rule missing: {r}",
+        );
+        assert!(
+            r.contains("NO human-eye checks"),
+            "no-human-eye rule missing: {r}",
+        );
+
+        // M6.5: long-running servers are not verifications.
+        assert!(
+            r.contains("Long-running processes are NOT verifications"),
+            "no-long-running-server rule missing: {r}",
+        );
+
+        // M6.5: no bootstrap-then-overwrite.
+        assert!(
+            r.contains("No bootstrap-then-overwrite"),
+            "bootstrap-overwrite rule missing: {r}",
+        );
+
+        // M6.5: default to canonical scaffolders.
+        assert!(
+            r.contains("canonical scaffolders"),
+            "canonical-scaffolder rule missing: {r}",
+        );
+        assert!(
+            r.contains("interactive TTY prompt"),
+            "interactive-prompt warning missing: {r}",
+        );
+
+        // M6.5: cross-step artifacts named.
+        assert!(
+            r.contains("Name cross-step artifacts"),
+            "cross-step-artifacts rule missing: {r}",
+        );
+
+        // ACTUALLY RUN the verification.
+        assert!(
+            r.contains("ACTUALLY RUN the verification"),
+            "must actually run verify, not just declare it: {r}",
+        );
+
+        // Failure-path guidance: don't paper over.
+        assert!(
+            r.contains("Don't paper over") || r.contains("don't paper over"),
+            "no-paper-over rule missing: {r}",
+        );
+
+        // M6.5: ask-when-stack-undetermined is REQUIRED.
+        assert!(
+            r.contains("AskUserQuestion is REQUIRED"),
+            "required-ask rule missing: {r}",
+        );
+    }
+
+    #[test]
+    fn reminder_plan_mode_includes_pre_submission_audit() {
+        // M6.5: After drafting the plan, the model should run a
+        // self-audit before calling SubmitPlan. This was added because
+        // a real test session shipped a plan that bundled actions and
+        // had un-shell-runnable verifications — the audit catches
+        // those before the user has to.
+        let r = build_plan_reminder(PermissionMode::Plan, None).unwrap();
+
+        assert!(
+            r.contains("Audit BEFORE calling SubmitPlan"),
+            "pre-submission audit section missing: {r}",
+        );
+
+        // Each of the seven audit checks should appear by name.
+        for needle in [
+            "Goal coverage",
+            "Atomic steps",
+            "Bash-runnable verifications",
+            "Cross-step dependencies named",
+            "No throwaway steps",
+            "No long-running servers as verifications",
+            "Stack decisions made",
+        ] {
+            assert!(
+                r.contains(needle),
+                "audit checklist item missing: {needle:?} not in: {r}",
+            );
+        }
+
+        // The audit should be presented as a gate, not advisory.
+        assert!(
+            r.contains("revise — don't submit a plan you wouldn't approve yourself"),
+            "audit gate framing missing: {r}",
+        );
+    }
+
+    #[test]
+    fn reminder_per_step_protocol_includes_verification_step() {
+        // The Layer-2 narrowed view used during execution should also
+        // remind the model to run the verification before marking
+        // done. Surface guidance for both InProgress and Todo states.
+        use crate::tools::plan_state::StepStatus;
+
+        let plan_in_progress = make_plan(vec![step(
+            "s1",
+            "Build the project",
+            "cargo build --release. Verify exits 0.",
+            StepStatus::InProgress,
+        )]);
+        let r = build_plan_reminder(PermissionMode::Auto, Some(&plan_in_progress)).unwrap();
+        assert!(
+            r.contains("Run the verification before marking done"),
+            "verify-then-done missing for in_progress: {r}"
+        );
+        assert!(
+            r.contains("Don't paper over"),
+            "no-paper-over missing for in_progress: {r}"
+        );
+
+        let plan_todo = make_plan(vec![step(
+            "s1",
+            "Run the tests",
+            "cargo test. Verify all pass.",
+            StepStatus::Todo,
+        )]);
+        let r = build_plan_reminder(PermissionMode::Auto, Some(&plan_todo)).unwrap();
+        assert!(
+            r.contains("Run the verification"),
+            "verify-step missing for todo: {r}"
+        );
+    }
+
+    #[test]
+    fn reminder_plan_mode_with_plan_tells_model_to_wait() {
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![
+            step("s1", "A", "", StepStatus::Todo),
+            step("s2", "B", "", StepStatus::Todo),
+        ]);
+        let r = build_plan_reminder(PermissionMode::Plan, Some(&plan)).unwrap();
+        assert!(r.contains("awaiting user approval"));
+        assert!(r.contains("2 steps"));
+    }
+
+    #[test]
+    fn reminder_plan_mode_with_all_done_plan_falls_back_to_explore_reminder() {
+        // M6.9 (Bug C1): an all-done plan still in the slot when the
+        // user re-enters plan mode should NOT trigger "awaiting user
+        // approval" — that plan finished. The (Plan, all-done) case
+        // recurses to (Plan, None) and returns the
+        // explore-then-SubmitPlan reminder so the model treats it as
+        // a fresh planning phase.
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![
+            step("s1", "Build", "", StepStatus::Done),
+            step("s2", "Test", "", StepStatus::Done),
+        ]);
+        let r = build_plan_reminder(PermissionMode::Plan, Some(&plan)).unwrap();
+        assert!(
+            !r.contains("awaiting user approval"),
+            "all-done plan must NOT trigger awaiting-approval reminder: {r}",
+        );
+        assert!(
+            r.contains("Plan mode is active"),
+            "must fall through to the (Plan, None) explore reminder: {r}",
+        );
+        assert!(
+            r.contains("SubmitPlan"),
+            "must invite the model to submit a fresh plan: {r}",
+        );
+    }
+
+    #[test]
+    fn reminder_no_plan_no_mode_returns_none() {
+        assert!(build_plan_reminder(PermissionMode::Auto, None).is_none());
+        assert!(build_plan_reminder(PermissionMode::Ask, None).is_none());
+    }
+
+    // ── M6.1 per-step continuation prompt shape tests ──────────────────
+
+    #[test]
+    fn step_continuation_prompt_first_attempt_is_terse_and_directive() {
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![
+            step("s1", "Scaffold project", "", StepStatus::Done),
+            step(
+                "s2",
+                "Install deps",
+                "Run `npm install`. Verify: lockfile exists.",
+                StepStatus::Todo,
+            ),
+            step("s3", "Build", "", StepStatus::Todo),
+        ]);
+        let p = build_step_continuation_prompt(&plan, &plan.steps[1], 1);
+
+        // Names the step position and title so the model knows which
+        // step is in scope.
+        assert!(p.contains("step 2/3"), "missing position/total: {p}");
+        assert!(p.contains("Install deps"), "missing step title: {p}");
+
+        // Includes the in_progress transition for a Todo step.
+        assert!(
+            p.contains("UpdatePlanStep(\"s2\", \"in_progress\")"),
+            "missing begin transition: {p}",
+        );
+        // Mentions the done/failed terminal transitions.
+        assert!(
+            p.contains("\"done\"") && p.contains("\"failed\""),
+            "missing terminal transitions: {p}",
+        );
+
+        // First-attempt prompt should NOT include the escalation
+        // language about retry budgets — that's reserved for higher
+        // attempt counts.
+        assert!(
+            !p.contains("attempts per step"),
+            "first-attempt prompt should not warn about retry budget: {p}",
+        );
+    }
+
+    #[test]
+    fn step_continuation_prompt_in_progress_step_skips_begin_transition() {
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![
+            step("s1", "Already running", "do work", StepStatus::InProgress),
+            step("s2", "Next", "", StepStatus::Todo),
+        ]);
+        let p = build_step_continuation_prompt(&plan, &plan.steps[0], 1);
+
+        // Don't ask the model to mark in_progress when it's already
+        // in_progress — wastes a tool call and confuses the gate.
+        assert!(
+            !p.contains("\"in_progress\""),
+            "in_progress step should not be told to begin again: {p}",
+        );
+        assert!(
+            p.contains("already on this step"),
+            "missing in-progress hint: {p}"
+        );
+        // Still mentions terminal transitions.
+        assert!(p.contains("\"done\""));
+        assert!(p.contains("\"failed\""));
+    }
+
+    #[test]
+    fn step_continuation_prompt_escalates_on_repeated_attempts() {
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![step(
+            "s1",
+            "Build release",
+            "cargo build --release",
+            StepStatus::InProgress,
+        )]);
+        let p2 = build_step_continuation_prompt(&plan, &plan.steps[0], 2);
+
+        // Escalation must mention the attempt number and the bounded
+        // retry budget — that's the whole reason this prompt exists.
+        assert!(p2.contains("attempt 2"), "missing attempt number: {p2}");
+        assert!(
+            p2.contains("attempts per step"),
+            "missing budget warning: {p2}"
+        );
+        assert!(
+            p2.contains("Failed automatically"),
+            "must tell model the driver will force-Failed: {p2}",
+        );
+        // Retry / Skip / Abort path is the user's recovery contract;
+        // the model needs to know its "failed with note" call is the
+        // honest path forward.
+        assert!(
+            p2.contains("retry / skip / abort") || p2.contains("Retry") || p2.contains("user"),
+            "must reference user recovery path: {p2}",
+        );
+    }
+
+    // ── M6.3 step-output surfacing ─────────────────────────────────────
+
+    #[test]
+    fn step_continuation_prompt_surfaces_prior_step_outputs() {
+        // A 3-step plan where steps 1 and 2 are Done with outputs;
+        // step 3 is the focus. Both prior outputs must appear in the
+        // prompt so the model can read them without relying on chat
+        // history (which gets compacted in M6.2).
+        use crate::tools::plan_state::StepStatus;
+        let mut s1 = step("s1", "Generate user id", "", StepStatus::Done);
+        s1.output = Some("user-id: abc-123".into());
+        let mut s2 = step("s2", "Hash password", "", StepStatus::Done);
+        s2.output = Some("hash: $argon2id$xyz".into());
+        let s3 = step("s3", "Persist to db", "", StepStatus::Todo);
+        let plan = make_plan(vec![s1, s2, s3]);
+
+        let p = build_step_continuation_prompt(&plan, &plan.steps[2], 1);
+
+        assert!(
+            p.contains("Outputs from prior steps"),
+            "section header missing: {p}"
+        );
+        assert!(p.contains("user-id: abc-123"), "step 1 output missing: {p}");
+        assert!(
+            p.contains("hash: $argon2id$xyz"),
+            "step 2 output missing: {p}"
+        );
+    }
+
+    #[test]
+    fn step_continuation_prompt_omits_outputs_section_when_none() {
+        // No prior outputs → no section header in the prompt (clean
+        // signal-to-noise: don't surface an empty rubric).
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![
+            step("s1", "Done", "", StepStatus::Done), // no output set
+            step("s2", "Focus", "", StepStatus::Todo),
+        ]);
+        let p = build_step_continuation_prompt(&plan, &plan.steps[1], 1);
+        assert!(
+            !p.contains("Outputs from prior steps"),
+            "section should be elided when empty: {p}",
+        );
+    }
+
+    #[test]
+    fn step_continuation_prompt_excludes_failed_step_outputs() {
+        // A Failed step's `output` (if any was set before it failed)
+        // is NOT a stable cross-step contract — surface only Done
+        // step outputs.
+        use crate::tools::plan_state::StepStatus;
+        let mut s1 = step("s1", "Tried something", "", StepStatus::Failed);
+        s1.output = Some("partial-result-DO-NOT-USE".into());
+        let s2 = step("s2", "Focus", "", StepStatus::Todo);
+        let plan = make_plan(vec![s1, s2]);
+
+        let p = build_step_continuation_prompt(&plan, &plan.steps[1], 1);
+        assert!(
+            !p.contains("partial-result-DO-NOT-USE"),
+            "failed step output must not leak into prompt: {p}",
+        );
+    }
+
+    #[test]
+    fn execution_reminder_surfaces_prior_step_outputs() {
+        // Same M6.3 surfacing in the system reminder that the agent
+        // injects every turn — keeps prior outputs visible even when
+        // the user prompt slot is occupied by the current turn's
+        // dialog.
+        use crate::tools::plan_state::StepStatus;
+        let mut s1 = step("s1", "Build artifact", "", StepStatus::Done);
+        s1.output = Some("path: target/release/foo".into());
+        let s2 = step("s2", "Run tests", "", StepStatus::InProgress);
+        let plan = make_plan(vec![s1, s2]);
+
+        let r = build_plan_reminder(PermissionMode::Auto, Some(&plan)).unwrap();
+        assert!(
+            r.contains("Outputs from prior steps"),
+            "system reminder must surface outputs: {r}",
+        );
+        assert!(
+            r.contains("path: target/release/foo"),
+            "step 1 output missing in reminder: {r}",
+        );
+    }
+
+    // ── M6.6 todos.md reminder tests ───────────────────────────────────
+
+    /// Helper: run a closure with cwd switched into a temp dir so
+    /// build_todos_reminder reads from the test's controlled location.
+    /// Restores cwd afterwards. Tests are run sequentially within
+    /// agent::tests so cwd contention is bounded; if this becomes a
+    /// hot spot, we'd add a Mutex like plan_state's test_lock.
+    fn with_cwd<R>(dir: &std::path::Path, f: impl FnOnce() -> R) -> R {
+        // Synchronise cwd-touching tests in this module so they don't
+        // race when cargo runs them in parallel — `set_current_dir`
+        // is process-global and the previous tests in the file don't
+        // touch cwd, so a Mutex inside agent::tests is enough.
+        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = CWD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::current_dir().expect("cwd readable");
+        std::env::set_current_dir(dir).expect("cwd to test dir");
+        let out = f();
+        std::env::set_current_dir(prior).expect("cwd restore");
+        out
+    }
+
+    #[test]
+    fn todos_reminder_returns_none_when_file_missing() {
+        let tmp = tempdir().unwrap();
+        let r = with_cwd(tmp.path(), build_todos_reminder);
+        assert!(r.is_none(), "no .thclaws/todos.md → no reminder");
+    }
+
+    #[test]
+    fn todos_reminder_returns_none_when_file_empty() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".thclaws")).unwrap();
+        std::fs::write(tmp.path().join(".thclaws/todos.md"), "").unwrap();
+        let r = with_cwd(tmp.path(), build_todos_reminder);
+        assert!(r.is_none(), "empty file → no reminder");
+    }
+
+    #[test]
+    fn todos_reminder_returns_none_when_all_completed() {
+        // A list where everything is checked off shouldn't nag the
+        // model — there's nothing to resume.
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".thclaws")).unwrap();
+        std::fs::write(
+            tmp.path().join(".thclaws/todos.md"),
+            "# Todos\n\n- [x] Done thing (id: 1)\n- [x] Other done thing (id: 2)\n",
+        )
+        .unwrap();
+        let r = with_cwd(tmp.path(), build_todos_reminder);
+        assert!(r.is_none(), "all-completed list → no reminder");
+    }
+
+    #[test]
+    fn todos_reminder_surfaces_pending_items() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".thclaws")).unwrap();
+        std::fs::write(
+            tmp.path().join(".thclaws/todos.md"),
+            "# Todos\n\n- [ ] Add tests (id: 1)\n- [-] Fix bug (id: 2)\n- [x] Old task (id: 3)\n",
+        )
+        .unwrap();
+        let r = with_cwd(tmp.path(), build_todos_reminder).expect("reminder fires");
+        // Header naming the file path so the model sees what the source is.
+        assert!(r.contains(".thclaws/todos.md"), "missing file path: {r}");
+        // Anti-ask framing — the rule that gpt-4.1 violated in the
+        // M6.6 manual test.
+        assert!(
+            r.contains("before asking the user")
+                || r.contains("before asking what")
+                || r.contains("Don't ask"),
+            "missing anti-ask framing: {r}",
+        );
+        // Surfaces the actual list contents verbatim.
+        assert!(
+            r.contains("Add tests"),
+            "pending item missing in reminder: {r}"
+        );
+        assert!(
+            r.contains("Fix bug"),
+            "in_progress item missing in reminder: {r}"
+        );
+        // Tells the model how to act — flip via TodoWrite.
+        assert!(
+            r.contains("TodoWrite"),
+            "must point at TodoWrite for the action: {r}"
+        );
+        assert!(
+            r.contains("in_progress") || r.contains("resume"),
+            "must mention resume/in_progress flow: {r}",
+        );
+    }
+
+    #[test]
+    fn todos_reminder_fires_when_only_one_in_progress_item() {
+        // Edge case: a single `[-]` (in_progress) item with everything
+        // else `[x]` should still fire — the user paused mid-task.
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".thclaws")).unwrap();
+        std::fs::write(
+            tmp.path().join(".thclaws/todos.md"),
+            "# Todos\n\n- [x] Done (id: 1)\n- [-] Halfway (id: 2)\n",
+        )
+        .unwrap();
+        let r = with_cwd(tmp.path(), build_todos_reminder).expect("must fire");
+        assert!(r.contains("Halfway"), "in_progress item must surface: {r}");
+    }
+
+    #[test]
+    fn step_continuation_prompt_no_op_for_done_or_failed_steps() {
+        // The driver shouldn't be calling this for Done/Failed steps,
+        // but be defensive — the prompt must not pretend to drive the
+        // model on a step it shouldn't touch.
+        use crate::tools::plan_state::StepStatus;
+        let plan = make_plan(vec![
+            step("s1", "Done step", "", StepStatus::Done),
+            step("s2", "Failed step", "", StepStatus::Failed),
+        ]);
+        let pd = build_step_continuation_prompt(&plan, &plan.steps[0], 1);
+        let pf = build_step_continuation_prompt(&plan, &plan.steps[1], 1);
+
+        // Neither prompt should issue a UpdatePlanStep("in_progress")
+        // call — Done is terminal, Failed is awaiting user action.
+        assert!(
+            !pd.contains("\"in_progress\""),
+            "Done step should not be re-started: {pd}"
+        );
+        assert!(
+            !pf.contains("\"in_progress\""),
+            "Failed step requires explicit user retry: {pf}"
+        );
+    }
 
     /// A provider impl that plays back pre-canned event sequences, one per
     /// call to `stream()`. Panics (via error) if the test runs out of scripts.

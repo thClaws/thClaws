@@ -561,25 +561,33 @@ pub async fn dispatch(
         // ─── runtime knobs ──────────────────────────────────────────
         SlashCommand::Permissions(mode) => {
             if mode.trim().is_empty() {
-                let cur = match state.agent.permission_mode {
+                let cur = match crate::permissions::current_mode() {
                     crate::permissions::PermissionMode::Auto => "auto",
                     crate::permissions::PermissionMode::Ask => "ask",
+                    crate::permissions::PermissionMode::Plan => "plan",
                 };
                 emit(
                     events_tx,
                     format!(
-                        "permissions: {cur} (auto = never prompt, ask = prompt on mutating tools)"
+                        "permissions: {cur} (auto = never prompt, ask = prompt on mutating tools, \
+                         plan = read-only exploration; mutating tools blocked)"
                     ),
                 );
             } else {
                 let persisted = match mode.as_str() {
                     "auto" | "yolo" => {
                         state.agent.permission_mode = crate::permissions::PermissionMode::Auto;
+                        crate::permissions::set_current_mode_and_broadcast(
+                            crate::permissions::PermissionMode::Auto,
+                        );
                         state.config.permissions = "auto".into();
                         Some("auto")
                     }
                     "ask" | "default" => {
                         state.agent.permission_mode = crate::permissions::PermissionMode::Ask;
+                        crate::permissions::set_current_mode_and_broadcast(
+                            crate::permissions::PermissionMode::Ask,
+                        );
                         state.config.permissions = "ask".into();
                         Some("ask")
                     }
@@ -602,6 +610,54 @@ pub async fn dispatch(
                         "permissions → ask"
                     };
                     emit(events_tx, format!("{label} ({save_note})"));
+                }
+            }
+        }
+        SlashCommand::Plan(arg) => {
+            // /plan        → enter plan mode (mutating tools blocked)
+            // /plan exit   → restore the prior mode (clears any plan)
+            // /plan cancel → alias for /plan exit
+            // /plan status → just print current mode + plan summary
+            let cur = crate::permissions::current_mode();
+            let arg = arg.trim().to_lowercase();
+            match arg.as_str() {
+                "" | "on" | "enter" | "start" => {
+                    if matches!(cur, crate::permissions::PermissionMode::Plan) {
+                        emit(events_tx, "Already in plan mode.".into());
+                    } else {
+                        crate::permissions::stash_pre_plan_mode(cur);
+                        crate::permissions::set_current_mode_and_broadcast(
+                            crate::permissions::PermissionMode::Plan,
+                        );
+                        emit(
+                            events_tx,
+                            "Plan mode active. Mutating tools are blocked — \
+                             use Read / Grep / Glob / Ls to explore. When ready, \
+                             ask the model to call SubmitPlan."
+                                .into(),
+                        );
+                    }
+                }
+                "exit" | "off" | "cancel" | "stop" | "abort" => {
+                    let restored = crate::permissions::take_pre_plan_mode()
+                        .unwrap_or(crate::permissions::PermissionMode::Ask);
+                    crate::permissions::set_current_mode_and_broadcast(restored);
+                    crate::tools::plan_state::clear();
+                    emit(
+                        events_tx,
+                        format!("Plan mode cleared. Permission mode restored to {restored:?}."),
+                    );
+                }
+                "status" | "show" => {
+                    let plan = crate::tools::plan_state::get();
+                    let plan_summary = match plan {
+                        Some(p) => format!(" — active plan {} ({} step(s))", p.id, p.steps.len()),
+                        None => String::new(),
+                    };
+                    emit(events_tx, format!("permission mode: {cur:?}{plan_summary}"));
+                }
+                _ => {
+                    emit(events_tx, "usage: /plan [enter | exit | status]".into());
                 }
             }
         }
@@ -920,10 +976,16 @@ pub async fn dispatch(
                 }
             }
             let mp = crate::marketplace::load();
+            // M6.11 (H2): include cache freshness in the header so
+            // users see how old their snapshot is at a glance.
+            let age_suffix = match crate::marketplace::cache_age_label() {
+                Some(label) => format!(", {label}"),
+                None => String::new(),
+            };
             let mut out = format!(
-                "marketplace ({}, {} skill(s))\n",
+                "marketplace ({}, {} skill(s){age_suffix})\n",
                 mp.source,
-                mp.skills.len()
+                mp.skills.len(),
             );
             let mut by_cat: std::collections::BTreeMap<
                 String,
@@ -940,15 +1002,8 @@ pub async fn dispatch(
             for (cat, skills) in by_cat {
                 out.push_str(&format!("── {cat} ──\n"));
                 for s in skills {
-                    let tier_tag = match s.license_tier.as_str() {
-                        "linked-only" => " [linked-only]",
-                        _ => "",
-                    };
-                    out.push_str(&format!(
-                        "  {:<24}{tier_tag} — {}\n",
-                        s.name,
-                        s.short_line()
-                    ));
+                    let tags = crate::marketplace::entry_tags(s);
+                    out.push_str(&format!("  {:<24}{tags} — {}\n", s.name, s.short_line()));
                 }
             }
             out.push_str("install with: /skill install <name>   |   detail: /skill info <name>");
@@ -1016,10 +1071,14 @@ pub async fn dispatch(
                 }
             }
             let mp = crate::marketplace::load();
+            let age_suffix = match crate::marketplace::cache_age_label() {
+                Some(label) => format!(", {label}"),
+                None => String::new(),
+            };
             let mut out = format!(
-                "MCP marketplace ({}, {} server(s))\n",
+                "MCP marketplace ({}, {} server(s){age_suffix})\n",
                 mp.source,
-                mp.mcp_servers.len()
+                mp.mcp_servers.len(),
             );
             let mut by_cat: std::collections::BTreeMap<
                 String,
@@ -1041,7 +1100,12 @@ pub async fn dispatch(
                     } else {
                         ""
                     };
-                    out.push_str(&format!("  {:<24}{tport} — {}\n", s.name, s.short_line()));
+                    let tags = crate::marketplace::entry_tags(s);
+                    out.push_str(&format!(
+                        "  {:<24}{tport}{tags} — {}\n",
+                        s.name,
+                        s.short_line()
+                    ));
                 }
             }
             out.push_str("install with: /mcp install <name>   |   detail: /mcp info <name>");
@@ -1122,10 +1186,14 @@ pub async fn dispatch(
                 }
             }
             let mp = crate::marketplace::load();
+            let age_suffix = match crate::marketplace::cache_age_label() {
+                Some(label) => format!(", {label}"),
+                None => String::new(),
+            };
             let mut out = format!(
-                "plugin marketplace ({}, {} plugin(s))\n",
+                "plugin marketplace ({}, {} plugin(s){age_suffix})\n",
                 mp.source,
-                mp.plugins.len()
+                mp.plugins.len(),
             );
             let mut by_cat: std::collections::BTreeMap<
                 String,
@@ -1142,7 +1210,8 @@ pub async fn dispatch(
             for (cat, plugins) in by_cat {
                 out.push_str(&format!("── {cat} ──\n"));
                 for p in plugins {
-                    out.push_str(&format!("  {:<24} — {}\n", p.name, p.short_line()));
+                    let tags = crate::marketplace::entry_tags(p);
+                    out.push_str(&format!("  {:<24}{tags} — {}\n", p.name, p.short_line()));
                 }
             }
             out.push_str("install with: /plugin install <name>   |   detail: /plugin info <name>");

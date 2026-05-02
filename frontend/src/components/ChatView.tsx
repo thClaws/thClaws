@@ -22,6 +22,16 @@ type ChatMessage = {
   /// when the matching `chat_tool_result` arrives. Drives the leading
   /// glyph (▸ vs ✓) without changing the bubble's identity.
   toolDone?: boolean;
+  /// Unmangled tool name (e.g. "TodoWrite", "Bash") for tool-specific
+  /// rendering. `toolName` above is the formatted label that includes
+  /// arguments; this is the bare tool identifier used to route to a
+  /// custom render path.
+  toolKind?: string;
+  /// Raw input the model passed to the tool. Stashed for tools whose
+  /// input is itself the user-visible payload — currently TodoWrite,
+  /// where the `todos` array drives a checklist card. Other tools
+  /// ignore this.
+  toolInput?: unknown;
   /// MCP-Apps widget the bubble should embed inline below the tool
   /// label (e.g. pinn.ai's image viewer). Populated from the
   /// `ui_resource` field on `chat_tool_result` when the upstream MCP
@@ -31,6 +41,15 @@ type ChatMessage = {
     html: string;
     mime?: string;
   };
+};
+
+/// Shape of a TodoWrite tool input.todos entry. Mirrors the Rust-side
+/// `TodoItem` (id + content + status). Used to render the inline
+/// checklist card in chat when the model calls TodoWrite.
+type TodoItemInput = {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed";
 };
 
 /// One pasted/dropped image waiting to be sent with the next chat
@@ -103,7 +122,7 @@ export function ChatView({ active, modalOpen }: Props) {
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const copiedTimerRef = useRef<number | null>(null);
   const errorTimerRef = useRef<number | null>(null);
   const { resolved: themeMode } = useTheme();
@@ -245,12 +264,20 @@ export function ChatView({ active, modalOpen }: Props) {
           // conversation focused on user/assistant exchange. Users
           // who want raw tool stdout/stderr switch to the Terminal
           // tab, which renders the same shared session unfiltered.
+          //
+          // Tools whose input is itself the user-visible payload
+          // (e.g. TodoWrite — the todos array IS the progress
+          // display) get a custom card render below. The toolKind +
+          // toolInput fields carry the data; the renderer keys on
+          // toolKind === "TodoWrite".
           setMessages((prev) => [
             ...prev,
             {
               role: "tool",
               content: msg.name as string,
               toolName: msg.name as string,
+              toolKind: typeof msg.tool_name === "string" ? msg.tool_name : undefined,
+              toolInput: msg.input,
               toolDone: false,
             },
           ]);
@@ -460,52 +487,99 @@ export function ChatView({ active, modalOpen }: Props) {
     inputRef.current?.focus();
   };
 
-  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Prevent form submit while IME is composing (Thai, Japanese, Chinese, etc.).
     // Enter during composition should commit the character, not send the message.
     if (e.key === "Enter" && e.nativeEvent.isComposing) {
-      e.preventDefault();
       return;
     }
-    if (!slashOpen || slashFiltered.length === 0) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setSlashIndex((i) => (i + 1) % slashFiltered.length);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setSlashIndex(
-        (i) => (i - 1 + slashFiltered.length) % slashFiltered.length,
-      );
-    } else if (e.key === "Tab") {
-      e.preventDefault();
-      const cmd = slashFiltered[slashIndex];
-      if (cmd) acceptSlashCommand(cmd);
-    } else if (e.key === "Enter") {
-      // Only intercept Enter when the user is still composing the
-      // command name itself ("/cl" → fill in "/clear"). Once they've
-      // typed past the name into args ("/model gpt-5"), Enter should
-      // submit normally so they don't have to dismiss the popup first.
-      const composingName = !input.slice(1).includes(" ");
-      if (composingName) {
+    // Slash-command popup navigation runs ahead of the textarea-newline
+    // handling below so ArrowUp/Down still walk the menu.
+    if (slashOpen && slashFiltered.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) => (i + 1) % slashFiltered.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex(
+          (i) => (i - 1 + slashFiltered.length) % slashFiltered.length,
+        );
+        return;
+      }
+      if (e.key === "Tab") {
         e.preventDefault();
         const cmd = slashFiltered[slashIndex];
         if (cmd) acceptSlashCommand(cmd);
+        return;
       }
-    } else if (e.key === "Escape") {
+      if (e.key === "Enter" && !e.shiftKey) {
+        // Only intercept Enter when the user is still composing the
+        // command name itself ("/cl" → fill in "/clear"). Once they've
+        // typed past the name into args ("/model gpt-5"), Enter should
+        // submit normally so they don't have to dismiss the popup first.
+        const composingName = !input.slice(1).includes(" ");
+        if (composingName) {
+          e.preventDefault();
+          const cmd = slashFiltered[slashIndex];
+          if (cmd) acceptSlashCommand(cmd);
+          return;
+        }
+      }
+    }
+    // Multi-line textarea behaviour:
+    //   Enter           → submit
+    //   Shift+Enter     → newline
+    // The form's onSubmit picks up plain Enter via this synthetic
+    // submit; Shift+Enter falls through to the textarea's default
+    // newline insertion.
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      setInput("");
+      e.currentTarget.form?.requestSubmit();
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      // Esc while the agent is streaming → cancel the in-flight turn.
+      // Esc while idle → clear the input (the original behaviour, kept
+      // because clearing a long composed message is a real use case).
+      // Pressing Esc twice in fast succession during streaming will
+      // cancel and then clear, which matches user intent.
+      if (streaming) {
+        send({ type: "shell_cancel" });
+      } else {
+        setInput("");
+      }
     }
   };
+
+  // Auto-grow the textarea up to ~6 lines, then let it scroll. Resets
+  // to one row when the input is cleared (after Send / on attachment
+  // submit) so the composer doesn't stay tall after a multi-line reply.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const lineHeight = 20; // matches text-sm + py-2 padding
+    const maxRows = 6;
+    const padding = 16; // py-2 on top + bottom
+    const maxHeight = lineHeight * maxRows + padding;
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [input]);
 
   const awaitingUserAnswer = askPrompt !== null;
   const inputDisabled = streaming && !awaitingUserAnswer;
   const submitDisabled = awaitingUserAnswer
     ? !input.trim()
     : streaming || (!input.trim() && attachments.length === 0);
+  // The full question now renders as a markdown card above the input
+  // (see `<AskCard>` below) — the placeholder is just a short hint
+  // that points at the card. Truncating multi-line markdown into a
+  // single-line placeholder was unreadable.
   const inputPlaceholder = awaitingUserAnswer
-    ? askPrompt.question
-      ? `Answer: ${askPrompt.question}`
-      : "Answer the assistant..."
+    ? "Type your reply…"
     : streaming
       ? "Waiting for response..."
       : attachments.length > 0
@@ -546,10 +620,21 @@ export function ChatView({ active, modalOpen }: Props) {
             // gets meaningful width. Plain tools keep the thin
             // one-liner indicator.
             const widget = msg.uiResource;
+            // TodoWrite gets a custom card showing the rendered list
+            // — the user wants to see plan-style progression even
+            // though TodoWrite is the casual scratchpad. Each call
+            // shows the snapshot at that point; successive cards let
+            // the user see the diff over time.
+            const todos = (() => {
+              if (msg.toolKind !== "TodoWrite") return null;
+              const inp = msg.toolInput as { todos?: unknown } | undefined;
+              if (!inp || !Array.isArray(inp.todos)) return null;
+              return inp.todos as TodoItemInput[];
+            })();
             return (
               <div key={i} className="flex justify-start">
                 <div
-                  className={`group flex max-w-[80%] flex-col gap-1 ${widget ? "w-[80%]" : ""}`}
+                  className={`group flex max-w-[80%] flex-col gap-1 ${widget || todos ? "w-[80%]" : ""}`}
                   style={{
                     color: "var(--text-secondary)",
                     fontFamily:
@@ -568,6 +653,68 @@ export function ChatView({ active, modalOpen }: Props) {
                       onCopy={() => copyMessage(msg, i)}
                     />
                   </div>
+                  {todos && todos.length > 0 && (
+                    <div
+                      className="mt-1 rounded border px-2 py-1.5"
+                      style={{
+                        borderColor: "var(--border, #2a2a2a)",
+                        background: "var(--surface-1, rgba(255,255,255,0.03))",
+                        fontFamily:
+                          "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+                      }}
+                    >
+                      {todos.map((t) => {
+                        const glyphForStatus =
+                          t.status === "completed"
+                            ? "✓"
+                            : t.status === "in_progress"
+                              ? "◉"
+                              : "☐";
+                        const colorForStatus =
+                          t.status === "completed"
+                            ? "var(--success, #6cc070)"
+                            : t.status === "in_progress"
+                              ? "var(--warning, #d4a657)"
+                              : "var(--text-secondary)";
+                        return (
+                          <div
+                            key={t.id}
+                            className="flex items-baseline gap-2"
+                            style={{
+                              fontSize: "11px",
+                              lineHeight: "1.5",
+                            }}
+                          >
+                            <span
+                              style={{
+                                color: colorForStatus,
+                                fontFamily:
+                                  "Menlo, Monaco, 'Courier New', monospace",
+                                fontSize: "11px",
+                              }}
+                            >
+                              {glyphForStatus}
+                            </span>
+                            <span
+                              style={{
+                                textDecoration:
+                                  t.status === "completed"
+                                    ? "line-through"
+                                    : "none",
+                                color:
+                                  t.status === "pending"
+                                    ? "var(--text-secondary)"
+                                    : "var(--text-primary)",
+                                wordBreak: "break-word",
+                              }}
+                            >
+                              {t.content}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   {widget && msg.toolDone && (
                     <McpAppIframe
                       uri={widget.uri}
@@ -773,35 +920,94 @@ export function ChatView({ active, modalOpen }: Props) {
             onSelect={acceptSlashCommand}
           />
         )}
-        <div className="flex gap-2">
-          <input
+        {askPrompt && askPrompt.question && (
+          <div
+            className="rounded p-3 max-h-64 overflow-y-auto"
+            style={{
+              background: "var(--bg-tertiary)",
+              border: "1px solid var(--accent)",
+            }}
+          >
+            <div
+              className="text-[10px] uppercase tracking-wider mb-1.5 flex items-center gap-1.5"
+              style={{ color: "var(--accent)" }}
+            >
+              <span>Assistant is asking</span>
+            </div>
+            <div className="markdown-body text-sm">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                rehypePlugins={[rehypeHighlight]}
+              >
+                {askPrompt.question}
+              </ReactMarkdown>
+            </div>
+          </div>
+        )}
+        <div className="flex gap-2 items-end">
+          <textarea
             ref={inputRef}
-            type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleInputKeyDown}
             onPaste={onPaste}
             placeholder={inputPlaceholder}
             disabled={inputDisabled}
-            className="flex-1 px-3 py-2 rounded text-sm outline-none"
+            rows={1}
+            className="flex-1 px-3 py-2 rounded text-sm outline-none resize-none"
             style={{
               background: "var(--bg-tertiary)",
               color: "var(--text-primary)",
               border: "1px solid var(--border)",
+              lineHeight: "20px",
+              minHeight: "36px",
+              fontFamily: "inherit",
             }}
           />
-          <button
-            type="submit"
-            disabled={submitDisabled}
-            className="px-4 py-2 rounded text-sm font-medium transition-colors"
-            style={{
-              background: submitDisabled ? "var(--bg-tertiary)" : "var(--accent)",
-              color: submitDisabled ? "var(--text-secondary)" : "var(--accent-fg)",
-              cursor: submitDisabled ? "not-allowed" : "pointer",
-            }}
-          >
-            {awaitingUserAnswer ? "Reply" : "Send"}
-          </button>
+          {streaming && !awaitingUserAnswer ? (
+            // While the agent is generating, the Send button is
+            // disabled anyway — repurpose the slot for a Stop button
+            // that fires shell_cancel. Mirrors the Cmd+. / Esc
+            // hotkeys with a discoverable affordance for users who
+            // don't know the keyboard shortcut yet.
+            <button
+              type="button"
+              onClick={() => send({ type: "shell_cancel" })}
+              className="px-4 py-2 rounded text-sm font-medium transition-colors inline-flex items-center gap-1.5"
+              style={{
+                background: "var(--danger, #c0392b)",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+              title="Stop the agent (Esc / Cmd+. / Ctrl+.)"
+              aria-label="Stop"
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  display: "inline-block",
+                  width: 10,
+                  height: 10,
+                  background: "#fff",
+                  borderRadius: 1,
+                }}
+              />
+              Stop
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={submitDisabled}
+              className="px-4 py-2 rounded text-sm font-medium transition-colors"
+              style={{
+                background: submitDisabled ? "var(--bg-tertiary)" : "var(--accent)",
+                color: submitDisabled ? "var(--text-secondary)" : "var(--accent-fg)",
+                cursor: submitDisabled ? "not-allowed" : "pointer",
+              }}
+            >
+              {awaitingUserAnswer ? "Reply" : "Send"}
+            </button>
+          )}
         </div>
       </form>
     </div>

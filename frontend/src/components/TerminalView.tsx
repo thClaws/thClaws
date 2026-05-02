@@ -80,6 +80,20 @@ export function TerminalView({ active, modalOpen }: Props) {
   const slashCommandsRef = useRef<SlashCommandInfo[]>([]);
   const [slashView, setSlashView] = useState<SlashView>(SLASH_VIEW_CLOSED);
   const slashViewRef = useRef(slashView);
+  // Mirror of the agent's streaming state, used to render the Stop
+  // button overlay only while a turn is in flight. Tracked the same
+  // way ChatView does (true on chat_text_delta / chat_tool_call,
+  // false on chat_done) — backend events arrive in both views since
+  // they share the same SharedSession.
+  const [streaming, setStreaming] = useState(false);
+  // Bridge for the xterm onData closure (which is set up in the mount
+  // useEffect and can't see React state updates). Used by the Enter
+  // handler to suppress the misleading "fresh prompt" rendering while
+  // a turn is in flight.
+  const streamingRef = useRef(false);
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
   useEffect(() => { slashViewRef.current = slashView; }, [slashView]);
   // Bridge React clicks back into the xterm closure where lineBuffer
   // lives. Set inside the mount effect; called from the popup's onSelect.
@@ -120,6 +134,13 @@ export function TerminalView({ active, modalOpen }: Props) {
     // what they're typing while the agent is silent (the shared session
     // doesn't echo back — it just executes lines).
     let lineBuffer = "";
+    // When the model invokes AskUserQuestion, the gui forwarder posts
+    // an `ask_user_question` IPC envelope with `{id, question}`. We
+    // capture the id here so the next submission goes back as
+    // `ask_user_response` (resolves the agent's blocking oneshot)
+    // instead of being treated as a new chat prompt. Cleared on
+    // submit, on `chat_done`, on session swap.
+    let pendingAskId: number | null = null;
     // Index into `lineBuffer` where the next character would be
     // inserted. 0 = before first char, lineBuffer.length = after last
     // char (the standard "end of line" position). Left/Right arrows,
@@ -286,11 +307,44 @@ export function TerminalView({ active, modalOpen }: Props) {
         }
       }
 
-      // Plain Ctrl+C:
-      //  - non-empty input line → clear the line (same as bash)
-      //  - empty line → request abort of the in-flight turn via the
-      //    shell_cancel IPC (the equivalent of the SIGINT we used to
-      //    send to the --cli PTY child)
+      // Shift+Enter inserts a literal newline into the input buffer
+      // instead of submitting. Same UX as the chat tab's textarea —
+      // lets the user compose multi-line prompts (and especially
+      // multi-line answers to AskUserQuestion) without resorting to
+      // paste tricks. xterm's onData would otherwise see this as a
+      // bare `\r` indistinguishable from plain Enter, so we have to
+      // catch it here at the keyboard-event layer and short-circuit.
+      if (
+        e.type === "keydown" &&
+        e.key === "Enter" &&
+        e.shiftKey &&
+        !e.metaKey && !e.ctrlKey && !e.altKey
+      ) {
+        lineBuffer += "\n";
+        cursorPos = lineBuffer.length;
+        // `\r\n  ` = move to next line, indent two spaces so the
+        // continuation visually aligns past the `❯ ` prompt glyph.
+        // (We don't try to track caret movement across multi-line
+        // buffers — readline-style multi-line editing in xterm is a
+        // bigger project. For now: append-only continuation, plain
+        // Enter submits the whole buffer.)
+        term.write("\r\n  ");
+        return false;
+      }
+
+      // Plain Ctrl+C: ALWAYS request abort of the in-flight turn via
+      // the shell_cancel IPC. If the line buffer has content, also
+      // clear it so input state matches "cancelled" (don't leave the
+      // user staring at half-typed text after they aborted).
+      //
+      // Earlier versions only fired shell_cancel when the line was
+      // empty (bash convention: Ctrl+C with text just clears the
+      // line). That conflicted with the agent-cancel intent — users
+      // pressing Ctrl+C while a turn was running and they had typed
+      // something would only see the line clear, not the agent stop.
+      // For an agent terminal, "stop the work" wins over "shell-style
+      // line edit." Cancel is idempotent on the backend (no-op when
+      // nothing is running) so always firing is safe.
       if (
         e.type === "keydown" &&
         e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
@@ -302,9 +356,8 @@ export function TerminalView({ active, modalOpen }: Props) {
           cursorPos = 0;
           writePrompt(); // also flips promptShowing back on
           recomputeSlash();
-        } else {
-          send({ type: "shell_cancel" });
         }
+        send({ type: "shell_cancel" });
         return false;
       }
 
@@ -497,9 +550,25 @@ export function TerminalView({ active, modalOpen }: Props) {
           // the whole paste in one block.
           term.write("\x1b[2K\r");
           promptShowing = false;
-          pushHistory(trimmed);
-          send({ type: "shell_input", text: trimmed });
-        } else {
+          if (pendingAskId !== null) {
+            // Multi-line paste while answering an AskUserQuestion —
+            // route as the answer instead of a new prompt.
+            send({ type: "ask_user_response", id: pendingAskId, text: trimmed });
+            pendingAskId = null;
+          } else {
+            pushHistory(trimmed);
+            send({ type: "shell_input", text: trimmed });
+            // Mid-turn paste — see the keystroke Enter branch for why
+            // we surface a queued indicator.
+            if (streamingRef.current) {
+              term.write(
+                "\x1b[2m[queued — will run after current turn]\x1b[0m\r\n",
+              );
+            }
+          }
+        } else if (!streamingRef.current) {
+          // Empty paste while idle: redraw prompt. While streaming,
+          // suppress (chat_done will render the real prompt).
           term.write("\r\n");
           writePrompt();
         }
@@ -515,13 +584,45 @@ export function TerminalView({ active, modalOpen }: Props) {
           if (lineBuffer.trim().length > 0) {
             // Erase the locally-echoed `❯ <typing>` so the canonical
             // UserPrompt event (`> text\r\n`) coming back from the
-            // shared session is the visible representation.
+            // shared session is the visible representation. For
+            // multi-line buffers we also have to clear the
+            // continuation rows the Shift+Enter handler painted —
+            // each embedded `\n` is one row above us.
+            const newlinesInBuffer = (lineBuffer.match(/\n/g) ?? []).length;
+            for (let i = 0; i < newlinesInBuffer; i += 1) {
+              term.write("\x1b[A\x1b[2K");
+            }
             term.write("\x1b[2K\r");
             promptShowing = false;
-            pushHistory(lineBuffer);
-            send({ type: "shell_input", text: lineBuffer });
+            const submitted = lineBuffer;
+            if (pendingAskId !== null) {
+              // Answer mode: route to the AskUserQuestion oneshot
+              // instead of treating this as a new chat prompt.
+              send({ type: "ask_user_response", id: pendingAskId, text: submitted });
+              pendingAskId = null;
+            } else {
+              pushHistory(submitted);
+              send({ type: "shell_input", text: submitted });
+              // Mid-turn submit: input gets queued in the worker's
+              // input_rx and runs after chat_done. Without a visible
+              // cue the user thinks the text vanished — surface a dim
+              // "[queued]" hint so they know it'll fire when the
+              // current turn ends.
+              if (streamingRef.current) {
+                term.write(
+                  "\x1b[2m[queued — will run after current turn]\x1b[0m\r\n",
+                );
+              }
+            }
+          } else if (streamingRef.current) {
+            // Mid-turn empty Enter: do NOT redraw the chevron prompt.
+            // A fresh `❯` would look like the agent is ready for
+            // input, but the worker is still inside drive_turn_stream
+            // and any typing would just sit in the queue. Stay silent;
+            // the chat_done handler renders the real prompt when the
+            // turn finishes.
           } else {
-            // Empty line: just newline + redraw prompt for the next try.
+            // Idle empty line: newline + redraw prompt for the next try.
             term.write("\r\n");
             writePrompt();
           }
@@ -606,14 +707,42 @@ export function TerminalView({ active, modalOpen }: Props) {
         }
       } else if (msg.type === "chat_done") {
         // Turn complete — newline (if needed) + fresh prompt.
+        // Stale askPromptId can't outlive a turn boundary; if the
+        // model exited the loop without resolving the ask, the
+        // backend's oneshot already returned an empty answer.
+        pendingAskId = null;
+        setStreaming(false);
         term.write("\r\n");
         writePrompt();
         term.write(lineBuffer);
+      } else if (
+        msg.type === "chat_text_delta" ||
+        msg.type === "chat_tool_call"
+      ) {
+        // Agent is actively producing output — flip the streaming
+        // flag so the Stop overlay shows. Idempotent on the same
+        // turn (setState bailouts on equal value), so the per-event
+        // hot path doesn't re-render needlessly.
+        setStreaming(true);
+      } else if (msg.type === "ask_user_question") {
+        // Mark the next submit as an answer rather than a new prompt.
+        // The cyan-bordered question block already rendered via
+        // `terminal_data`; the only state we need locally is the id.
+        if (typeof msg.id === "number") {
+          pendingAskId = msg.id;
+          // Visual hint that the input is now expected to be an
+          // answer — green chevron + "answer" badge instead of the
+          // usual prompt. (Lightweight; full-fledged "answer mode"
+          // UI is M5 polish.)
+          term.write("\r\n\x1b[32m❯ \x1b[2m(answer — Shift+Enter for newline)\x1b[0m ");
+          promptShowing = true;
+        }
       } else if (msg.type === "terminal_clear") {
         term.reset();
         term.clear();
         writePrompt();
         lineBuffer = "";
+        pendingAskId = null;
       } else if (
         msg.type === "terminal_history_replaced" &&
         typeof msg.data === "string"
@@ -674,6 +803,40 @@ export function TerminalView({ active, modalOpen }: Props) {
       style={{ background: "var(--terminal-bg)" }}
     >
       <div ref={ref} className="h-full w-full p-1.5" />
+      {streaming && (
+        // Floating Stop button overlay — sits top-right while the
+        // agent is generating, fires shell_cancel on click. Mirrors
+        // the chat-side Stop button so terminal users have a
+        // discoverable abort affordance even when their fingers
+        // aren't on the keyboard. Hotkeys still work too:
+        // Ctrl+C (any line state) / Cmd+. / Ctrl+. / Esc.
+        <button
+          type="button"
+          onClick={() => send({ type: "shell_cancel" })}
+          className="absolute right-3 top-3 px-2.5 py-1 rounded text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+          style={{
+            background: "var(--danger, #c0392b)",
+            color: "#fff",
+            cursor: "pointer",
+            boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+            zIndex: 10,
+          }}
+          title="Stop the agent (Esc / Cmd+. / Ctrl+. / Ctrl+C)"
+          aria-label="Stop"
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              display: "inline-block",
+              width: 9,
+              height: 9,
+              background: "#fff",
+              borderRadius: 1,
+            }}
+          />
+          Stop
+        </button>
+      )}
       {slashView.open && slashView.filtered.length > 0 && (
         <div
           className="absolute left-3 right-3 bottom-3"

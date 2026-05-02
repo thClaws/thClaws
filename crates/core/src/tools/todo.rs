@@ -90,9 +90,30 @@ impl Tool for TodoWriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write or update the project's todo list. Overwrites the entire todo list with the provided items. \
-         Stores todos in .thclaws/todos.md as a markdown checklist. \
-         Each todo has an id, content string, and status (pending, in_progress, or completed)."
+        "Casual scratchpad for YOUR OWN task tracking during informal \
+         multi-step work — writes to .thclaws/todos.md as a markdown \
+         checklist. Invisible in the chat / sidebar; the user only sees \
+         it if they open the file. No approval gate, no driver, no \
+         sequential enforcement.\n\n\
+         \
+         **At session start, if `.thclaws/todos.md` already exists, read \
+         it first.** Incomplete items (pending or in_progress) are work \
+         from a prior session — surface them and either resume or \
+         replace based on the user's intent. Don't silently start fresh \
+         on top of stale work.\n\n\
+         \
+         For STRUCTURED PLANS the user wants to review and watch you \
+         execute step by step (sidebar with checkmarks, sequential \
+         gating, per-step verification, audit), use EnterPlanMode → \
+         SubmitPlan instead. TodoWrite is the lower-ceremony tool for \
+         work that doesn't need user approval.\n\n\
+         \
+         Discipline: mark ONE item `in_progress` at a time before \
+         starting it; mark `completed` IMMEDIATELY after finishing \
+         (don't batch); remove items that are no longer relevant. \
+         Never mark `completed` if tests are failing or the work is \
+         partial. Each todo has an id, content string, and status \
+         (pending, in_progress, or completed)."
     }
 
     fn input_schema(&self) -> Value {
@@ -258,6 +279,67 @@ mod tests {
         let schema = tool.input_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["todos"].is_object());
+    }
+
+    #[test]
+    fn description_positions_todowrite_as_scratchpad() {
+        // The description must clearly mark TodoWrite as a scratchpad
+        // (not a structured plan tool) and point users at SubmitPlan
+        // for the structured workflow. This is the load-bearing
+        // guidance that keeps the model from blurring the two tools.
+        let d = TodoWriteTool.description();
+        assert!(d.contains("scratchpad"), "scratchpad framing missing: {d}",);
+        assert!(
+            d.contains("SubmitPlan"),
+            "must point at SubmitPlan for structured plans: {d}",
+        );
+        assert!(
+            d.contains("EnterPlanMode"),
+            "must mention plan mode entry: {d}",
+        );
+    }
+
+    #[test]
+    fn description_tells_model_to_resume_from_existing_todos_md() {
+        // When .thclaws/todos.md already exists at session start, the
+        // model should read it and surface incomplete work — not
+        // silently start fresh on top of a stale list. The tool
+        // description carries this rule because the system prompt
+        // alone may not survive truncation in long sessions.
+        let d = TodoWriteTool.description();
+        assert!(
+            d.contains(".thclaws/todos.md"),
+            "must name the todos file path: {d}",
+        );
+        assert!(
+            d.contains("read it first") || d.contains("read it"),
+            "must instruct to read existing todos at session start: {d}",
+        );
+        assert!(
+            d.contains("resume or") || d.contains("resume"),
+            "must mention resume option for existing incomplete todos: {d}",
+        );
+    }
+
+    #[test]
+    fn description_includes_iteration_discipline() {
+        // One item in_progress at a time, mark completed immediately,
+        // remove stale items — these are the rules borrowed from
+        // Claude Code's TodoWrite prompt that prevent the casual
+        // scratchpad from drifting into incoherence.
+        let d = TodoWriteTool.description();
+        assert!(
+            d.contains("ONE item") || d.contains("one"),
+            "single-in-progress rule missing: {d}",
+        );
+        assert!(
+            d.contains("IMMEDIATELY") || d.contains("immediately"),
+            "mark-completed-immediately rule missing: {d}",
+        );
+        assert!(
+            d.contains("don't batch") || d.contains("don't batch"),
+            "no-batching rule missing: {d}",
+        );
     }
 
     #[test]
