@@ -617,6 +617,7 @@ mod tests {
                 id: id.into(),
                 name: name.into(),
                 input: serde_json::json!({}),
+                thought_signature: None,
             }],
         }
     }

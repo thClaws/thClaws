@@ -160,10 +160,19 @@ impl GeminiProvider {
                             }
                         }));
                     }
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        parts.push(json!({
+                    ContentBlock::ToolUse {
+                        name,
+                        input,
+                        thought_signature,
+                        ..
+                    } => {
+                        let mut fc = json!({
                             "functionCall": { "name": name, "args": input }
-                        }));
+                        });
+                        if let Some(sig) = thought_signature {
+                            fc["thoughtSignature"] = json!(sig);
+                        }
+                        parts.push(fc);
                     }
                     ContentBlock::ToolResult {
                         tool_use_id,
@@ -521,7 +530,15 @@ pub fn parse_sse_event(raw: &str, state: &mut ParseState) -> Result<Vec<Provider
                 // turns.
                 let counter_value = state.next_tool_id.fetch_add(1, Ordering::Relaxed);
                 let id = format!("gemini-call-{counter_value}");
-                out.push(ProviderEvent::ToolUseStart { id, name });
+                let thought_signature = part
+                    .get("thoughtSignature")
+                    .and_then(Value::as_str)
+                    .map(String::from);
+                out.push(ProviderEvent::ToolUseStart {
+                    id,
+                    name,
+                    thought_signature,
+                });
                 out.push(ProviderEvent::ToolUseDelta {
                     partial_json: args.to_string(),
                 });
@@ -838,6 +855,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "gemini-call-0".into(),
                 name: "Read".into(),
+                thought_signature: None,
             }
         );
         match &events[2] {
@@ -871,6 +889,7 @@ mod tests {
                         id: "t1".into(),
                         name: "Read".into(),
                         input: json!({"path": "/x"}),
+                        thought_signature: None,
                     }],
                 },
                 crate::types::Message {
@@ -921,6 +940,7 @@ mod tests {
                         id: "t2".into(),
                         name: "Read".into(),
                         input: json!({"path": "/tmp/x.png"}),
+                        thought_signature: None,
                     }],
                 },
                 crate::types::Message {
@@ -1020,6 +1040,7 @@ mod tests {
                         id: "t3".into(),
                         name: "Bash".into(),
                         input: json!({"cmd": "ls"}),
+                        thought_signature: None,
                     }],
                 },
                 crate::types::Message {

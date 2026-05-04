@@ -61,6 +61,7 @@ enum BlockState {
         id: String,
         name: String,
         buf: String,
+        thought_signature: Option<String>,
     },
 }
 
@@ -248,11 +249,12 @@ where
                     think.in_block = false;
                     yield AssembledEvent::Thinking(s);
                 }
-                ProviderEvent::ToolUseStart { id, name } => {
+                ProviderEvent::ToolUseStart { id, name, thought_signature } => {
                     state = BlockState::ToolUse {
                         id,
                         name,
                         buf: String::new(),
+                        thought_signature,
                     };
                 }
                 ProviderEvent::ToolUseDelta { partial_json } => {
@@ -262,12 +264,13 @@ where
                 }
                 ProviderEvent::ContentBlockStop => {
                     let prev = std::mem::replace(&mut state, BlockState::None);
-                    if let BlockState::ToolUse { id, name, buf } = prev {
+                    if let BlockState::ToolUse { id, name, buf, thought_signature } = prev {
                         if buf.trim().is_empty() {
                             yield AssembledEvent::ToolUse(ContentBlock::ToolUse {
                                 id,
                                 name,
                                 input: serde_json::json!({}),
+                                thought_signature,
                             });
                         } else {
                             match serde_json::from_str::<serde_json::Value>(&buf) {
@@ -276,6 +279,7 @@ where
                                         id,
                                         name,
                                         input,
+                                        thought_signature,
                                     });
                                 }
                                 Err(e) => {
@@ -327,6 +331,7 @@ where
                     id,
                     name,
                     input: serde_json::json!({}),
+                    thought_signature: None,
                 });
             }
             AssembledEvent::Done { stop_reason, usage } => {
@@ -450,6 +455,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "toolu_1".into(),
                 name: "read_file".into(),
+                thought_signature: None,
             },
             ProviderEvent::ToolUseDelta {
                 partial_json: "{\"pa".into(),
@@ -471,7 +477,9 @@ mod tests {
         assert_eq!(r.text, "");
         assert_eq!(r.tool_uses.len(), 1);
         match &r.tool_uses[0] {
-            ContentBlock::ToolUse { id, name, input } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "read_file");
                 assert_eq!(input, &serde_json::json!({"path": "/tmp/x"}));
@@ -490,6 +498,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "toolu_2".into(),
                 name: "glob".into(),
+                thought_signature: None,
             },
             ProviderEvent::ToolUseDelta {
                 partial_json: "{\"pattern\":\"*.rs\"}".into(),
@@ -518,6 +527,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "a".into(),
                 name: "read".into(),
+                thought_signature: None,
             },
             ProviderEvent::ToolUseDelta {
                 partial_json: "{\"p\":1}".into(),
@@ -526,6 +536,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "b".into(),
                 name: "write".into(),
+                thought_signature: None,
             },
             ProviderEvent::ToolUseDelta {
                 partial_json: "{\"p\":2}".into(),
@@ -556,6 +567,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "x".into(),
                 name: "list_projects".into(),
+                thought_signature: None,
             },
             ProviderEvent::ContentBlockStop,
             ProviderEvent::MessageStop {
@@ -718,6 +730,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "x".into(),
                 name: "t".into(),
+                thought_signature: None,
             },
             ProviderEvent::ToolUseDelta {
                 partial_json: "{not-json".into(),
@@ -728,7 +741,10 @@ mod tests {
         .expect("collect_turn should succeed; parse failure is in-band now");
         assert_eq!(result.tool_uses.len(), 1, "synthetic ToolUse expected");
         // Synthetic block has empty input.
-        if let ContentBlock::ToolUse { id, name, input } = &result.tool_uses[0] {
+        if let ContentBlock::ToolUse {
+            id, name, input, ..
+        } = &result.tool_uses[0]
+        {
             assert_eq!(id, "x");
             assert_eq!(name, "t");
             assert_eq!(input, &serde_json::json!({}));

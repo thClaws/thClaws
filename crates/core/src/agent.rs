@@ -1011,6 +1011,7 @@ impl Agent {
                                 id: id.clone(),
                                 name: name.clone(),
                                 input: serde_json::json!({}),
+                                thought_signature: None,
                             };
                             yield AgentEvent::ToolCallStart {
                                 id: id.clone(),
@@ -1038,7 +1039,7 @@ impl Agent {
                             // emit ToolCallDenied / ToolCallResult as
                             // before, so UI consumers don't get orphaned
                             // ToolCallStart events.
-                            if let ContentBlock::ToolUse { id, name, input } = &block {
+                            if let ContentBlock::ToolUse { id, name, input, .. } = &block {
                                 yield AgentEvent::ToolCallStart {
                                     id: id.clone(),
                                     name: name.clone(),
@@ -1107,7 +1108,7 @@ impl Agent {
                 // Execute each tool (after approval, if required) and collect results.
                 let mut result_blocks: Vec<ContentBlock> = Vec::new();
                 for tu in &turn_tool_uses {
-                    let ContentBlock::ToolUse { id, name, input } = tu else { continue };
+                    let ContentBlock::ToolUse { id, name, input, .. } = tu else { continue };
 
                     // L4 (M6.17): if this tool's JSON input failed to
                     // parse during assembly, short-circuit with a
@@ -2261,6 +2262,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: id.into(),
                 name: name.into(),
+                thought_signature: None,
             },
             ProviderEvent::ToolUseDelta {
                 partial_json: args_json.into(),

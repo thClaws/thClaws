@@ -85,7 +85,9 @@ impl OpenAIResponsesProvider {
                     // future turn against a vision-capable provider
                     // still sees it).
                     ContentBlock::Image { .. } => {}
-                    ContentBlock::ToolUse { id, name, input } => {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
                         out.push(json!({
                             "type": "function_call",
                             "call_id": id,
@@ -362,7 +364,11 @@ fn parse_response_event(
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    out.push(ProviderEvent::ToolUseStart { id, name });
+                    out.push(ProviderEvent::ToolUseStart {
+                        id,
+                        name,
+                        thought_signature: None,
+                    });
                 }
             }
         }
@@ -502,7 +508,8 @@ mod tests {
             events[1],
             ProviderEvent::ToolUseStart {
                 id: "call_1".into(),
-                name: "Read".into()
+                name: "Read".into(),
+                thought_signature: None,
             }
         );
         assert!(matches!(events[2], ProviderEvent::ToolUseDelta { .. }));

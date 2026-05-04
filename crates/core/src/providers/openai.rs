@@ -148,7 +148,9 @@ impl OpenAIProvider {
                     } => {
                         inline_user_images.push((media_type.clone(), data.clone()));
                     }
-                    ContentBlock::ToolUse { id, name, input } => {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
                         let args = serde_json::to_string(input).unwrap_or_else(|_| "{}".into());
                         tool_calls.push(json!({
                             "id": id,
@@ -618,7 +620,11 @@ pub fn parse_chunk(raw: &str, state: &mut ParseState) -> Result<Vec<ProviderEven
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    out.push(ProviderEvent::ToolUseStart { id, name });
+                    out.push(ProviderEvent::ToolUseStart {
+                        id,
+                        name,
+                        thought_signature: None,
+                    });
                 }
 
                 if let Some(args) = func
@@ -894,7 +900,8 @@ mod tests {
             events[1],
             ProviderEvent::ToolUseStart {
                 id: "call_abc".into(),
-                name: "read_file".into()
+                name: "read_file".into(),
+                thought_signature: None,
             }
         );
         assert_eq!(
@@ -933,7 +940,8 @@ mod tests {
             events[1],
             ProviderEvent::ToolUseStart {
                 id: "a".into(),
-                name: "r".into()
+                name: "r".into(),
+                thought_signature: None,
             }
         );
         assert_eq!(
@@ -947,7 +955,8 @@ mod tests {
             events[4],
             ProviderEvent::ToolUseStart {
                 id: "b".into(),
-                name: "w".into()
+                name: "w".into(),
+                thought_signature: None,
             }
         );
         assert_eq!(
@@ -980,6 +989,7 @@ mod tests {
                         id: "call_1".into(),
                         name: "read".into(),
                         input: json!({"path": "/a"}),
+                        thought_signature: None,
                     }],
                 },
                 Message {
@@ -1032,6 +1042,7 @@ mod tests {
                         id: "call_2".into(),
                         name: "Read".into(),
                         input: json!({"path": "/tmp/x.png"}),
+                        thought_signature: None,
                     }],
                 },
                 Message {
@@ -1117,16 +1128,19 @@ mod tests {
                             id: "call_a".into(),
                             name: "Read".into(),
                             input: json!({"path": "/tmp/a.png"}),
+                            thought_signature: None,
                         },
                         ContentBlock::ToolUse {
                             id: "call_b".into(),
                             name: "Read".into(),
                             input: json!({"path": "/tmp/b.png"}),
+                            thought_signature: None,
                         },
                         ContentBlock::ToolUse {
                             id: "call_c".into(),
                             name: "Read".into(),
                             input: json!({"path": "/tmp/c.png"}),
+                            thought_signature: None,
                         },
                     ],
                 },
@@ -1291,6 +1305,7 @@ mod tests {
                         id: "call_3".into(),
                         name: "Bash".into(),
                         input: json!({"cmd": "ls"}),
+                        thought_signature: None,
                     }],
                 },
                 Message {
@@ -1447,7 +1462,10 @@ mod tests {
 
         assert_eq!(result.text, "");
         assert_eq!(result.tool_uses.len(), 1);
-        if let ContentBlock::ToolUse { id, name, input } = &result.tool_uses[0] {
+        if let ContentBlock::ToolUse {
+            id, name, input, ..
+        } = &result.tool_uses[0]
+        {
             assert_eq!(id, "call_abc");
             assert_eq!(name, "read_file");
             assert_eq!(input, &json!({"path": "/tmp/x"}));

@@ -42,6 +42,8 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     ToolResult {
         tool_use_id: String,
@@ -199,6 +201,7 @@ mod tests {
             id: "toolu_1".into(),
             name: "read_file".into(),
             input: serde_json::json!({"path": "/tmp/x"}),
+            thought_signature: None,
         };
         let j = serde_json::to_value(&block).unwrap();
         assert_eq!(

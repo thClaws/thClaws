@@ -369,7 +369,11 @@ pub fn parse_sse_event(raw: &str) -> Result<Option<ProviderEvent>> {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    Some(ProviderEvent::ToolUseStart { id, name })
+                    Some(ProviderEvent::ToolUseStart {
+                        id,
+                        name,
+                        thought_signature: None,
+                    })
                 }
                 _ => None,
             }
@@ -459,7 +463,8 @@ mod tests {
             ev,
             ProviderEvent::ToolUseStart {
                 id: "toolu_abc".into(),
-                name: "read_file".into()
+                name: "read_file".into(),
+                thought_signature: None,
             }
         );
     }
@@ -794,7 +799,10 @@ mod tests {
 
         assert_eq!(result.text, "I'll read that file.");
         assert_eq!(result.tool_uses.len(), 1);
-        if let ContentBlock::ToolUse { id, name, input } = &result.tool_uses[0] {
+        if let ContentBlock::ToolUse {
+            id, name, input, ..
+        } = &result.tool_uses[0]
+        {
             assert_eq!(id, "toolu_01A");
             assert_eq!(name, "read_file");
             assert_eq!(input, &serde_json::json!({"path": "/tmp/x"}));
@@ -937,6 +945,7 @@ mod tests {
             id: "toolu_x".into(),
             name: "Read".into(),
             input: serde_json::json!({"path": "/tmp"}),
+            thought_signature: None,
         });
         let body = AnthropicProvider::build_body(&req);
         let last = body["messages"][1]["content"]

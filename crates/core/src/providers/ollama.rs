@@ -452,7 +452,11 @@ pub fn parse_line(line: &str, state: &mut ParseState) -> Result<Vec<ProviderEven
                 })
                 .unwrap_or_else(|| "{}".to_string());
 
-            out.push(ProviderEvent::ToolUseStart { id, name });
+            out.push(ProviderEvent::ToolUseStart {
+                id,
+                name,
+                thought_signature: None,
+            });
             if !args_json.is_empty() {
                 out.push(ProviderEvent::ToolUseDelta {
                     partial_json: args_json,
@@ -475,6 +479,7 @@ pub fn parse_line(line: &str, state: &mut ParseState) -> Result<Vec<ProviderEven
                 out.push(ProviderEvent::ToolUseStart {
                     id: "ollama-leaked-call".into(),
                     name,
+                    thought_signature: None,
                 });
                 out.push(ProviderEvent::ToolUseDelta {
                     partial_json: args_json,
@@ -579,6 +584,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "ollama-leaked-call".into(),
                 name: "Write".into(),
+                thought_signature: None,
             }
         );
         match &events[2] {
@@ -611,6 +617,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "ollama-leaked-call".into(),
                 name: "Read".into(),
+                thought_signature: None,
             }
         );
     }
@@ -679,6 +686,7 @@ mod tests {
             ProviderEvent::ToolUseStart {
                 id: "ollama-call-0".into(),
                 name: "Read".into(),
+                thought_signature: None,
             }
         );
         match &events[2] {
@@ -711,6 +719,7 @@ mod tests {
                         id: "t1".into(),
                         name: "Read".into(),
                         input: json!({"path": "/x"}),
+                        thought_signature: None,
                     }],
                 },
                 crate::types::Message {
