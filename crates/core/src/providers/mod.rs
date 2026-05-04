@@ -40,6 +40,7 @@ pub enum ProviderKind {
     OpenAICompat,
     DeepSeek,
     ThaiLLM,
+    Nvidia,
 }
 
 impl ProviderKind {
@@ -61,6 +62,7 @@ impl ProviderKind {
         Self::OpenAICompat,
         Self::DeepSeek,
         Self::ThaiLLM,
+        Self::Nvidia,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -82,6 +84,7 @@ impl ProviderKind {
             Self::OpenAICompat => "openai-compat",
             Self::DeepSeek => "deepseek",
             Self::ThaiLLM => "thaillm",
+            Self::Nvidia => "nvidia",
         }
     }
 
@@ -134,6 +137,10 @@ impl ProviderKind {
             // bare model id. OpenThaiGPT v7.2 is the most general-purpose
             // default; users can `/model thaillm/<other>` to switch.
             Self::ThaiLLM => "thaillm/OpenThaiGPT-ThaiLLM-8B-Instruct-v7.2",
+            // NVIDIA NIM — OpenAI-compatible hosted inference at integrate.api.nvidia.com.
+            // Model IDs keep the `nvidia/` prefix on the wire (that's NVIDIA's own namespace,
+            // not a thClaws routing prefix). Override via NVIDIA_BASE_URL for on-prem NIM.
+            Self::Nvidia => "nvidia/nemotron-3-super-120b-a12b",
         }
     }
 
@@ -153,6 +160,7 @@ impl ProviderKind {
             Self::OpenAICompat => Some("OPENAI_COMPAT_BASE_URL"),
             Self::DeepSeek => Some("DEEPSEEK_BASE_URL"),
             Self::ThaiLLM => Some("THAILLM_BASE_URL"),
+            Self::Nvidia => Some("NVIDIA_BASE_URL"),
             _ => None,
         }
     }
@@ -197,6 +205,7 @@ impl ProviderKind {
             Self::OpenAICompat => Some("http://localhost:8000/v1"),
             Self::DeepSeek => Some("https://api.deepseek.com/v1"),
             Self::ThaiLLM => Some("http://thaillm.or.th/api/v1"),
+            Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             _ => None,
         }
     }
@@ -221,6 +230,7 @@ impl ProviderKind {
             Self::OpenAICompat => Some("OPENAI_COMPAT_API_KEY"),
             Self::DeepSeek => Some("DEEPSEEK_API_KEY"),
             Self::ThaiLLM => Some("THAILLM_API_KEY"),
+            Self::Nvidia => Some("NVIDIA_API_KEY"),
         }
     }
 
@@ -318,7 +328,8 @@ impl ProviderKind {
             | Self::LMStudio
             | Self::AzureAIFoundry
             | Self::OpenAICompat
-            | Self::DeepSeek => None,
+            | Self::DeepSeek
+            | Self::Nvidia => None,
         }
     }
 
@@ -388,6 +399,13 @@ impl ProviderKind {
             Some(Self::OllamaCloud)
         } else if model.starts_with("azure/") {
             Some(Self::AzureAIFoundry)
+        } else if model.starts_with("nvidia/") {
+            // NVIDIA NIM (integrate.api.nvidia.com). Model IDs like
+            // `nvidia/nemotron-3-super-120b-a12b` keep the `nvidia/` prefix
+            // on the wire — it is part of the upstream model ID, not stripped.
+            // OpenRouter proxies the same models as `openrouter/nvidia/...`;
+            // the `openrouter/` check above catches those first.
+            Some(Self::Nvidia)
         } else {
             None
         }

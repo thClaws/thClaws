@@ -24,6 +24,43 @@
         }
       }
     },
+    "nvidia": {
+      "list_url": "https://integrate.api.nvidia.com/v1/models",
+      "default_context": 131072,
+      "models": {
+        "nvidia/nemotron-3-super-120b-a12b": {
+          "context": 262144,
+          "source": "https://build.nvidia.com/nvidia/nemotron-3-super-120b-a12b",
+          "verified_at": "2026-05-04"
+        },
+        "nvidia/nemotron-3-nano-30b-a3b": {
+          "context": 262144,
+          "source": "https://build.nvidia.com/nvidia/nemotron-3-nano-30b-a3b",
+          "verified_at": "2026-05-04"
+        },
+        "nvidia/llama-3.1-nemotron-70b-instruct": {
+          "context": 131072,
+          "max_output": 16384,
+          "source": "https://build.nvidia.com/nvidia/llama-3_1-nemotron-70b-instruct",
+          "verified_at": "2026-05-04"
+        },
+        "nvidia/llama-3.3-nemotron-super-49b-v1.5": {
+          "context": 131072,
+          "source": "https://build.nvidia.com/nvidia/llama-3_3-nemotron-super-49b-v1-5",
+          "verified_at": "2026-05-04"
+        },
+        "nvidia/nemotron-nano-9b-v2": {
+          "context": 131072,
+          "source": "https://build.nvidia.com/nvidia/nemotron-nano-9b-v2",
+          "verified_at": "2026-05-04"
+        },
+        "nvidia/nemotron-nano-12b-v2-vl": {
+          "context": 131072,
+          "source": "https://build.nvidia.com/nvidia/nemotron-nano-12b-v2-vl",
+          "verified_at": "2026-05-04"
+        }
+      }
+    },
     "deepseek": {
       "list_url": "https://api.deepseek.com/v1/models",
       "default_context": 131072,
