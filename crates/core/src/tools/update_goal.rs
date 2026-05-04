@@ -256,7 +256,7 @@ mod tests {
     async fn record_progress_keeps_active_and_stores_audit() {
         let _g = lock();
         reset();
-        goal_state::set(Some(GoalState::new("ship X".into(), None, None)));
+        goal_state::set(Some(GoalState::new("ship X".into(), None, None, false)));
         let r = RecordGoalProgressTool
             .call(json!({"audit": "parser done; type-checker pending"}))
             .await
@@ -276,7 +276,7 @@ mod tests {
     async fn record_progress_requires_audit() {
         let _g = lock();
         reset();
-        goal_state::set(Some(GoalState::new("ship X".into(), None, None)));
+        goal_state::set(Some(GoalState::new("ship X".into(), None, None, false)));
         let err = RecordGoalProgressTool.call(json!({})).await.unwrap_err();
         assert!(format!("{err}").contains("audit"));
         reset();
@@ -286,7 +286,7 @@ mod tests {
     async fn mark_complete_transitions_terminal_with_audit() {
         let _g = lock();
         reset();
-        goal_state::set(Some(GoalState::new("ship X".into(), None, None)));
+        goal_state::set(Some(GoalState::new("ship X".into(), None, None, false)));
         let r = MarkGoalCompleteTool
             .call(json!({
                 "audit": "all 5 spec items verified against test output",
@@ -307,7 +307,7 @@ mod tests {
     async fn mark_complete_requires_audit_field() {
         let _g = lock();
         reset();
-        goal_state::set(Some(GoalState::new("ship X".into(), None, None)));
+        goal_state::set(Some(GoalState::new("ship X".into(), None, None, false)));
         let err = MarkGoalCompleteTool
             .call(json!({"reason": "feels done"}))
             .await
@@ -322,7 +322,7 @@ mod tests {
     async fn mark_blocked_transitions_terminal_with_reason() {
         let _g = lock();
         reset();
-        goal_state::set(Some(GoalState::new("ship X".into(), None, None)));
+        goal_state::set(Some(GoalState::new("ship X".into(), None, None, false)));
         MarkGoalBlockedTool
             .call(json!({"reason": "need API key from user"}))
             .await
@@ -338,7 +338,7 @@ mod tests {
     async fn mark_blocked_requires_reason() {
         let _g = lock();
         reset();
-        goal_state::set(Some(GoalState::new("ship X".into(), None, None)));
+        goal_state::set(Some(GoalState::new("ship X".into(), None, None, false)));
         let err = MarkGoalBlockedTool.call(json!({})).await.unwrap_err();
         assert!(format!("{err}").contains("reason"));
         reset();

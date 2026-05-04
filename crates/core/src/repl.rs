@@ -222,6 +222,13 @@ pub enum SlashCommand {
         objective: String,
         budget_tokens: Option<u64>,
         budget_time_secs: Option<u64>,
+        /// Phase D1: when true, the worker auto-queues the next
+        /// `/goal continue` after each finishing turn (provided the
+        /// turn made tool calls, status is still Active, and no /loop
+        /// is wrapping). Opt-in via `--auto` on /goal start so the
+        /// default behavior (manual or /loop-driven continuation)
+        /// stays unchanged.
+        auto_continue: bool,
     },
     /// M6.29: show current goal state + budget consumption.
     GoalStatus,
@@ -1338,10 +1345,17 @@ fn parse_goal_start_args(rest: &str) -> SlashCommand {
     let mut objective_parts: Vec<String> = Vec::new();
     let mut budget_tokens: Option<u64> = None;
     let mut budget_time_secs: Option<u64> = None;
+    let mut auto_continue = false;
     let mut i = 0;
     while i < tokens.len() {
         let tok = tokens[i].as_str();
         match tok {
+            "--auto" | "--auto-continue" => {
+                // Phase D1: opt-in auto-continuation. After each goal
+                // turn finishes, the worker queues another /goal
+                // continue automatically — no /loop wrapper needed.
+                auto_continue = true;
+            }
             "--budget-tokens" | "--tokens" => {
                 i += 1;
                 if i >= tokens.len() {
@@ -1391,6 +1405,7 @@ fn parse_goal_start_args(rest: &str) -> SlashCommand {
         objective,
         budget_tokens,
         budget_time_secs,
+        auto_continue,
     }
 }
 
@@ -5853,11 +5868,13 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     objective,
                     budget_tokens,
                     budget_time_secs,
+                    auto_continue,
                 } => {
                     let new_goal = crate::goal_state::GoalState::new(
                         objective.clone(),
                         budget_tokens,
                         budget_time_secs,
+                        auto_continue,
                     );
                     crate::goal_state::set(Some(new_goal));
                     // Phase C1: register the three split goal-lifecycle
@@ -6894,6 +6911,7 @@ mod tests {
                 objective: "ship the auth refactor".into(),
                 budget_tokens: Some(200_000),
                 budget_time_secs: Some(1800),
+                auto_continue: false,
             })
         );
         // Without quotes — objective is words up to first --flag.
@@ -6903,6 +6921,32 @@ mod tests {
                 objective: "build a REST API".into(),
                 budget_tokens: Some(50_000),
                 budget_time_secs: None,
+                auto_continue: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_slash_goal_start_with_auto_flag() {
+        // Phase D1: --auto flips auto_continue so the worker queues the
+        // next /goal continue automatically after each finishing turn.
+        assert_eq!(
+            parse_slash("/goal start \"refactor X\" --auto --budget-tokens 10000"),
+            Some(SlashCommand::GoalStart {
+                objective: "refactor X".into(),
+                budget_tokens: Some(10_000),
+                budget_time_secs: None,
+                auto_continue: true,
+            })
+        );
+        // --auto-continue alias.
+        assert_eq!(
+            parse_slash("/goal start \"refactor X\" --auto-continue"),
+            Some(SlashCommand::GoalStart {
+                objective: "refactor X".into(),
+                budget_tokens: None,
+                budget_time_secs: None,
+                auto_continue: true,
             })
         );
     }

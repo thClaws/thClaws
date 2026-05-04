@@ -1006,11 +1006,13 @@ pub async fn dispatch(
             objective,
             budget_tokens,
             budget_time_secs,
+            auto_continue,
         } => {
             let new_goal = crate::goal_state::GoalState::new(
                 objective.clone(),
                 budget_tokens,
                 budget_time_secs,
+                auto_continue,
             );
             crate::goal_state::set(Some(new_goal));
             // Live-register the three goal-lifecycle tools (Phase C1):
@@ -1037,7 +1039,7 @@ pub async fn dispatch(
             emit(
                 events_tx,
                 format!(
-                    "goal started: \"{}\" (budget_tokens={}, budget_time={}s)",
+                    "goal started: \"{}\" (budget_tokens={}, budget_time={}s, auto={})",
                     objective,
                     budget_tokens
                         .map(|n| n.to_string())
@@ -1045,8 +1047,19 @@ pub async fn dispatch(
                     budget_time_secs
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "unlimited".into()),
+                    auto_continue,
                 ),
             );
+            // Phase D1: when --auto is set, kick off the first /goal
+            // continue immediately so users don't have to type it
+            // themselves. Subsequent iterations chain via the post-turn
+            // logic in handle_line. Without this, --auto would only
+            // affect what happens AFTER the first manual /goal continue.
+            if auto_continue {
+                let _ = input_tx.send(crate::shared_session::ShellInput::Line(
+                    "/goal continue".into(),
+                ));
+            }
         }
         SlashCommand::GoalStatus => match crate::goal_state::current() {
             Some(g) => emit(events_tx, format_goal_status(&g)),

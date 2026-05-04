@@ -1751,8 +1751,9 @@ async fn handle_line(
                 let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
                 let _ = lead_mb.write_status("lead", "working", None);
                 drive_turn_stream(stream, state, events_tx, cancel, &lead_mb, input_tx).await;
-                // Post-turn: if the model called UpdateGoal with terminal
-                // status, stop the loop so the next firing doesn't run.
+                // Post-turn: if the model called MarkGoalComplete /
+                // MarkGoalBlocked (or any path that mutated status to
+                // terminal), stop the loop so the next firing doesn't run.
                 if let Some(g) = crate::goal_state::current() {
                     if g.status.is_terminal() {
                         if let Some(loop_state) = state.active_loop.take() {
@@ -1762,6 +1763,26 @@ async fn handle_line(
                                 g.status.as_str(),
                             )));
                         }
+                    } else if g.auto_continue
+                        && state.active_loop.is_none()
+                        && state.last_turn_made_tool_calls
+                        && !cancel.is_cancelled()
+                    {
+                        // Phase D1: opt-in auto-continuation. The goal
+                        // was started with --auto, no /loop is wrapping
+                        // (would double-fire), the just-finished turn
+                        // made tool calls (Phase B2 empty-turn guard
+                        // would otherwise re-trigger here too), and the
+                        // user didn't cancel. Queue another /goal
+                        // continue immediately so the next iteration
+                        // fires without waiting for /loop interval.
+                        // std::sync::mpsc — sync send, no .await. If the
+                        // worker channel is somehow disconnected the send
+                        // errors silently and the user can fire /goal
+                        // continue manually to recover.
+                        let _ = input_tx.send(crate::shared_session::ShellInput::Line(
+                            "/goal continue".into(),
+                        ));
                     }
                 }
                 return;
