@@ -80,7 +80,7 @@ enum UserEvent {
     ZoomChanged(f64),
 }
 
-const MAX_RECENT_DIRS: usize = 3;
+// MAX_RECENT_DIRS moved to crate::recent_dirs.
 
 // ── Event translator ────────────────────────────────────────────────
 // Subscribes to the SharedSession's broadcast channel and fans each
@@ -188,268 +188,14 @@ mod csv_table_tests {
 /// First row is treated as the header. Pipe characters in cells are
 /// escaped (`\|`) so they don't break the row structure. Empty input
 /// yields an empty string.
-fn csv_to_markdown_table(csv: &str) -> String {
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .flexible(true)
-        .from_reader(csv.as_bytes());
-    let rows: Vec<Vec<String>> = rdr
-        .records()
-        .filter_map(|r| r.ok())
-        .map(|r| {
-            r.iter()
-                .map(|c| c.replace('|', "\\|").replace('\n', " "))
-                .collect()
-        })
-        .collect();
-    if rows.is_empty() {
-        return String::new();
-    }
-    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    let mut out = String::new();
-    let pad = |row: &[String], cols: usize| {
-        let mut line = String::from("|");
-        for i in 0..cols {
-            line.push(' ');
-            line.push_str(row.get(i).map(String::as_str).unwrap_or(""));
-            line.push_str(" |");
-        }
-        line.push('\n');
-        line
-    };
-    out.push_str(&pad(&rows[0], cols));
-    let mut sep = String::from("|");
-    for _ in 0..cols {
-        sep.push_str(" --- |");
-    }
-    sep.push('\n');
-    out.push_str(&sep);
-    for row in &rows[1..] {
-        out.push_str(&pad(row, cols));
-    }
-    out
-}
-
-fn render_markdown_to_html(md: &str, theme: &str) -> String {
-    let mut opts = comrak::ComrakOptions::default();
-    opts.extension.table = true;
-    opts.extension.strikethrough = true;
-    opts.extension.tasklist = true;
-    opts.extension.autolink = true;
-    opts.extension.footnotes = true;
-    opts.extension.header_ids = Some(String::new());
-    opts.render.unsafe_ = false;
-    let body = comrak::markdown_to_html(md, &opts);
-
-    // Preview is rendered inside a sandboxed iframe, so it lives in its
-    // own document with its own palette. The frontend passes the
-    // *resolved* theme ("light" | "dark") — "system" is resolved client-
-    // side to one of those so this function never has to inspect any
-    // runtime signal. We emit a single palette rather than a media
-    // query so that a user explicitly choosing Light while their OS is
-    // Dark (or vice versa) is honoured.
-    let (fg, bg, muted, accent, code_bg, border, color_scheme) = if theme == "light" {
-        (
-            "#1a1a1a", "#ffffff", "#606366", "#2867c4", "#f3f4f6", "#d0d7de", "light",
-        )
-    } else {
-        (
-            "#e6e6e6", "#1a1a1a", "#9aa0a6", "#6cb0ff", "#2a2a2a", "#333", "dark",
-        )
-    };
-
-    format!(
-        r##"<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root {{
-    color-scheme: {color_scheme};
-    --fg: {fg};
-    --bg: {bg};
-    --muted: {muted};
-    --accent: {accent};
-    --code-bg: {code_bg};
-    --border: {border};
-  }}
-  html, body {{ margin: 0; padding: 0; }}
-  body {{
-    font: 14px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI",
-          "Helvetica Neue", Arial, "Noto Sans Thai", sans-serif;
-    color: var(--fg); background: var(--bg); padding: 24px 32px;
-    max-width: 880px; margin: 0 auto;
-  }}
-  h1, h2, h3, h4, h5, h6 {{ line-height: 1.25; margin: 1.4em 0 0.5em; }}
-  h1 {{ font-size: 1.8em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }}
-  h2 {{ font-size: 1.4em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }}
-  h3 {{ font-size: 1.2em; }}
-  p, ul, ol, blockquote, pre, table {{ margin: 0.8em 0; }}
-  a {{ color: var(--accent); text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
-  code {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-          font-size: 0.92em; background: var(--code-bg);
-          padding: 2px 5px; border-radius: 3px; }}
-  pre {{ background: var(--code-bg); padding: 12px 14px; border-radius: 6px;
-         overflow-x: auto; }}
-  pre code {{ background: transparent; padding: 0; font-size: 0.9em; }}
-  blockquote {{ margin: 0.8em 0; padding: 0 1em; color: var(--muted);
-                border-left: 3px solid var(--border); }}
-  table {{ border-collapse: collapse; }}
-  th, td {{ border: 1px solid var(--border); padding: 6px 12px; text-align: left; }}
-  th {{ background: var(--code-bg); font-weight: 600; }}
-  hr {{ border: 0; border-top: 1px solid var(--border); margin: 2em 0; }}
-  img {{ max-width: 100%; height: auto; }}
-  ul.contains-task-list {{ list-style: none; padding-left: 1em; }}
-  .task-list-item input[type="checkbox"] {{ margin-right: 0.5em; }}
-</style>
-</head><body>
-{body}
-</body></html>"##,
-        body = body
-    )
-}
-
-fn recent_dirs_path() -> Option<std::path::PathBuf> {
-    crate::util::home_dir().map(|h| h.join(".config/thclaws/recent_dirs.json"))
-}
-
-/// Snapshot the SSO sidebar state into a JSON event payload. Emitted
-/// in response to `sso_status` / `sso_login` / `sso_logout` IPC calls
-/// from the frontend so the React sidebar can render the right thing
-/// (signed-in pill, sign-in button, or nothing when policy inactive).
-fn build_sso_state_payload() -> serde_json::Value {
-    let policy = crate::policy::active()
-        .and_then(|a| a.policy.policies.sso.as_ref())
-        .cloned();
-    let policy = match policy {
-        Some(p) if p.enabled => p,
-        _ => {
-            return serde_json::json!({
-                "type": "sso_state",
-                "enabled": false,
-                "logged_in": false,
-            });
-        }
-    };
-    match crate::sso::current_session(&policy) {
-        Some(s) if !s.is_expired() => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let remaining = s.expires_at.saturating_sub(now);
-            serde_json::json!({
-                "type": "sso_state",
-                "enabled": true,
-                "logged_in": true,
-                "issuer": s.issuer,
-                "email": s.email,
-                "name": s.name,
-                "sub": s.sub,
-                "expires_in_secs": remaining,
-            })
-        }
-        _ => serde_json::json!({
-            "type": "sso_state",
-            "enabled": true,
-            "logged_in": false,
-            "issuer": policy.issuer_url,
-        }),
-    }
-}
-
-fn load_recent_dirs() -> Vec<String> {
-    let Some(path) = recent_dirs_path() else {
-        return vec![];
-    };
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return vec![];
-    };
-    serde_json::from_str::<Vec<String>>(&contents).unwrap_or_default()
-}
-
-fn save_recent_dir(dir: &str) {
-    let Some(path) = recent_dirs_path() else {
-        return;
-    };
-    let mut dirs = load_recent_dirs();
-    // Remove duplicate if present, then prepend.
-    dirs.retain(|d| d != dir);
-    dirs.insert(0, dir.to_string());
-    dirs.truncate(MAX_RECENT_DIRS);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(
-        path,
-        serde_json::to_string_pretty(&dirs).unwrap_or_default(),
-    );
-}
-
-// ── UI theme persistence ─────────────────────────────────────────────
-// Lives in its own tiny file under `~/.config/thclaws/` rather than
-// settings.json because theme is a per-user UI preference, not an
-// agent-runtime knob — keeping it separate avoids polluting any
-// project-committed settings.json.
-
-fn theme_path() -> Option<std::path::PathBuf> {
-    crate::util::home_dir().map(|h| h.join(".config/thclaws/theme.json"))
-}
-
-fn normalize_theme(raw: &str) -> &'static str {
-    match raw {
-        "light" => "light",
-        "dark" => "dark",
-        _ => "system",
-    }
-}
-
-fn load_theme() -> String {
-    let Some(path) = theme_path() else {
-        return "system".to_string();
-    };
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return "system".to_string();
-    };
-    let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap_or_default();
-    let mode = parsed
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("system");
-    normalize_theme(mode).to_string()
-}
-
-fn save_theme(mode: &str) {
-    let Some(path) = theme_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let payload = serde_json::json!({ "mode": normalize_theme(mode) });
-    let _ = std::fs::write(
-        path,
-        serde_json::to_string_pretty(&payload).unwrap_or_default(),
-    );
-}
-
-/// Convert a frontend-supplied path (always slash-separated, since it
-/// comes from JSON / the React tree) to the OS-native form before
-/// passing it to filesystem APIs. No-op on macOS/Linux. On Windows,
-/// translates `/` → `\` so paths like `src/api/foo.ts` resolve via
-/// `Sandbox::check` instead of being rejected as malformed.
-/// Backported from public repo (commit 8ad6f80).
-fn ospath(path: &str) -> String {
-    #[cfg(not(target_os = "windows"))]
-    {
-        path.to_string()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        path.replace('/', "\\")
-    }
-}
+// csv_to_markdown_table + render_markdown_to_html + ospath moved to
+// crate::file_preview in M6.36 SERVE9i so the WS transport's file_*
+// IPC arms can call them from the always-on dispatch table.
+use crate::file_preview::{csv_to_markdown_table, ospath, render_markdown_to_html};
+// build_sso_state_payload moved to crate::sso::build_state_payload in
+// M6.36 SERVE9h. Re-export the old name so legacy gui.rs callers keep
+// compiling — they switch to the new path when their arm migrates.
+use crate::sso::build_state_payload as build_sso_state_payload;
 
 /// Show a native OS confirmation dialog. Returns `true` on affirmative.
 ///
@@ -569,83 +315,17 @@ fn build_session_list(store: &Option<SessionStore>) -> String {
     serde_json::json!({"type": "sessions_list", "sessions": sessions}).to_string()
 }
 
-/// Does the active provider have credentials (env var set) or is it
-/// a no-auth local provider? Used to tell the sidebar whether to show
-/// the provider name normally or flag it as "no key configured".
-fn provider_has_credentials(cfg: &AppConfig) -> bool {
-    kind_has_credentials(cfg.detect_provider_kind().ok())
-}
-
-fn kind_has_credentials(kind: Option<crate::providers::ProviderKind>) -> bool {
-    use crate::providers::ProviderKind;
-    let Some(kind) = kind else { return false };
-    match kind {
-        // Agent SDK uses Claude Code's own auth — assume present.
-        ProviderKind::AgentSdk => true,
-        // Ollama variants and LMStudio don't need auth; reachability is
-        // surfaced on first prompt, not here.
-        ProviderKind::Ollama | ProviderKind::OllamaAnthropic | ProviderKind::LMStudio => true,
-        // Every other provider's readiness == "its env var is set to a
-        // non-empty value". std::env::var returns Ok("") for an exported-
-        // but-empty var — which a stale shell rc / VS Code env injection
-        // can produce — so we explicitly require a non-blank value here.
-        // Otherwise the sidebar shows "ready" for a provider with no real
-        // credentials, and auto_fallback_model refuses to switch off it
-        // after the user pastes a key for a different provider (#13/#15
-        // root cause).
-        other => other
-            .api_key_env()
-            .and_then(|v| std::env::var(v).ok())
-            .map(|val| !val.trim().is_empty())
-            .unwrap_or(false),
-    }
-}
-
-/// If `cfg.model`'s provider has no credentials, pick the first provider
-/// that does and return its default model. Returns `None` when the
-/// current model is already fine or nothing else is usable.
-///
-/// Intended for the GUI — it gets called at startup and after every
-/// `api_key_set` so the sidebar's active-provider indicator and the
-/// persisted `.thclaws/settings.json` settle onto whatever the user
-/// actually has configured.
-fn auto_fallback_model(cfg: &AppConfig) -> Option<String> {
-    use crate::providers::ProviderKind;
-    if provider_has_credentials(cfg) {
-        return None;
-    }
-    const ORDER: &[ProviderKind] = &[
-        ProviderKind::Anthropic,
-        ProviderKind::OpenAI,
-        ProviderKind::AgenticPress,
-        ProviderKind::OpenRouter,
-        ProviderKind::Gemini,
-        ProviderKind::DashScope,
-        ProviderKind::ZAi,
-        ProviderKind::DeepSeek,
-        ProviderKind::ThaiLLM,
-        // Local providers omitted here: if the user explicitly
-        // configured one of them, they're already "ready" above; we
-        // don't want to auto-fall-back to Ollama for a user who has
-        // no local Ollama running.
-    ];
-    for kind in ORDER {
-        if kind_has_credentials(Some(*kind)) {
-            return Some(kind.default_model().to_string());
-        }
-    }
-    None
-}
+// provider_has_credentials / kind_has_credentials / auto_fallback_model
+// moved to crate::providers in M6.36 SERVE9e so the WS transport can
+// share the same readiness logic. Re-import here to keep gui.rs's
+// existing call sites compiling unchanged.
+use crate::providers::{auto_fallback_model, kind_has_credentials, provider_has_credentials};
 
 /// Resolve the AGENTS.md path for the Settings → Instructions editor.
 /// `scope="global"` → `~/.config/thclaws/AGENTS.md`, `scope="folder"` →
 /// `./AGENTS.md` in the current working directory.
-fn instructions_path(scope: &str) -> Option<std::path::PathBuf> {
-    match scope {
-        "global" => crate::util::home_dir().map(|h| h.join(".config/thclaws/AGENTS.md")),
-        _ => std::env::current_dir().ok().map(|d| d.join("AGENTS.md")),
-    }
-}
+// instructions_path moved to crate::instructions in M6.36 SERVE9d.
+use crate::instructions::instructions_path;
 
 /// Build the `mcp_update` IPC payload: the configured MCP servers for
 /// this session (read fresh from disk so removals via `/mcp remove` are
@@ -669,26 +349,12 @@ pub(crate) fn build_mcp_update_payload() -> serde_json::Value {
 
 /// Build the `kms_update` IPC payload: every discoverable KMS tagged with
 /// whether it's currently attached to this project.
+// build_kms_update_payload moved to crate::kms::build_update_payload
+// in M6.36 SERVE9c. Re-export the old name as a thin alias so existing
+// gui.rs callers (kms_list / kms_toggle / kms_new arms still here, the
+// SendInitialState builder) keep compiling unchanged.
 pub(crate) fn build_kms_update_payload() -> serde_json::Value {
-    let active: std::collections::HashSet<String> = crate::config::ProjectConfig::load()
-        .and_then(|c| c.kms.map(|k| k.active))
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    let kmss: Vec<serde_json::Value> = crate::kms::list_all()
-        .into_iter()
-        .map(|k| {
-            serde_json::json!({
-                "name": k.name,
-                "scope": k.scope.as_str(),
-                "active": active.contains(&k.name),
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "type": "kms_update",
-        "kmss": kmss,
-    })
+    crate::kms::build_update_payload()
 }
 
 fn escape_for_js(s: &str) -> String {
@@ -717,33 +383,9 @@ fn is_macos_close_shortcut(event: &tao::event::KeyEvent, modifiers: ModifiersSta
 /// and anything that doesn't parse as a real URL — preventing a hostile
 /// MCP server from getting the user to launch arbitrary local handlers
 /// just because they clicked a link in chat.
-fn is_safe_external_url(s: &str) -> bool {
-    match url::Url::parse(s) {
-        Ok(u) => matches!(u.scheme(), "http" | "https") && u.host_str().is_some(),
-        Err(_) => false,
-    }
-}
-
-/// Open a URL in the OS default browser. URL must already be vetted by
-/// [`is_safe_external_url`]; this function does no validation itself.
-fn open_external_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // `start` is a `cmd` builtin; the empty "" arg is the title slot
-        // — without it, a quoted URL gets eaten as the title.
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .spawn();
-    }
-}
+// is_safe_external_url + open_external_url moved to crate::external_url
+// in M6.36 SERVE9h.
+use crate::external_url::{is_safe_external_url, open_external_url};
 
 /// Assemble the cross-provider model list payload for the sidebar's
 /// inline picker dropdown (#49). Catalogue rows for every known
@@ -751,78 +393,10 @@ fn open_external_url(url: &str) {
 /// after launch are visible without restart. The Ollama probe uses a
 /// short timeout — failure just falls back to whatever rows are in the
 /// baseline catalogue.
-async fn build_all_models_payload() -> String {
-    use crate::providers::{Provider, ProviderKind};
-    let cat = crate::model_catalogue::EffectiveCatalogue::load();
-
-    // Live Ollama models (best-effort) — merged into the ollama group
-    // alongside catalogue rows. dedup on `id` so cached entries don't
-    // double up with live ones.
-    let ollama_live: Vec<String> = {
-        let base = std::env::var("OLLAMA_BASE_URL")
-            .unwrap_or_else(|_| crate::providers::ollama::DEFAULT_BASE_URL.to_string());
-        let provider = crate::providers::ollama::OllamaProvider::new().with_base_url(base);
-        // tokio timeout — short so an unreachable host doesn't stall
-        // the dropdown render.
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(800),
-            provider.list_models(),
-        )
-        .await
-        {
-            Ok(Ok(models)) => models.into_iter().map(|m| m.id).collect(),
-            _ => Vec::new(),
-        }
-    };
-
-    let mut groups: Vec<serde_json::Value> = Vec::new();
-    for kind in ProviderKind::ALL {
-        let name = kind.name();
-        let mut model_ids: std::collections::BTreeMap<String, Option<u32>> =
-            std::collections::BTreeMap::new();
-        for (id, entry) in cat.list_models_for_provider(name) {
-            // Normalise to the canonical thclaws-routable form: if
-            // `ProviderKind::detect` doesn't already resolve `id` to
-            // the current provider, prepend the provider name as a
-            // prefix so the picker ships ids that survive the round
-            // trip through `model_set` → `detect` → `build_provider`.
-            // OpenRouter is the live case — its catalogue stores rows
-            // like `qwen/qwen-2.5-72b-instruct` (the upstream wire id),
-            // and without this normalisation `detect` would route them
-            // to DashScope on the leading `qwen` prefix and the wrong
-            // provider would 404 on a model it doesn't ship.
-            let canonical = if ProviderKind::detect(&id) == Some(*kind) {
-                id
-            } else {
-                format!("{name}/{id}")
-            };
-            model_ids.insert(canonical, entry.context);
-        }
-        if matches!(kind, ProviderKind::Ollama) {
-            for id in &ollama_live {
-                model_ids.entry(id.clone()).or_insert(None);
-            }
-        }
-        if model_ids.is_empty() {
-            continue;
-        }
-        let model_rows: Vec<serde_json::Value> = model_ids
-            .into_iter()
-            .map(|(id, ctx)| serde_json::json!({ "id": id, "context": ctx }))
-            .collect();
-        groups.push(serde_json::json!({
-            "provider": name,
-            "models": model_rows,
-        }));
-    }
-
-    serde_json::json!({
-        "type": "all_models_list",
-        "groups": groups,
-        "ollama_reachable": !ollama_live.is_empty(),
-    })
-    .to_string()
-}
+// build_all_models_payload moved to crate::providers in M6.36 SERVE9g
+// so the WS transport's request_all_models IPC arm can call it from
+// the always-on dispatch table.
+use crate::providers::build_all_models_payload;
 
 fn request_gui_shutdown(shared: &SharedSessionHandle, control_flow: &mut ControlFlow) {
     let _ = shared.input_tx.send(ShellInput::SaveAndQuit);
@@ -1051,12 +625,58 @@ pub fn run_gui() {
             let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) else {
                 return;
             };
+
+            // M6.36 SERVE9: delegate to the transport-agnostic dispatch
+            // first. Migrated arms (plan-sidebar, app_close, etc.) are
+            // handled there; if `handle_ipc` returns true we're done.
+            // Anything not yet migrated returns false and falls through
+            // to the wry-only match below.
+            //
+            // The wry-flavored IpcContext built here mirrors what
+            // server.rs::handle_socket builds for WebSocket clients —
+            // same dispatch table, transport-specific bridges only
+            // differ in their callback bodies.
+            {
+                let proxy_dispatch = proxy_for_ipc.clone();
+                let dispatch: crate::ipc::DispatchFn = Arc::new(move |payload: String| {
+                    let _ = proxy_dispatch.send_event(UserEvent::Dispatch(payload));
+                });
+                let proxy_quit = proxy_for_ipc.clone();
+                let on_quit: crate::ipc::QuitFn = Arc::new(move || {
+                    let _ = proxy_quit.send_event(UserEvent::QuitRequested);
+                });
+                let proxy_init = proxy_for_ipc.clone();
+                let on_send_initial_state: crate::ipc::SendInitialStateFn = Arc::new(move || {
+                    let _ = proxy_init.send_event(UserEvent::SendInitialState);
+                });
+                // Zoom is wry-specific — the on_zoom callback fires
+                // via the existing `gui_set_zoom` arm below (not yet
+                // migrated), so this stub closure is never called from
+                // the shared dispatch path today.
+                let on_zoom: crate::ipc::ZoomFn = Arc::new(|_scale: f64| {});
+                let ipc_ctx = crate::ipc::IpcContext {
+                    shared: shared_for_ipc.clone(),
+                    approver: approver_for_ipc.clone(),
+                    pending_asks: pending_asks_for_ipc.clone(),
+                    dispatch,
+                    on_quit,
+                    on_send_initial_state,
+                    on_zoom,
+                };
+                if crate::ipc::handle_ipc(msg.clone(), &ipc_ctx) {
+                    return;
+                }
+            }
+
             let ty = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
             match ty {
-                "app_close" => {
-                    let _ = proxy_for_ipc.send_event(UserEvent::QuitRequested);
-                }
+                // Note: app_close, shell_input, frontend_ready,
+                // approval_response, shell_cancel, new_session,
+                // plan_approve, plan_cancel, plan_retry_step,
+                // plan_skip_step, plan_stalled_continue all migrated to
+                // crate::ipc::handle_ipc and handled above. Remaining
+                // arms continue to live here pending SERVE9 follow-ups.
                 "mcp_call_tool" => {
                     // Widget-initiated tool call from an embedded MCP
                     // App. Forward to the worker; the response comes
@@ -1165,158 +785,6 @@ pub fn run_gui() {
                     let _ = project.save();
                     let clamped = project.gui_scale.unwrap_or(scale);
                     let _ = proxy_for_ipc.send_event(UserEvent::ZoomChanged(clamped));
-                }
-                "plan_approve" => {
-                    // User clicked the sidebar Approve button (M3).
-                    // Approve = "execute this plan autonomously" — flip
-                    // mode to Auto so writes run unattended (no
-                    // per-call approval popups during step execution).
-                    // pre_plan_mode stays stashed; the prior mode is
-                    // restored automatically when the final step
-                    // transitions to Done (see plan_state::update_step
-                    // → fire_completion).
-                    //
-                    // M6.9 (Bug C2): defensive guard — only act if
-                    // there's actually a plan to approve. A malformed
-                    // IPC, a stale Approve click after Cancel, or a
-                    // race could otherwise flip mode and push "Begin
-                    // executing the plan." with no plan in scope —
-                    // confusing the model. Also guard against
-                    // approving an already-finished plan (Bug C1's
-                    // companion).
-                    use crate::tools::plan_state::StepStatus;
-                    let plan = crate::tools::plan_state::get();
-                    let has_unfinished_plan = plan
-                        .as_ref()
-                        .map(|p| p.steps.iter().any(|s| s.status != StepStatus::Done))
-                        .unwrap_or(false);
-                    if !has_unfinished_plan {
-                        // Nothing to approve. Don't flip mode, don't push.
-                        // `return` exits this IPC handler closure for
-                        // this single request; the next IPC will be
-                        // processed normally.
-                        return;
-                    }
-                    crate::permissions::set_current_mode_and_broadcast(
-                        crate::permissions::PermissionMode::Auto,
-                    );
-                    // Auto-nudge: kick off a turn so the model starts
-                    // executing immediately. Without this, the user
-                    // has to type "begin" / "go" to wake the agent
-                    // loop — the SubmitPlan turn ended when no further
-                    // tool calls were emitted, and permission flips
-                    // alone don't trigger a new turn.
-                    let _ = shared_for_ipc.input_tx.send(
-                        crate::shared_session::ShellInput::Line(
-                            "Begin executing the plan.".to_string(),
-                        ),
-                    );
-                }
-                "plan_cancel" => {
-                    // User clicked Cancel (M3). Execution never
-                    // started; clear the plan and restore the pre-plan
-                    // mode. Model gets `null` PlanUpdate on next turn.
-                    let restored = crate::permissions::take_pre_plan_mode()
-                        .unwrap_or(crate::permissions::PermissionMode::Ask);
-                    crate::permissions::set_current_mode_and_broadcast(restored);
-                    crate::tools::plan_state::clear();
-                }
-                "plan_retry_step" => {
-                    // User clicked Retry on a failed step (M4.2).
-                    // Failed → InProgress is a legal gate transition,
-                    // so this routes through the normal `update_step`
-                    // path. Auto-nudge a fresh turn so the model picks
-                    // up where it left off and retries.
-                    //
-                    // M6.7: only flip to InProgress when the step is
-                    // currently Failed. Earlier code unconditionally
-                    // called update_step regardless of state, which
-                    // produced the "illegal step transition InProgress
-                    // → InProgress" error when a race put the step
-                    // into InProgress before the IPC handler ran. The
-                    // status check makes Retry a no-op in that case
-                    // (the step is already running — what the user
-                    // wanted).
-                    let step_id = msg
-                        .get("step_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if !step_id.is_empty() {
-                        use crate::tools::plan_state::StepStatus;
-                        let current = crate::tools::plan_state::get()
-                            .and_then(|p| p.step_by_id(&step_id).map(|s| s.status));
-                        if current == Some(StepStatus::Failed) {
-                            let _ = crate::tools::plan_state::update_step(
-                                &step_id,
-                                StepStatus::InProgress,
-                                None,
-                            );
-                            // M6.1: Retry is a user-initiated fresh
-                            // chance — reset the per-step attempt
-                            // counter so the driver doesn't immediately
-                            // force-Failed again on the next turn end.
-                            crate::tools::plan_state::reset_step_attempts_external();
-                            let _ = shared_for_ipc.input_tx.send(
-                                crate::shared_session::ShellInput::Line(format!(
-                                    "Retry the failed step (\"{step_id}\")."
-                                )),
-                            );
-                        }
-                        // If status is anything else (Todo, InProgress,
-                        // Done), Retry is a no-op — the step doesn't
-                        // need retrying or is already in progress.
-                    }
-                }
-                "plan_stalled_continue" => {
-                    // User clicked Continue on the "model seems stuck"
-                    // banner (M4.4). Reset the stall counter so the
-                    // banner disappears, and auto-nudge a fresh turn
-                    // so the model gets another shot at the current
-                    // step. If it stalls again, the detector will
-                    // re-trigger after the next 3 unproductive turns.
-                    crate::tools::plan_state::reset_stall_counter_external();
-                    // M6.1: also reset the per-step attempt counter —
-                    // the user has explicitly endorsed another round
-                    // on this step, so the retry budget should restart.
-                    crate::tools::plan_state::reset_step_attempts_external();
-                    let _ = shared_for_ipc.input_tx.send(
-                        crate::shared_session::ShellInput::Line(
-                            "Continue with the plan. If you're stuck, \
-                             commit to a UpdatePlanStep transition — \
-                             either advance the current step to done, \
-                             or mark it failed with a brief note so \
-                             the user can retry / skip / abort."
-                                .to_string(),
-                        ),
-                    );
-                }
-                "plan_skip_step" => {
-                    // User clicked Skip on a failed step (M4.2). Force
-                    // the step to Done with a "skipped by user" note —
-                    // this bypasses the normal gate (Failed → Done is
-                    // not legal through `update_step`) on purpose:
-                    // Skip is the user's deliberate override. The
-                    // audit note records the override. Auto-nudge a
-                    // fresh turn so the model moves on to the next
-                    // step.
-                    let step_id = msg
-                        .get("step_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if !step_id.is_empty() {
-                        let _ = crate::tools::plan_state::force_step_done(
-                            &step_id,
-                            "skipped by user",
-                        );
-                        let _ = shared_for_ipc.input_tx.send(
-                            crate::shared_session::ShellInput::Line(format!(
-                                "Step (\"{step_id}\") was skipped by the user. \
-                                 Continue with the next step in the plan."
-                            )),
-                        );
-                    }
                 }
                 "request_all_models" => {
                     // Sidebar's inline model picker dropdown asking for
@@ -1464,22 +932,7 @@ pub fn run_gui() {
                     let _ = proxy_for_ipc
                         .send_event(UserEvent::SessionLoaded(payload.to_string()));
                 }
-                "get_cwd" => {
-                    let cwd = std::env::current_dir()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| ".".into());
-                    let needs_modal = true;
-                    let recent = load_recent_dirs();
-                    let payload = serde_json::json!({
-                        "type": "current_cwd",
-                        "path": cwd,
-                        "needs_modal": needs_modal,
-                        "recent_dirs": recent,
-                    });
-                    let _ = proxy_for_ipc.send_event(
-                        UserEvent::SessionLoaded(payload.to_string()),
-                    );
-                }
+                // get_cwd migrated to crate::ipc::handle_ipc.
                 "pick_directory" => {
                     let start_dir = msg.get("start").and_then(|v| v.as_str())
                         .map(String::from)
@@ -1530,46 +983,7 @@ pub fn run_gui() {
                     let _ = proxy_for_ipc
                         .send_event(UserEvent::FileContent(payload.to_string()));
                 }
-                "set_cwd" => {
-                    if let Some(path) = msg.get("path").and_then(|v| v.as_str()) {
-                        let p = std::path::Path::new(path);
-                        if p.is_dir() {
-                            let _ = std::env::set_current_dir(p);
-                            let _ = crate::sandbox::Sandbox::init();
-                            save_recent_dir(path);
-                            // Tell the running worker to reload project
-                            // settings from the new cwd and swap its model
-                            // accordingly — without this, the session keeps
-                            // whatever model was loaded at startup, even
-                            // when the new project's settings.json says
-                            // something different. Project settings must
-                            // win — that's the contract.
-                            // Tell the worker to reload settings + swap
-                            // model from the new project's settings.json.
-                            let _ = shared_for_ipc
-                                .input_tx
-                                .send(ShellInput::ChangeCwd(p.to_path_buf()));
-                            let payload = serde_json::json!({
-                                "type": "cwd_changed",
-                                "path": path,
-                                "ok": true,
-                            });
-                            let _ = proxy_for_ipc.send_event(
-                                UserEvent::SessionLoaded(payload.to_string()),
-                            );
-                        } else {
-                            let payload = serde_json::json!({
-                                "type": "cwd_changed",
-                                "path": path,
-                                "ok": false,
-                                "error": format!("'{}' is not a valid directory", path),
-                            });
-                            let _ = proxy_for_ipc.send_event(
-                                UserEvent::SessionLoaded(payload.to_string()),
-                            );
-                        }
-                    }
-                }
+                // set_cwd migrated to crate::ipc::handle_ipc.
                 "shell_input" | "chat_prompt" | "pty_write" => {
                     // Unified entry point: a line of user input from
                     // either tab. `chat_prompt` and `pty_write` are
@@ -1665,35 +1079,9 @@ pub fn run_gui() {
                     // session is already running by this point.
                     let _ = proxy_for_ipc.send_event(UserEvent::SendInitialState);
                 }
-                "shell_cancel" => {
-                    // Ctrl+C on an empty line in the Terminal tab (or an
-                    // explicit cancel action from Chat) — request the
-                    // current turn stop at its next streaming event.
-                    shared_for_ipc.request_cancel();
-                }
-                "frontend_ready" => {
-                    // The frontend calls this once it's past the startup
-                    // modals (working-directory + secrets-backend pickers),
-                    // which releases deferred startup work like MCP spawn
-                    // approval. Idempotent — safe to call on every mount.
-                    shared_for_ipc.ready_gate.signal();
-                }
-                "approval_response" => {
-                    // Frontend approval modal resolved. Parse out the
-                    // request id + decision and hand them to the
-                    // GuiApprover, which unblocks the waiting agent call.
-                    let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let decision_str = msg
-                        .get("decision")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("deny");
-                    let decision = match decision_str {
-                        "allow" => crate::permissions::ApprovalDecision::Allow,
-                        "allow_for_session" => crate::permissions::ApprovalDecision::AllowForSession,
-                        _ => crate::permissions::ApprovalDecision::Deny,
-                    };
-                    approver_for_ipc.resolve(id, decision);
-                }
+                // shell_cancel + frontend_ready + approval_response
+                // migrated to crate::ipc::handle_ipc and handled at the
+                // top of this closure via the delegate.
                 "team_enabled_get" => {
                     let enabled = crate::config::ProjectConfig::load()
                         .and_then(|c| c.team_enabled)
@@ -1732,15 +1120,7 @@ pub fn run_gui() {
                     // no PTY to kill or resize; ignore quietly so the
                     // frontend can keep emitting them during transition.
                 }
-                "new_session" => {
-                    let _ = shared_for_ipc.input_tx.send(ShellInput::NewSession);
-                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        serde_json::json!({"type": "new_session_ack"}).to_string(),
-                    ));
-                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        serde_json::json!({"type": "terminal_clear"}).to_string(),
-                    ));
-                }
+                // new_session migrated to crate::ipc::handle_ipc.
                 "config_poll" => {
                     // Re-read config so sidebar picks up model/provider changes.
                     let cfg = AppConfig::load().unwrap_or_default();
@@ -1834,59 +1214,8 @@ pub fn run_gui() {
                         payload.to_string()
                     ));
                 }
-                "instructions_get" => {
-                    let scope = msg.get("scope").and_then(|v| v.as_str()).unwrap_or("folder");
-                    let path = instructions_path(scope);
-                    let content = path
-                        .as_ref()
-                        .and_then(|p| std::fs::read_to_string(p).ok())
-                        .unwrap_or_default();
-                    let payload = serde_json::json!({
-                        "type": "instructions_content",
-                        "scope": scope,
-                        "path": path.as_ref().map(|p| p.display().to_string()),
-                        "content": content,
-                    });
-                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        payload.to_string()
-                    ));
-                }
-                "instructions_save" => {
-                    let scope = msg.get("scope").and_then(|v| v.as_str()).unwrap_or("folder");
-                    let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    let (ok, error, path) = match instructions_path(scope) {
-                        Some(path) => {
-                            if let Some(parent) = path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            match std::fs::write(&path, content) {
-                                Ok(()) => (true, String::new(), Some(path.display().to_string())),
-                                Err(e) => (false, e.to_string(), Some(path.display().to_string())),
-                            }
-                        }
-                        None => (
-                            false,
-                            "path not resolvable (home directory unavailable)".into(),
-                            None,
-                        ),
-                    };
-                    let payload = serde_json::json!({
-                        "type": "instructions_save_result",
-                        "scope": scope,
-                        "path": path,
-                        "ok": ok,
-                        "error": error,
-                    });
-                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        payload.to_string()
-                    ));
-                }
-                "kms_list" => {
-                    let payload = build_kms_update_payload();
-                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        payload.to_string()
-                    ));
-                }
+                // instructions_get + instructions_save migrated to crate::ipc::handle_ipc.
+                // kms_list migrated to crate::ipc::handle_ipc.
                 "kms_toggle" => {
                     let name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
                     let active = msg.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1994,27 +1323,7 @@ pub fn run_gui() {
                     let _ = arboard::Clipboard::new()
                         .and_then(|mut c| c.set_text(text.to_string()));
                 }
-                "theme_get" => {
-                    let payload = serde_json::json!({
-                        "type": "theme",
-                        "mode": load_theme(),
-                    });
-                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        payload.to_string()
-                    ));
-                }
-                "theme_set" => {
-                    let requested = msg.get("mode").and_then(|v| v.as_str()).unwrap_or("system");
-                    let normalized = normalize_theme(requested).to_string();
-                    save_theme(&normalized);
-                    let payload = serde_json::json!({
-                        "type": "theme",
-                        "mode": normalized,
-                    });
-                    let _ = proxy_for_ipc.send_event(UserEvent::SessionLoaded(
-                        payload.to_string()
-                    ));
-                }
+                // theme_get + theme_set migrated to crate::ipc::handle_ipc.
                 "secrets_backend_get" => {
                     let backend = crate::secrets::get_backend()
                         .map(|b| b.as_str().to_string());

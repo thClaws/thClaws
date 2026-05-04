@@ -1271,6 +1271,32 @@ pub fn lint(kref: &KmsRef) -> Result<LintReport> {
     Ok(report)
 }
 
+/// Build the `kms_update` envelope the frontend's KMS sidebar
+/// consumes. M6.36 SERVE9c — moved from `gui.rs` to an always-on
+/// module so the WS transport's `kms_list` IPC arm can call it from
+/// `crate::ipc::handle_ipc`. Same JSON shape both transports emit.
+pub fn build_update_payload() -> serde_json::Value {
+    let active: std::collections::HashSet<String> = crate::config::ProjectConfig::load()
+        .and_then(|c| c.kms.map(|k| k.active))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let kmss: Vec<serde_json::Value> = list_all()
+        .into_iter()
+        .map(|k| {
+            serde_json::json!({
+                "name": k.name,
+                "scope": k.scope.as_str(),
+                "active": active.contains(&k.name),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "type": "kms_update",
+        "kmss": kmss,
+    })
+}
+
 /// Test-only lock shared by every test in this module *and* in
 /// `tools::kms` that mutates the process env (HOME, cwd). Without
 /// this, parallel tests race on env — which can also break unrelated

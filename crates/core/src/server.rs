@@ -232,7 +232,9 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
                 let Ok(msg) = serde_json::from_str::<serde_json::Value>(text.as_str()) else {
                     continue;
                 };
-                handle_ipc(msg, &ctx);
+                // Web has no fall-through transport — anything
+                // handle_ipc doesn't recognize is silently dropped.
+                let _handled = handle_ipc(msg, &ctx);
             }
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {} // ignore Ping/Pong/Binary for now

@@ -476,6 +476,55 @@ fn open_browser(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Build the `sso_state` envelope the sidebar consumes. Three states:
+///
+/// - Policy disabled (or no policy active) → `{enabled: false, logged_in: false}`
+/// - Policy active + valid session → `{enabled: true, logged_in: true, issuer, email, name, sub, expires_in_secs}`
+/// - Policy active + no/expired session → `{enabled: true, logged_in: false, issuer}`
+///
+/// M6.36 SERVE9h — moved from `gui.rs` so the WS transport's
+/// `sso_status` IPC arm can call it from the always-on dispatch table.
+pub fn build_state_payload() -> serde_json::Value {
+    let policy = crate::policy::active()
+        .and_then(|a| a.policy.policies.sso.as_ref())
+        .cloned();
+    let policy = match policy {
+        Some(p) if p.enabled => p,
+        _ => {
+            return serde_json::json!({
+                "type": "sso_state",
+                "enabled": false,
+                "logged_in": false,
+            });
+        }
+    };
+    match current_session(&policy) {
+        Some(s) if !s.is_expired() => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let remaining = s.expires_at.saturating_sub(now);
+            serde_json::json!({
+                "type": "sso_state",
+                "enabled": true,
+                "logged_in": true,
+                "issuer": s.issuer,
+                "email": s.email,
+                "name": s.name,
+                "sub": s.sub,
+                "expires_in_secs": remaining,
+            })
+        }
+        _ => serde_json::json!({
+            "type": "sso_state",
+            "enabled": true,
+            "logged_in": false,
+            "issuer": policy.issuer_url,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
