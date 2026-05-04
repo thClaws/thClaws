@@ -222,8 +222,15 @@ fn fire_broadcaster() {
 
 /// M6.29: build the goal-continue audit prompt by filling the embedded
 /// template with the current goal's objective + budget consumption.
+///
+/// Phase B1: when a token budget is set AND it's been exhausted
+/// (`tokens_used >= budget_tokens`), swap to the `GOAL_BUDGET_LIMIT`
+/// soft-stop template instead. The runtime keeps firing iterations
+/// until the model marks the goal terminal, but each fire injects the
+/// "wrap up" prompt — discouraging new substantive work and pushing the
+/// model toward summarize / identify blockers / give next step.
+/// Mirrors codex's runtime continuation soft-stop behavior.
 pub fn build_audit_prompt(g: &GoalState) -> String {
-    let template = crate::prompts::defaults::GOAL_CONTINUE;
     let token_budget = g
         .budget_tokens
         .map(|n| n.to_string())
@@ -233,6 +240,12 @@ pub fn build_audit_prompt(g: &GoalState) -> String {
         .map(|n| n.to_string())
         .unwrap_or_else(|| "(unlimited)".to_string());
     let time_used = g.time_used_secs();
+    let budget_exhausted = g.budget_tokens.map(|b| g.tokens_used >= b).unwrap_or(false);
+    let template = if budget_exhausted {
+        crate::prompts::defaults::GOAL_BUDGET_LIMIT
+    } else {
+        crate::prompts::defaults::GOAL_CONTINUE
+    };
     let prior_audit = g
         .last_audit
         .as_deref()
@@ -348,5 +361,38 @@ mod tests {
         let p = build_audit_prompt(&g);
         assert!(p.contains("ship X"));
         assert!(p.contains("100000"));
+    }
+
+    #[test]
+    fn build_audit_prompt_uses_continue_template_under_budget() {
+        let _g = lock();
+        let mut g = GoalState::new("ship X".into(), Some(100_000), None);
+        g.tokens_used = 50_000;
+        let p = build_audit_prompt(&g);
+        // Continue template includes the audit checklist instruction.
+        assert!(p.contains("completion audit"));
+        assert!(!p.contains("budget-exhausted"));
+    }
+
+    #[test]
+    fn build_audit_prompt_swaps_to_budget_limit_template_when_exhausted() {
+        let _g = lock();
+        let mut g = GoalState::new("ship X".into(), Some(100_000), None);
+        g.tokens_used = 100_000; // exactly at budget
+        let p = build_audit_prompt(&g);
+        assert!(p.contains("budget-exhausted"));
+        assert!(p.contains("Wrap up this turn"));
+        // Soft-stop template doesn't carry the full audit checklist.
+        assert!(!p.contains("completion audit"));
+    }
+
+    #[test]
+    fn build_audit_prompt_uses_continue_template_when_no_budget_set() {
+        let _g = lock();
+        let mut g = GoalState::new("ship X".into(), None, None);
+        g.tokens_used = 9_999_999;
+        let p = build_audit_prompt(&g);
+        assert!(p.contains("completion audit"));
+        assert!(!p.contains("budget-exhausted"));
     }
 }

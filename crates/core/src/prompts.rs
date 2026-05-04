@@ -29,6 +29,14 @@ pub mod defaults {
     /// {{ tokens_used }}, {{ token_budget }}, {{ remaining_tokens }},
     /// {{ iterations_done }}, {{ prior_audit }}.
     pub const GOAL_CONTINUE: &str = include_str!("default_prompts/goal_continue.md");
+    /// Phase B1: budget-exhausted soft-stop prompt fired by `/goal continue`
+    /// when `tokens_used >= budget_tokens`. Tells the model to wrap up
+    /// (summarize progress, identify blockers, give the user a next step)
+    /// instead of starting new substantive work. Mirrors codex's
+    /// `budget_limit.md`. Variables: {{ objective }},
+    /// {{ time_used_seconds }}, {{ tokens_used }}, {{ token_budget }},
+    /// {{ iterations_done }}.
+    pub const GOAL_BUDGET_LIMIT: &str = include_str!("default_prompts/goal_budget_limit.md");
 }
 
 fn project_path(name: &str) -> PathBuf {
