@@ -34,6 +34,12 @@ pub enum AgentEvent {
     IterationStart { iteration: usize },
     /// A chunk of assistant text — for live streaming.
     Text(String),
+    /// A chunk of model reasoning (thinking-model `reasoning_content` or
+    /// inline `<think>` tags). Surfaced as a separate event so chat
+    /// surfaces can render it dimmed/collapsed without blending into
+    /// the user-visible assistant text. Persistence still happens via
+    /// the consolidated `Thinking` block on the assistant message.
+    Thinking(String),
     /// Tool is about to be called.
     ToolCallStart {
         id: String,
@@ -991,12 +997,12 @@ impl Agent {
                         }
                         AssembledEvent::Thinking(s) => {
                             // Capture for persistence so it can be echoed
-                            // back next turn (DeepSeek v4 etc. require it).
-                            // Not surfaced as a separate AgentEvent yet —
-                            // existing UI consumers don't have a thinking
-                            // sink. When the GUI gets a "show reasoning"
-                            // pane, route a new event through here.
+                            // back next turn (DeepSeek v4 etc. require
+                            // reasoning_content to round-trip), and also
+                            // surface live so chat surfaces can render
+                            // a dimmed reasoning block as the model thinks.
                             turn_thinking.push_str(&s);
+                            yield AgentEvent::Thinking(s);
                         }
                         AssembledEvent::ToolParseFailed { id, name, error } => {
                             // L4 (M6.17): the provider sent malformed JSON
@@ -1506,6 +1512,7 @@ where
         match ev? {
             AgentEvent::IterationStart { iteration } => out.iterations = iteration + 1,
             AgentEvent::Text(s) => out.text.push_str(&s),
+            AgentEvent::Thinking(_) => {}
             AgentEvent::ToolCallStart { name, .. } => out.tool_calls.push(name),
             AgentEvent::ToolCallResult { .. } => {}
             AgentEvent::ToolCallDenied { name, .. } => out.tool_denials.push(name),

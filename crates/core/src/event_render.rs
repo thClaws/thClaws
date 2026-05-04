@@ -48,6 +48,11 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
             "text": strip_ansi(text),
         })
         .to_string()],
+        ViewEvent::AssistantThinkingDelta(text) => vec![serde_json::json!({
+            "type": "chat_thinking_delta",
+            "text": strip_ansi(text),
+        })
+        .to_string()],
         ViewEvent::ToolCallStart { name, label, input } => vec![serde_json::json!({
             "type": "chat_tool_call",
             "name": strip_ansi(label),
@@ -288,6 +293,12 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
             Some(body)
         }
         ViewEvent::AssistantTextDelta(text) => Some(text.replace('\n', "\r\n")),
+        ViewEvent::AssistantThinkingDelta(text) => {
+            // Reasoning rendered dim-italic so it's visibly distinct from
+            // the assistant's final answer in the terminal stream.
+            let body = text.replace('\n', "\r\n");
+            Some(format!("\x1b[2;3m{body}\x1b[0m"))
+        }
         ViewEvent::ToolCallStart { .. } | ViewEvent::ToolCallResult { .. } => {
             unreachable!("handled above")
         }

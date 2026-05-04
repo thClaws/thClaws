@@ -6002,6 +6002,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     lead_log!("{s}");
                     let _ = std::io::stdout().flush();
                 }
+                Ok(AgentEvent::Thinking(s)) => {
+                    // Dim-italic so reasoning is visibly distinct from
+                    // the model's final answer in the CLI stream.
+                    print!("\x1b[2;3m{s}\x1b[0m");
+                    let _ = std::io::stdout().flush();
+                }
                 Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
                     let detail = match name.as_str() {
                         "Bash" => input

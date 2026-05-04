@@ -156,6 +156,13 @@ pub enum ShellInput {
 pub enum ViewEvent {
     UserPrompt(String),
     AssistantTextDelta(String),
+    /// A chunk of the model's reasoning (`reasoning_content` from
+    /// DeepSeek v4 / OpenAI o-series / NVIDIA NIM glm4.7 / etc., or
+    /// `<think>`-tagged spans from implicit thinking models). Chat
+    /// renders it dimmed/collapsed above the assistant text; terminal
+    /// renders it dim-italic so the live thinking is visible without
+    /// looking like the model's final answer.
+    AssistantThinkingDelta(String),
     ToolCallStart {
         name: String,
         label: String,
@@ -1921,6 +1928,9 @@ async fn drive_turn_stream(
                 write_lead_log(&state.lead_log, &s);
                 let _ = events_tx.send(ViewEvent::AssistantTextDelta(s));
             }
+            Ok(AgentEvent::Thinking(s)) => {
+                let _ = events_tx.send(ViewEvent::AssistantThinkingDelta(s));
+            }
             Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
                 let label = format_tool_label(&name, &input);
                 write_lead_log(
@@ -2272,6 +2282,9 @@ async fn handle_team_messages(
             Ok(AgentEvent::Text(s)) => {
                 write_lead_log(&state.lead_log, &s);
                 let _ = events_tx.send(ViewEvent::AssistantTextDelta(s));
+            }
+            Ok(AgentEvent::Thinking(s)) => {
+                let _ = events_tx.send(ViewEvent::AssistantThinkingDelta(s));
             }
             Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
                 let label = format_tool_label(&name, &input);

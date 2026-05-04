@@ -17,6 +17,12 @@ import { McpAppIframe } from "./McpAppIframe";
 type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system";
   content: string;
+  /// `assistant` messages only — accumulated `reasoning_content` from
+  /// thinking models (DeepSeek v4/r1, OpenAI o-series, NVIDIA NIM
+  /// glm4.7, etc.). Rendered as a collapsible dimmed block above the
+  /// assistant text so the user can see the model is working without
+  /// the reasoning blending into the final answer.
+  thinking?: string;
   toolName?: string;
   /// `tool` messages only — flips from false (running) to true (done)
   /// when the matching `chat_tool_result` arrives. Drives the leading
@@ -121,10 +127,18 @@ export function ChatView({ active, modalOpen }: Props) {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
+  /// `true` when the model has been streaming for >5s with zero bytes
+  /// arrived (text or thinking). Cold-start latency on hosted providers
+  /// (NVIDIA NIM in particular — 40s+ on the first request to a model)
+  /// can make the UI look frozen; this drives a subtle "Waiting…" hint
+  /// so the user knows the request is in flight.
+  const [waitingFirstByte, setWaitingFirstByte] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const copiedTimerRef = useRef<number | null>(null);
   const errorTimerRef = useRef<number | null>(null);
+  const waitingTimerRef = useRef<number | null>(null);
+  const firstByteSeenRef = useRef(false);
   const { resolved: themeMode } = useTheme();
 
   // Show the slash popup whenever the input begins with `/` and the
@@ -247,6 +261,8 @@ export function ChatView({ active, modalOpen }: Props) {
           ]);
           break;
         case "chat_text_delta":
+          firstByteSeenRef.current = true;
+          setWaitingFirstByte(false);
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (last && last.role === "assistant") {
@@ -256,6 +272,24 @@ export function ChatView({ active, modalOpen }: Props) {
               ];
             }
             return [...prev, { role: "assistant", content: msg.text as string }];
+          });
+          break;
+        case "chat_thinking_delta":
+          firstByteSeenRef.current = true;
+          setWaitingFirstByte(false);
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            const chunk = msg.text as string;
+            if (last && last.role === "assistant") {
+              return [
+                ...prev.slice(0, -1),
+                { ...last, thinking: (last.thinking ?? "") + chunk },
+              ];
+            }
+            return [
+              ...prev,
+              { role: "assistant", content: "", thinking: chunk },
+            ];
           });
           break;
         case "chat_tool_call":
@@ -328,6 +362,11 @@ export function ChatView({ active, modalOpen }: Props) {
         case "chat_done":
           setStreaming(false);
           setAskPrompt(null);
+          setWaitingFirstByte(false);
+          if (waitingTimerRef.current !== null) {
+            window.clearTimeout(waitingTimerRef.current);
+            waitingTimerRef.current = null;
+          }
           break;
         case "ask_user_question": {
           const id = typeof msg.id === "number" ? msg.id : null;
@@ -467,7 +506,20 @@ export function ChatView({ active, modalOpen }: Props) {
     // Don't optimistically add the user bubble — the backend will echo
     // a `chat_user_message` back to us (it does so for both tabs). This
     // keeps a single source of truth about what's in the conversation.
-    if (!text.startsWith("/")) setStreaming(true);
+    if (!text.startsWith("/")) {
+      setStreaming(true);
+      // Arm the cold-start indicator: if no text/thinking delta has
+      // arrived 5s after submit, surface a "Waiting…" hint so the user
+      // knows the request is in flight (NIM cold-starts can take 40s+).
+      firstByteSeenRef.current = false;
+      setWaitingFirstByte(false);
+      if (waitingTimerRef.current !== null) {
+        window.clearTimeout(waitingTimerRef.current);
+      }
+      waitingTimerRef.current = window.setTimeout(() => {
+        if (!firstByteSeenRef.current) setWaitingFirstByte(true);
+      }, 5000);
+    }
     send({
       type: "shell_input",
       text,
@@ -768,6 +820,35 @@ export function ChatView({ active, modalOpen }: Props) {
                   fontSize: isSystem ? "12px" : "14px",
                 }}
               >
+                {isAssistant && msg.thinking && (
+                  // Reasoning models (DeepSeek v4/r1, OpenAI o-series,
+                  // NVIDIA NIM glm4.7, …) emit `reasoning_content` before
+                  // their final answer. Show it as a dim collapsible
+                  // block above the assistant text so the user sees the
+                  // model is working — but visibly distinct from its
+                  // final reply.
+                  <details
+                    className="mb-2 rounded border px-2 py-1"
+                    open={!msg.content}
+                    style={{
+                      borderColor: "var(--border, #2a2a2a)",
+                      background: "var(--surface-1, rgba(255,255,255,0.03))",
+                      fontSize: "12px",
+                      color: "var(--text-secondary)",
+                      fontStyle: "italic",
+                    }}
+                  >
+                    <summary
+                      className="cursor-pointer select-none text-xs"
+                      style={{ fontStyle: "normal" }}
+                    >
+                      ▾ Thinking ({msg.thinking.length} chars)
+                    </summary>
+                    <div className="mt-1 whitespace-pre-wrap">
+                      {msg.thinking}
+                    </div>
+                  </details>
+                )}
                 {isAssistant ? (
                   // Assistant turns are rendered through react-markdown
                   // so headings/lists/code-blocks/tables come out as
@@ -838,6 +919,21 @@ export function ChatView({ active, modalOpen }: Props) {
             </div>
           );
         })}
+        {streaming && waitingFirstByte && (
+          <div className="flex justify-start">
+            <div
+              className="rounded-lg px-3 py-2 text-xs"
+              style={{
+                background: "var(--bg-secondary)",
+                color: "var(--text-secondary)",
+                fontStyle: "italic",
+              }}
+            >
+              Waiting for first response… (some hosted models cold-start
+              for 30–120s before the first byte)
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
