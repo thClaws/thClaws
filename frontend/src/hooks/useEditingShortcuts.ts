@@ -27,11 +27,22 @@ export function useEditingShortcuts() {
       if (!target) return;
       const tag = target.tagName;
       const isInput = tag === "INPUT" || tag === "TEXTAREA";
+
+      const key = e.key.toLowerCase();
+
+      // Handle Cmd+C for any text selection (not just input/textarea)
+      if (key === "c" && !e.shiftKey && !isInput) {
+        const sel = window.getSelection();
+        if (sel && sel.toString().length > 0) {
+          e.preventDefault();
+          send({ type: "clipboard_write", text: sel.toString() });
+        }
+        return;
+      }
+
       if (!isInput) return;
       const field = target as HTMLInputElement | HTMLTextAreaElement;
       if (field.disabled || field.readOnly) return;
-
-      const key = e.key.toLowerCase();
 
       if (key === "v" && !e.shiftKey) {
         e.preventDefault();
