@@ -49,7 +49,7 @@ The same `Agent` loop, `Session`, and `ToolRegistry` back every UX:
 
 ## What makes it different
 
-- **Multi-provider.** Anthropic, OpenAI, Gemini, Alibaba DashScope, OpenRouter, Ollama (local and Anthropic-compatible), Agentic Press, plus a generic **OpenAI-compatible** slot (`oai/*`) for LiteLLM / Portkey / Helicone / vLLM / internal proxies — auto-detected by model name prefix. Switch mid-session with `/model` or swap the whole provider with `/provider`.
+- **Multi-provider.** Anthropic (native + Claude Agent SDK via Claude Code auth), OpenAI (Chat Completions + Responses/Codex), Google Gemini & Gemma, Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding Plan), NVIDIA NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma, THaLLE), OpenRouter, Agentic Press, Azure AI Foundry, Ollama (local, local Anthropic-compatible, and Ollama Cloud), LMStudio, plus a generic **OpenAI-compatible** slot (`oai/*`) for LiteLLM / Portkey / Helicone / vLLM / internal proxies — auto-detected by model name prefix. Switch mid-session with `/model` or swap the whole provider with `/provider`.
 
 - **Any knowledge worker, not just engineers.** Chat tab for researchers, PMs, ops, legal, marketing, finance — natural-language prompts, file access, knowledge-base lookup, drafting. Terminal tab for engineers who want the raw REPL. Same engine, same sessions, same config — different preferred surface.
 
