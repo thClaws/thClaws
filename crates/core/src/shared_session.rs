@@ -1372,6 +1372,7 @@ async fn run_worker(
                 client,
                 tools: tool_infos,
             } => {
+                let tool_count = tool_infos.len();
                 for info in tool_infos {
                     let tool = crate::mcp::McpTool::new(client.clone(), info);
                     state.tool_registry.register(std::sync::Arc::new(tool));
@@ -1387,6 +1388,13 @@ async fn run_worker(
                     let _ = events_tx.send(ViewEvent::SlashOutput(format!(
                         "[mcp] '{server_name}' connected"
                     )));
+                }
+                // Update sidebar with real tool count now that the server is live.
+                #[cfg(feature = "gui")]
+                {
+                    crate::gui::update_mcp_tool_count(&server_name, tool_count);
+                    let payload = crate::gui::build_mcp_update_payload();
+                    let _ = events_tx.send(ViewEvent::McpUpdate(payload.to_string()));
                 }
             }
             ShellInput::McpFailed { server_name, error } => {
