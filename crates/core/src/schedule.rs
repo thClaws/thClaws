@@ -1357,6 +1357,29 @@ impl WatchManager {
 mod tests {
     use super::*;
 
+    /// Write a `#!/bin/sh` script to `path` and chmod it executable.
+    /// Crucially, the write fd is dropped before chmod+spawn — Linux
+    /// returns `ETXTBSY` ("Text file busy") if you try to `exec()` a
+    /// file that any process still holds open for writing. macOS
+    /// doesn't enforce this restriction so the bug only surfaces on
+    /// `ubuntu-latest` CI, where every spawn-based schedule test was
+    /// flaking. Centralising the pattern here means new tests can't
+    /// reintroduce the same race.
+    #[cfg(unix)]
+    fn write_fake_executable(path: &std::path::Path, script: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        {
+            let mut f = std::fs::File::create(path).unwrap();
+            writeln!(f, "{}", script).unwrap();
+            // f drops at end of this scope, releasing the write fd
+            // before chmod+spawn below.
+        }
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
     #[test]
     fn cron_validation_accepts_valid_5_field() {
         assert!(validate_cron("*/5 * * * *").is_ok());
@@ -1467,17 +1490,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_job_captures_exit_and_writes_log() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         // Fake binary: ignores --print + the prompt, just echoes its
         // cwd to stdout and exits 0. This proves cwd was honored.
         let fake = tmp.path().join("fake-thclaws");
-        let mut f = std::fs::File::create(&fake).unwrap();
-        writeln!(f, "#!/bin/sh\npwd; echo prompt-was: \"$2\"\nexit 7").unwrap();
-        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake, perms).unwrap();
+        write_fake_executable(&fake, "#!/bin/sh\npwd; echo prompt-was: \"$2\"\nexit 7");
 
         // Use the tempdir as cwd; assert log captures pwd output.
         let work = tempfile::tempdir().unwrap();
@@ -1593,17 +1610,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn watch_manager_fires_on_file_change() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         // Fake binary: a shell script that exits 0 fast.
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join("fake-thclaws");
-        let mut f = std::fs::File::create(&fake).unwrap();
-        writeln!(f, "#!/bin/sh\nexit 0").unwrap();
-        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake, perms).unwrap();
+        write_fake_executable(&fake, "#!/bin/sh\nexit 0");
 
         // Tempdir for the watched workspace + store.
         let work = tempfile::tempdir().unwrap();
@@ -1677,16 +1687,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn watch_manager_ignores_internal_thclaws_writes() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join("fake-thclaws");
-        let mut f = std::fs::File::create(&fake).unwrap();
-        writeln!(f, "#!/bin/sh\nexit 0").unwrap();
-        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake, perms).unwrap();
+        write_fake_executable(&fake, "#!/bin/sh\nexit 0");
 
         let work = tempfile::tempdir().unwrap();
         // Pre-create the .thclaws directory so the file write below
@@ -1751,16 +1754,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn watch_manager_skips_watch_workspace_false() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join("fake-thclaws");
-        let mut f = std::fs::File::create(&fake).unwrap();
-        writeln!(f, "#!/bin/sh\nexit 0").unwrap();
-        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake, perms).unwrap();
+        write_fake_executable(&fake, "#!/bin/sh\nexit 0");
 
         let work = tempfile::tempdir().unwrap();
         let store_dir = tempfile::tempdir().unwrap();
@@ -1922,17 +1918,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tick_lifecycle_end_to_end() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         // Fake binary: exits 0 fast.
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join("fake-thclaws");
-        let mut f = std::fs::File::create(&fake).unwrap();
-        writeln!(f, "#!/bin/sh\nexit 0").unwrap();
-        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake, perms).unwrap();
+        write_fake_executable(&fake, "#!/bin/sh\nexit 0");
 
         let store_dir = tempfile::tempdir().unwrap();
         let store_path = store_dir.path().join("schedules.json");
@@ -2107,15 +2096,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_job_enforces_timeout() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let fake = tmp.path().join("sleeper");
-        let mut f = std::fs::File::create(&fake).unwrap();
-        writeln!(f, "#!/bin/sh\nsleep 10\nexit 0").unwrap();
-        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake, perms).unwrap();
+        write_fake_executable(&fake, "#!/bin/sh\nsleep 10\nexit 0");
 
         let work = tempfile::tempdir().unwrap();
         let schedule = Schedule {
