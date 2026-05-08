@@ -271,6 +271,21 @@ export function FilesView({ active }: Props) {
     openFile(path);
   };
 
+  const closePreview = async () => {
+    if (mode === "edit" && editorDirty) {
+      const ok = await confirmNative({
+        title: "Discard unsaved changes",
+        message: `Discard unsaved edits to ${preview?.path ?? "this file"} and close?`,
+        yesLabel: "Discard",
+        noLabel: "Keep editing",
+      });
+      if (!ok) return;
+    }
+    setPreview(null);
+    setMode("preview");
+    setEditorDirty(false);
+  };
+
   const enterEditMode = () => {
     if (!preview) return;
     setMode("edit");
@@ -586,6 +601,14 @@ export function FilesView({ active }: Props) {
                     </button>
                   </>
                 )}
+                <button
+                  onClick={closePreview}
+                  className="flex items-center justify-center p-1 rounded hover:bg-white/5"
+                  style={{ color: "var(--text-secondary)" }}
+                  title="Close file"
+                >
+                  <X size={13} />
+                </button>
               </div>
             </div>
 
