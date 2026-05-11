@@ -552,16 +552,28 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
     // as the desktop window. Browser tabs land in the same conversation
     // the user is looking at on the desktop. Errors print to stderr and
     // the GUI keeps running — losing the server is degraded, not fatal.
+    // Per-connection ask-user broadcast for WS browsers in `--serve
+    // --gui` combo mode. Created unconditionally so the field on the
+    // server's `ServeState` is always populated; gui's ask-forwarder
+    // below ALSO publishes to it (in addition to `UserEvent::Dispatch`
+    // for wry's webview) so connected browser tabs see the question
+    // too. With no `--serve`, the channel exists but no one
+    // subscribes — harmless.
+    let (ask_broadcast, _) = tokio::sync::broadcast::channel::<String>(16);
+    let ask_broadcast_for_fwd = ask_broadcast.clone();
+
     if let Some(serve_config) = serve {
         let approver_for_serve = approver.clone();
         let shared_for_serve = shared.clone();
         let pending_asks_for_serve = pending_asks.clone();
+        let ask_broadcast_for_serve = ask_broadcast.clone();
         tokio::spawn(async move {
             if let Err(e) = crate::server::run_with_engine(
                 serve_config,
                 approver_for_serve,
                 shared_for_serve,
                 pending_asks_for_serve,
+                ask_broadcast_for_serve,
             )
             .await
             {
@@ -590,7 +602,15 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     "id": id,
                     "question": question,
                 });
-                let _ = proxy_for_ask.send_event(UserEvent::Dispatch(payload.to_string()));
+                let payload_str = payload.to_string();
+                let _ = proxy_for_ask.send_event(UserEvent::Dispatch(payload_str.clone()));
+                // Also broadcast to any browser tab connected via
+                // `--serve --gui` combo mode. No-op (zero subscribers
+                // → Err dropped) when running pure desktop. This
+                // mirrors the standalone `--serve` forwarder so
+                // browsers see the question regardless of whether
+                // the desktop window is also up.
+                let _ = ask_broadcast_for_fwd.send(payload_str);
 
                 // Also render the question as ANSI in the terminal tab
                 // so users on the Terminal surface aren't left wondering

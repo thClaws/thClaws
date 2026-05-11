@@ -23,11 +23,14 @@
 //! the server user, file tools touch the server filesystem. Treat the
 //! tunnel as the auth boundary.
 
+use crate::config::AppConfig;
 use crate::event_render::{
     render_chat_dispatches, render_terminal_ansi, terminal_data_envelope,
     terminal_history_replaced_envelope, TerminalRenderState,
 };
 use crate::ipc::{handle_ipc, IpcContext, PendingAsks};
+use crate::providers::provider_has_credentials;
+use crate::session::SessionStore;
 use crate::shared_session::{SharedSessionHandle, ViewEvent};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -38,7 +41,7 @@ use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 /// The same single-file React build the desktop GUI embeds. Re-embedded
 /// here under the always-on `crate::server` module so the frontend is
@@ -64,11 +67,21 @@ impl Default for ServeConfig {
 /// State shared across HTTP / WS handlers. The `SharedSessionHandle`
 /// IS the engine — same Arc lives in every WS connection so multi-tab
 /// browsers see the same conversation.
+///
+/// `ask_broadcast` carries `ask_user_question` JSON envelopes to every
+/// connected WS client. Pre-fix the standalone `--serve` path never
+/// wired `set_gui_ask_sender`, so the agent's `AskUserQuestion` tool
+/// posted to a `None` sender and stalled the turn waiting for a
+/// oneshot that was never created (issue #82). The forwarder spawned
+/// in [`run`] reads from the global ask channel and pushes JSON
+/// frames to this broadcast; [`handle_socket`] subscribes per
+/// connection so every browser tab sees the question.
 #[derive(Clone)]
 struct ServeState {
     shared: Arc<SharedSessionHandle>,
     approver: Arc<crate::permissions::GuiApprover>,
     pending_asks: PendingAsks,
+    ask_broadcast: broadcast::Sender<String>,
 }
 
 /// Spin up the server. Spawns the worker, builds the Axum router,
@@ -90,7 +103,49 @@ pub async fn run(config: ServeConfig) -> crate::error::Result<()> {
     // appear until the first browser tab connects.
     shared.ready_gate.signal();
     let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
-    run_with_engine(config, approver, shared, pending_asks).await
+
+    // AskUserQuestion bridge (issue #82). Mirrors gui.rs:541-543 +
+    // 576-610. Pre-fix `set_gui_ask_sender` was never called in the
+    // standalone serve path, so the tool's `GUI_ASK_SENDER` static
+    // stayed `None` and `AskUserRequest` posts had nowhere to go —
+    // the agent hung on its oneshot waiting for a response that
+    // could never arrive. The forwarder below reads ask requests
+    // from the global channel, stashes the oneshot responder in
+    // `pending_asks` (so `ipc::handle_ipc`'s `ask_user_response`
+    // arm can resolve it when the frontend replies), and broadcasts
+    // the question JSON to every connected WS client via
+    // `ask_broadcast`. Capacity 16 is generous — multiple in-flight
+    // ask questions are rare, and lag is logged but tolerated.
+    let (ask_tx, mut ask_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::tools::AskUserRequest>();
+    crate::tools::set_gui_ask_sender(Some(ask_tx));
+    let (ask_broadcast, _) = broadcast::channel::<String>(16);
+    {
+        let ask_broadcast_for_fwd = ask_broadcast.clone();
+        let pending_asks_for_fwd = pending_asks.clone();
+        tokio::spawn(async move {
+            while let Some(req) = ask_rx.recv().await {
+                let id = req.id;
+                let question = req.question.clone();
+                if let Ok(mut pending) = pending_asks_for_fwd.lock() {
+                    pending.insert(id, req.response);
+                }
+                let payload = serde_json::json!({
+                    "type": "ask_user_question",
+                    "id": id,
+                    "question": question,
+                });
+                // No-op when zero subscribers — early questions before
+                // any tab connects are silently dropped (the agent
+                // will still time out on its own retry path; can't
+                // queue indefinitely without losing the oneshot to
+                // GC).
+                let _ = ask_broadcast_for_fwd.send(payload.to_string());
+            }
+        });
+    }
+
+    run_with_engine(config, approver, shared, pending_asks, ask_broadcast).await
 }
 
 /// Same as [`run`], but reuses an engine constructed by the caller. Used
@@ -102,11 +157,13 @@ pub async fn run_with_engine(
     approver: Arc<crate::permissions::GuiApprover>,
     shared: Arc<SharedSessionHandle>,
     pending_asks: PendingAsks,
+    ask_broadcast: broadcast::Sender<String>,
 ) -> crate::error::Result<()> {
     let state = ServeState {
         shared,
         approver,
         pending_asks,
+        ask_broadcast,
     };
 
     let app = Router::new()
@@ -161,6 +218,22 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
             let _ = tx.send(payload);
         })
     };
+    // Snapshot builder for `frontend_ready` handshake (issue #80).
+    // Mirrors gui.rs:1060-1109's `UserEvent::SendInitialState` arm:
+    // gathers provider/model + readiness + MCP servers + recent
+    // sessions + active KMSes into one JSON envelope and ships it
+    // back. Pre-fix this was a no-op stub (M6.36 SERVE3 deferred
+    // implementation), so every fresh browser connect (including
+    // an F5 refresh on an existing session) landed on a fully
+    // hydrated worker but rendered an empty sidebar — sessions /
+    // MCP / KMS were all wiped from the user's perspective even
+    // though the engine still had them.
+    let initial_dispatch = {
+        let tx = out_tx.clone();
+        Arc::new(move |payload: String| {
+            let _ = tx.send(payload);
+        })
+    };
     let ctx = IpcContext {
         shared: state.shared.clone(),
         approver: state.approver.clone(),
@@ -171,10 +244,9 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
                 "\x1b[36m[serve] frontend requested app_close — closing WS connection\x1b[0m"
             );
         }),
-        on_send_initial_state: Arc::new(|| {
-            // SERVE3 will replace this stub with the snapshot-frame
-            // builder. For now: no-op; frontend sees nothing back when
-            // it sends `frontend_ready`. Smoke test scope.
+        on_send_initial_state: Arc::new(move || {
+            let payload = build_initial_state_payload();
+            let _ = initial_dispatch(payload);
         }),
         on_zoom: Arc::new(|_scale| {
             // Browser handles its own zoom (Cmd-+/-); no server-side
@@ -182,6 +254,29 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
             // sessions. Defer.
         }),
     };
+
+    // Ask-user broadcast subscription (issue #82). Each WS connection
+    // gets its own receiver; the forwarder spawned in [`run`] pushes
+    // one envelope per `AskUserQuestion` tool call.
+    let mut ask_rx = state.ask_broadcast.subscribe();
+    let ask_tx = out_tx.clone();
+    let ask_forwarder = tokio::spawn(async move {
+        loop {
+            match ask_rx.recv().await {
+                Ok(payload) => {
+                    if ask_tx.send(payload).is_err() {
+                        return;
+                    }
+                }
+                // Slow consumer dropped frames; resume — the agent
+                // re-asks on retry, and lagged ask-frames are no
+                // worse than the pre-fix state (which was complete
+                // silence).
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => return,
+            }
+        }
+    });
 
     // M6.36 SERVE3: subscribe to the broadcast and translate every
     // ViewEvent into chat-shaped + terminal-shaped envelopes, identical
@@ -254,7 +349,94 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
         }
     }
     event_forwarder.abort();
+    ask_forwarder.abort();
     writer.abort();
+}
+
+/// Build the `initial_state` JSON envelope ported from gui.rs's
+/// `UserEvent::SendInitialState` arm (gui.rs:1060-1109). Loaded
+/// fresh from disk on every WS connect so an F5 refresh always
+/// reflects the current `AppConfig` / sessions / MCP / KMS state.
+///
+/// Auto-fallback model: if the saved model's provider has no
+/// credentials but another provider does, switch + persist so the
+/// "ready" indicator in the sidebar is accurate after the user adds
+/// a key.
+fn build_initial_state_payload() -> String {
+    let mut config = AppConfig::load().unwrap_or_default();
+    if let Some(new_model) = crate::providers::auto_fallback_model(&config) {
+        let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+        project.set_model(&new_model);
+        let _ = project.save();
+        config = AppConfig::load().unwrap_or_default();
+    }
+    let provider_name = config.detect_provider().unwrap_or("unknown");
+    let provider_ready = provider_has_credentials(&config);
+    let mcp_servers: Vec<serde_json::Value> = config
+        .mcp_servers
+        .iter()
+        .map(|s| serde_json::json!({ "name": s.name, "tools": 0 }))
+        .collect();
+    let sessions: Vec<serde_json::Value> = SessionStore::default_path()
+        .map(SessionStore::new)
+        .and_then(|store| store.list().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .take(20)
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "model": s.model,
+                "messages": s.message_count,
+                "title": s.title,
+            })
+        })
+        .collect();
+    let kmss = build_kms_initial_payload(&config);
+    serde_json::json!({
+        "type": "initial_state",
+        "provider": provider_name,
+        "model": config.model,
+        "provider_ready": provider_ready,
+        "mcp_servers": mcp_servers,
+        "sessions": sessions,
+        "kmss": kmss,
+    })
+    .to_string()
+}
+
+/// KMS list for the initial-state payload. Mirrors the structure
+/// the GUI emits in `ViewEvent::KmsUpdate` (gui.rs uses
+/// `build_kms_update_payload`, which lives behind the `gui` feature
+/// flag and isn't reachable from the always-on `server` module).
+/// One inline implementation here keeps the build feature-free.
+///
+/// Uses `kms::list_all()` which returns project entries first then
+/// user (matching the resolve-priority order). Dedup by name —
+/// project wins on collision since `list_all` emits them first.
+fn build_kms_initial_payload(config: &AppConfig) -> Vec<serde_json::Value> {
+    let active: std::collections::HashSet<&str> =
+        config.kms_active.iter().map(String::as_str).collect();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut all: Vec<(String, &'static str, bool)> = Vec::new();
+    for kref in crate::kms::list_all() {
+        if !seen.insert(kref.name.clone()) {
+            // Already saw this name in a higher-priority scope.
+            continue;
+        }
+        let scope = match kref.scope {
+            crate::kms::KmsScope::Project => "project",
+            crate::kms::KmsScope::User => "user",
+        };
+        let active_flag = active.contains(kref.name.as_str());
+        all.push((kref.name, scope, active_flag));
+    }
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    all.into_iter()
+        .map(|(name, scope, active)| {
+            serde_json::json!({ "name": name, "scope": scope, "active": active })
+        })
+        .collect()
 }
 
 #[cfg(test)]
