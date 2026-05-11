@@ -392,7 +392,17 @@ impl Provider for GeminiProvider {
             let mut log = debug_log;
             let mut raw = raw_dump;
 
-            while let Some(chunk) = byte_stream.next().await {
+            loop {
+                let maybe_chunk = tokio::time::timeout(
+                    super::STREAM_CHUNK_TIMEOUT,
+                    byte_stream.next(),
+                )
+                .await
+                .map_err(|_| Error::Provider(format!(
+                    "stream idle for {}s — provider stopped sending; try again",
+                    super::STREAM_CHUNK_TIMEOUT.as_secs()
+                )))?;
+                let Some(chunk) = maybe_chunk else { break };
                 let chunk = chunk.map_err(|e| Error::Provider(format!("stream: {e}")))?;
                 if let Some(f) = log.as_mut() {
                     use std::io::Write;

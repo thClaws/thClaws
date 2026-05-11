@@ -8,6 +8,12 @@ use crate::types::{Message, ToolDef};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
+/// Idle timeout applied to each individual chunk in a streaming response.
+/// If the provider sends no bytes for this many seconds the stream is
+/// aborted with an error so the UI surfaces a "try again" message instead
+/// of hanging silently until the user force-quits.
+pub(super) const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub mod agent_sdk;
 pub mod anthropic;
 pub mod assemble;
