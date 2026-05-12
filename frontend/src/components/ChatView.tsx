@@ -726,8 +726,9 @@ export function ChatView({ active, modalOpen }: Props) {
     const maxRows = 6;
     const padding = 16; // py-2 on top + bottom
     const maxHeight = lineHeight * maxRows + padding;
-    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
-    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+    const sh = el.scrollHeight;
+    el.style.height = `${Math.min(sh, maxHeight)}px`;
+    el.style.overflowY = sh > maxHeight ? "auto" : "hidden";
   }, [input]);
 
   const awaitingUserAnswer = askPrompt !== null;
