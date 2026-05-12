@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -169,7 +169,7 @@ export function ChatView({ active, modalOpen }: Props) {
     }, 4000);
   };
 
-  const copyMessage = (msg: ChatMessage, index: number) => {
+  const copyMessage = useCallback((msg: ChatMessage, index: number) => {
     if (!msg.content) return;
     send({ type: "clipboard_write", text: msg.content });
     setCopiedMessageIndex(index);
@@ -180,7 +180,7 @@ export function ChatView({ active, modalOpen }: Props) {
       setCopiedMessageIndex((current) => (current === index ? null : current));
       copiedTimerRef.current = null;
     }, 1200);
-  };
+  }, []);
 
   /// Add an image File/Blob to the pending-attachments list. Skips any
   /// MIME type the providers don't accept (anything outside
@@ -574,14 +574,14 @@ export function ChatView({ active, modalOpen }: Props) {
   // browser via the vetted `open_external` IPC. MCP-Apps tools render
   // their own widgets inline via `McpAppIframe`, so we don't need
   // an in-app lightbox for image previews — links can just hand off.
-  const handleChatLinkClick = (
+  const handleChatLinkClick = useCallback((
     e: React.MouseEvent<HTMLAnchorElement>,
     href: string,
   ) => {
     if (!href) return;
     e.preventDefault();
     send({ type: "open_external", url: href });
-  };
+  }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -731,60 +731,7 @@ export function ChatView({ active, modalOpen }: Props) {
     el.style.overflowY = sh > maxHeight ? "auto" : "hidden";
   }, [input]);
 
-  const awaitingUserAnswer = askPrompt !== null;
-  const inputDisabled = streaming && !awaitingUserAnswer;
-  const submitDisabled = awaitingUserAnswer
-    ? !input.trim()
-    : streaming || (!input.trim() && attachments.length === 0);
-  // The full question now renders as a markdown card above the input
-  // (see `<AskCard>` below) — the placeholder is just a short hint
-  // that points at the card. Truncating multi-line markdown into a
-  // single-line placeholder was unreadable.
-  const inputPlaceholder = awaitingUserAnswer
-    ? "Type your reply…"
-    : streaming
-      ? "Waiting for response..."
-      : attachments.length > 0
-        ? "Add a prompt (or send as-is)..."
-        : "Type a message — paste or drop an image to attach...";
-
-  return (
-    <div className="flex flex-col h-full">
-      {/* Messages */}
-      <div
-        className="flex-1 overflow-y-auto p-4 space-y-3"
-        style={{ background: "var(--bg-primary)" }}
-      >
-        {/* Empty-state hero — count only user/assistant turns. System
-            bubbles (MCP "connected" notices, slash-output, skill model
-            notes, etc.) can appear before the user has typed anything;
-            we still want the logo + caption to greet them in that
-            case. The system bubbles render normally in the .map below
-            so the user sees both the hero AND the status messages. */}
-        {messages.every((m) => m.role === "system") && (
-          <div
-            className="flex flex-col items-center mt-20 select-none"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            <img
-              src={themeMode === "light" ? logoLight : logoDark}
-              alt="thClaws"
-              className="mb-2 opacity-90"
-              style={{ width: 280, height: 280 }}
-              draggable={false}
-            />
-            {version && (
-              <div
-                className="text-xs font-mono mb-2 opacity-70"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                v{version}
-              </div>
-            )}
-            <div className="text-sm">Chat mode — send a message to start</div>
-          </div>
-        )}
-        {messages.map((msg, i) => {
+  const messageElements = useMemo(() => messages.map((msg, i) => {
           // (Pre-fix this map opened with a side-channel bubble render
           // pulling state off `msg.sideChannel`. The bubble showed
           // live tool-call markers + streamed prose for every /dream
@@ -1065,7 +1012,62 @@ export function ChatView({ active, modalOpen }: Props) {
               </div>
             </div>
           );
-        })}
+        }), [messages, copiedMessageIndex, copyMessage, handleChatLinkClick]);
+
+  const awaitingUserAnswer = askPrompt !== null;
+  const inputDisabled = streaming && !awaitingUserAnswer;
+  const submitDisabled = awaitingUserAnswer
+    ? !input.trim()
+    : streaming || (!input.trim() && attachments.length === 0);
+  // The full question now renders as a markdown card above the input
+  // (see `<AskCard>` below) — the placeholder is just a short hint
+  // that points at the card. Truncating multi-line markdown into a
+  // single-line placeholder was unreadable.
+  const inputPlaceholder = awaitingUserAnswer
+    ? "Type your reply…"
+    : streaming
+      ? "Waiting for response..."
+      : attachments.length > 0
+        ? "Add a prompt (or send as-is)..."
+        : "Type a message — paste or drop an image to attach...";
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Messages */}
+      <div
+        className="flex-1 overflow-y-auto p-4 space-y-3"
+        style={{ background: "var(--bg-primary)" }}
+      >
+        {/* Empty-state hero — count only user/assistant turns. System
+            bubbles (MCP "connected" notices, slash-output, skill model
+            notes, etc.) can appear before the user has typed anything;
+            we still want the logo + caption to greet them in that
+            case. The system bubbles render normally in the .map below
+            so the user sees both the hero AND the status messages. */}
+        {messages.every((m) => m.role === "system") && (
+          <div
+            className="flex flex-col items-center mt-20 select-none"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            <img
+              src={themeMode === "light" ? logoLight : logoDark}
+              alt="thClaws"
+              className="mb-2 opacity-90"
+              style={{ width: 280, height: 280 }}
+              draggable={false}
+            />
+            {version && (
+              <div
+                className="text-xs font-mono mb-2 opacity-70"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                v{version}
+              </div>
+            )}
+            <div className="text-sm">Chat mode — send a message to start</div>
+          </div>
+        )}
+        {messageElements}
         {streaming && waitingFirstByte && (
           <div className="flex justify-start">
             <div
