@@ -116,6 +116,15 @@ pub const LOOPBACK_DEFAULT_PORT: u16 = 18443;
 /// already has 18443 in use, or two thClaws instances on one box.
 pub const LOOPBACK_PORT_ENV: &str = "THCLAWS_LOOPBACK_PORT";
 
+/// Override env for the bind interface. Default is `127.0.0.1` which
+/// keeps the listener loopback-only. Docker / WSL setups where the
+/// out-of-process MCP server runs in a sibling VM need to set this to
+/// `0.0.0.0` so connections via `host.docker.internal` (the host's
+/// non-loopback IP from the container's POV) land. Caveat: opening
+/// 0.0.0.0 with `disable-auth` exposes /v1 to anyone on the LAN —
+/// only safe behind a host firewall.
+pub const LOOPBACK_BIND_ENV: &str = "THCLAWS_LOOPBACK_BIND";
+
 /// Bind the always-on loopback `/v1/*` listener. Resolves the port
 /// from `$THCLAWS_LOOPBACK_PORT` or falls back to
 /// [`LOOPBACK_DEFAULT_PORT`]. Auth is forced to `disable-auth` because
@@ -141,6 +150,10 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(LOOPBACK_DEFAULT_PORT);
+    let bind_host = std::env::var(LOOPBACK_BIND_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
 
     // Force disable-auth so out-of-process clients on the same host
     // (HTTP-transport MCP servers, host scripts) don't need to learn a
@@ -153,9 +166,12 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
         std::env::set_var("THCLAWS_API_TOKEN", "disable-auth");
     }
 
-    let bind = format!("127.0.0.1:{port}");
+    let bind = format!("{bind_host}:{port}");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    let url = format!("http://{bind}");
+    // Advertise via 127.0.0.1 in the URL even when bound to 0.0.0.0 —
+    // in-process callers always want loopback, and the env var
+    // override is purely for in-from-the-container reach.
+    let url = format!("http://127.0.0.1:{port}");
     let _ = LOOPBACK_URL.set(url.clone());
 
     let app = axum::Router::new().merge(router());
