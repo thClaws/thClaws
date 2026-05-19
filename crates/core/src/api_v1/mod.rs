@@ -103,6 +103,72 @@ pub fn auth_is_bypassed() -> bool {
     matches!(auth_token(), AuthMode::Bypass)
 }
 
+/// Default loopback bind for the always-on `/v1/*` listener. The
+/// fixed port is the seam separately-spawned MCP-Apps servers (e.g.
+/// `thclaws-gamedev-mcp` running over HTTP transport on its own port)
+/// use to reach the user's authenticated provider — they don't share
+/// a process with us, so they can't inherit our env. A random port
+/// would force the operator to glue ports together by hand every
+/// restart; a fixed, documented one means `GamedevAiMove` just works.
+pub const LOOPBACK_DEFAULT_PORT: u16 = 18443;
+
+/// Override env for the fixed port — for the rare case of a host that
+/// already has 18443 in use, or two thClaws instances on one box.
+pub const LOOPBACK_PORT_ENV: &str = "THCLAWS_LOOPBACK_PORT";
+
+/// Bind the always-on loopback `/v1/*` listener. Resolves the port
+/// from `$THCLAWS_LOOPBACK_PORT` or falls back to
+/// [`LOOPBACK_DEFAULT_PORT`]. Auth is forced to `disable-auth` because
+/// the listener is loopback-only — the safety boundary is the bind
+/// address, not a bearer token an out-of-process MCP server would need
+/// to discover from us anyway.
+///
+/// Run once at startup. Logs the bound URL to stderr; returns it so the
+/// caller can stash it for in-process clients. Idempotent — a second
+/// call is a no-op and returns the existing URL.
+///
+/// Errors are surfaced for the caller to log+ignore: a failed bind
+/// (port collision) should NOT abort startup, because MCP-Apps widgets
+/// that don't need the bridge keep working without it.
+pub async fn spawn_loopback() -> std::io::Result<String> {
+    use std::sync::OnceLock;
+    static LOOPBACK_URL: OnceLock<String> = OnceLock::new();
+    if let Some(url) = LOOPBACK_URL.get() {
+        return Ok(url.clone());
+    }
+
+    let port: u16 = std::env::var(LOOPBACK_PORT_ENV)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(LOOPBACK_DEFAULT_PORT);
+
+    // Force disable-auth so out-of-process clients on the same host
+    // (HTTP-transport MCP servers, host scripts) don't need to learn a
+    // per-process bearer token to reach our /v1 surface. Safety is
+    // anchored to the loopback bind, not the token.
+    if std::env::var("THCLAWS_API_TOKEN")
+        .map(|v| v != "disable-auth")
+        .unwrap_or(true)
+    {
+        std::env::set_var("THCLAWS_API_TOKEN", "disable-auth");
+    }
+
+    let bind = format!("127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    let url = format!("http://{bind}");
+    let _ = LOOPBACK_URL.set(url.clone());
+
+    let app = axum::Router::new().merge(router());
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("\x1b[33m[api_v1 loopback] serve error: {e}\x1b[0m");
+        }
+    });
+
+    eprintln!("\x1b[36m[api_v1 loopback] /v1/* available at {url} for out-of-process MCP servers\x1b[0m");
+    Ok(url)
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

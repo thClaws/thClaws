@@ -368,8 +368,14 @@ async fn run_turn_from_messages(req: &ChatRequest) -> crate::error::Result<Agent
 /// prompt, parameterized by the request's model + max_tokens. Shared
 /// between the non-stream and SSE paths.
 fn build_agent(req: &ChatRequest, extra_system: Option<String>) -> crate::error::Result<Agent> {
-    let mut config = AppConfig::default();
-    config.model = req.model.clone();
+    // Load the user's full config (~/.config/thclaws + project) so the
+    // configured default model is used when a caller (e.g. a widget's
+    // server-side tool call going through our loopback) omits `model`
+    // or sends `""`. Falls back to bare defaults if load fails.
+    let mut config = AppConfig::load().unwrap_or_default();
+    if !req.model.trim().is_empty() {
+        config.model = req.model.clone();
+    }
     if let Some(max) = req.max_tokens {
         config.max_tokens = max;
     }
