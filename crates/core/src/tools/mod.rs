@@ -149,6 +149,15 @@ pub struct UiResource {
     /// iframe) set it `true`; the trust is implicit because the tool
     /// ships inside the thClaws binary.
     pub allow_same_origin: bool,
+    /// First-party opt-in for content-driven inline iframe height. When
+    /// `true`, the frontend's `McpAppIframe` honours
+    /// `ui/notifications/size-changed` messages from the widget
+    /// (capped at 85% of viewport) instead of using the fixed
+    /// `INLINE_HEIGHT`. Independent from `allow_same_origin` —
+    /// sandbox policy is orthogonal to size policy, so an external
+    /// trusted server can grant same-origin without unlocking
+    /// content-driven resize and vice versa.
+    pub auto_size: bool,
 }
 
 #[derive(Default, Clone)]
