@@ -165,7 +165,9 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
         }
     });
 
-    eprintln!("\x1b[36m[api_v1 loopback] /v1/* available at {url} for out-of-process MCP servers\x1b[0m");
+    eprintln!(
+        "\x1b[36m[api_v1 loopback] /v1/* available at {url} for out-of-process MCP servers\x1b[0m"
+    );
     Ok(url)
 }
 

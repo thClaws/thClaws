@@ -828,10 +828,7 @@ impl McpClient {
     /// `text/html;profile=mcp-app` before mounting an iframe and
     /// avoid trusting arbitrary text the server might return for the
     /// same URI.
-    pub async fn read_resource(
-        &self,
-        uri: &str,
-    ) -> Result<(String, Option<String>, bool, bool)> {
+    pub async fn read_resource(&self, uri: &str) -> Result<(String, Option<String>, bool, bool)> {
         let result = self
             .request("resources/read", json!({ "uri": uri }))
             .await?;
