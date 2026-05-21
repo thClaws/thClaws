@@ -19,18 +19,25 @@
  * `setMode` path, so the widget always sees a `host-context-changed`
  * notification with the new mode regardless of who initiated.
  *
- * ## DOM stability across mode changes
+ * ## Iframe stability across mode changes
  *
- * Naively re-rendering the iframe in a different parent (via
- * `createPortal` whose target changes) would tear the iframe out and
- * re-mount it — re-running the SDK handshake, re-fetching unpkg, and
- * losing the tool-result push. To keep the iframe alive across mode
- * lifts we render it once into a stable detached `<div>` and use
- * `appendChild` to MOVE that div between mount points (inline slot in
- * the bubble vs lifted slot in the fullscreen overlay or PIP panel).
- * `appendChild` of an attached node moves it without recreating the
- * underlying element, so the iframe's `contentWindow` and message
- * listeners stay intact.
+ * Earlier versions of this component moved the iframe between three
+ * DOM slots (inline / fullscreen / pip) via `appendChild`. WebKit (and
+ * wry's WKWebView) reloads any iframe whose DOM ancestry changes, even
+ * when the move is a no-op `appendChild` of an already-attached node.
+ * That meant every Fullscreen / PIP / "Back to chat" click reloaded
+ * the widget — fine for stateless image viewers (pinn.ai re-renders
+ * idempotently from `tool-result`), fatal for stateful widgets like a
+ * running game.
+ *
+ * The fix: render the iframe exactly ONCE inside a wrapper portaled to
+ * `document.body`, and switch modes purely via CSS:
+ *   inline      → position:fixed pinned to a placeholder's rect in the
+ *                 chat bubble, tracked via ResizeObserver + capturing
+ *                 scroll listener
+ *   fullscreen  → position:fixed inset:0
+ *   pip         → position:fixed at the user-dragged rect
+ * The iframe never moves in the DOM tree, so WebKit never reloads it.
  *
  * Protocol = JSON-RPC 2.0:
  *   request:      {jsonrpc:"2.0", id, method, params}
@@ -40,9 +47,11 @@
 
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -130,6 +139,8 @@ const PIP_MARGIN = 16;
 
 type PipRect = { x: number; y: number; w: number; h: number };
 
+type Rect = { x: number; y: number; w: number; h: number };
+
 function defaultPipRect(): PipRect {
   // Bottom-right of viewport with a 16px margin. Fallbacks for SSR
   // (innerWidth/Height undefined) shouldn't fire — wry is always
@@ -187,35 +198,33 @@ export function McpAppIframe({
   // to fullscreen + back lands the inline surface at the same height
   // it last measured.
   const [measuredHeight, setMeasuredHeight] = useState<number | null>(null);
+  // Inline placeholder's viewport rect, tracked via RAF-throttled
+  // ResizeObserver + capturing scroll listener. Drives the inner
+  // iframe wrapper's position in inline mode. `null` until the first
+  // measurement lands (one layout pass after mount).
+  const [placeholderRect, setPlaceholderRect] = useState<Rect | null>(null);
+  // The chat scroll container's viewport rect. Used as the outer
+  // wrapper's bounds in inline mode so `overflow:hidden` clips the
+  // iframe to the visible chat area — without this the position:fixed
+  // wrapper bleeds over chat headers / the input bar.
+  const [containerRect, setContainerRect] = useState<Rect | null>(null);
   const { resolved: themeMode } = useTheme();
 
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const placeholderRef = useRef<HTMLDivElement | null>(null);
+  // Cached scroll-ancestor of the placeholder. Found once on the first
+  // inline-mode layout pass; reused for every subsequent measurement.
+  // Falls back to `document.documentElement` when the chat scrolls at
+  // window level rather than in a bounded container.
+  const scrollParentRef = useRef<HTMLElement | null>(null);
   // Mirror mode/theme into refs so the message handler reads the
   // latest values without re-binding. Re-binding the listener on
-  // every mode change would create a window where iframe-→host
-  // messages (e.g. an `initialized` notification after a WebKit
-  // iframe reload) get dropped.
+  // every mode change would create a window where iframe→host
+  // messages get dropped.
   const modeRef = useRef<DisplayMode>("inline");
-  // One ref per surface so transitions don't fight ref semantics —
-  // each surface owns its own slot div regardless of `mode`. The
-  // effect below picks whichever ref matches the current mode and
-  // moves iframeContainer there.
-  const inlineSlotRef = useRef<HTMLDivElement | null>(null);
-  const fullscreenSlotRef = useRef<HTMLDivElement | null>(null);
-  const pipSlotRef = useRef<HTMLDivElement | null>(null);
-
-  // Stable detached container that holds the iframe across mode lifts.
-  // Created exactly once per component instance — `useState`'s lazy
-  // initializer guarantees React doesn't churn it on re-renders.
-  const [iframeContainer] = useState(() => {
-    const el = document.createElement("div");
-    el.style.cssText =
-      "width:100%;height:100%;display:flex;flex-direction:column;min-height:0;";
-    return el;
-  });
+  const themeRef = useRef(themeMode);
 
   const stableResult = useMemo(() => toolResult, [toolResult]);
-  const themeRef = useRef(themeMode);
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
@@ -246,21 +255,72 @@ export function McpAppIframe({
   };
   const pendingCallsRef = useRef<Map<string, Pending>>(new Map());
 
-  // Move the iframe container into whichever slot matches the current
-  // mode. `appendChild` of an already-attached node MOVES it (DOM
-  // spec) without re-running the iframe's load, so the SDK handshake
-  // and the iframe's contentWindow survive the lift.
-  useEffect(() => {
-    const target =
-      mode === "inline"
-        ? inlineSlotRef.current
-        : mode === "fullscreen"
-          ? fullscreenSlotRef.current
-          : pipSlotRef.current;
-    if (target && iframeContainer.parentElement !== target) {
-      target.appendChild(iframeContainer);
+  // Track inline placeholder + chat scroll container rects. The outer
+  // wrapper (overflow:hidden, position:fixed) is sized to the scroll
+  // container so the iframe never bleeds past the chat viewport; the
+  // inner wrapper is offset to the placeholder so the iframe scrolls
+  // with chat content. useLayoutEffect runs before paint to avoid a
+  // one-frame flash. Capturing scroll listener catches every scrollable
+  // ancestor — ChatView's list, document, anything in between.
+  useLayoutEffect(() => {
+    if (mode !== "inline") return;
+    const el = placeholderRef.current;
+    if (!el) return;
+
+    // Find (and cache) the scroll-bounded ancestor. Falling back to
+    // `documentElement` keeps inline mode functional when the chat
+    // scrolls at window level rather than in a bounded container.
+    if (!scrollParentRef.current) {
+      let p: HTMLElement | null = el.parentElement;
+      while (p && p !== document.body) {
+        const style = window.getComputedStyle(p);
+        if (style.overflowY === "auto" || style.overflowY === "scroll") {
+          scrollParentRef.current = p;
+          break;
+        }
+        p = p.parentElement;
+      }
+      if (!scrollParentRef.current) {
+        scrollParentRef.current = document.documentElement;
+      }
     }
-  }, [mode, iframeContainer]);
+
+    let raf = 0;
+    const measure = () => {
+      raf = 0;
+      const node = placeholderRef.current;
+      if (!node) return;
+      const pr = node.getBoundingClientRect();
+      setPlaceholderRect({ x: pr.left, y: pr.top, w: pr.width, h: pr.height });
+      const sp = scrollParentRef.current;
+      if (sp) {
+        const cr = sp.getBoundingClientRect();
+        setContainerRect({ x: cr.left, y: cr.top, w: cr.width, h: cr.height });
+      }
+    };
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(measure);
+    };
+
+    // Synchronous initial measure before paint.
+    measure();
+
+    const ro = new ResizeObserver(schedule);
+    ro.observe(el);
+    if (scrollParentRef.current && scrollParentRef.current !== document.documentElement) {
+      ro.observe(scrollParentRef.current);
+    }
+    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
+    };
+  }, [mode]);
 
   // Persist PIP rect on every change so a re-render or remount
   // doesn't snap the panel back to the default corner.
@@ -270,9 +330,8 @@ export function McpAppIframe({
 
   // Mode change → notify widget so it can re-layout. We post even if
   // the widget hasn't finished init yet; if it's not listening yet
-  // (e.g. mid-reload during a mode lift), the next `initialize`
-  // response carries the new mode in hostContext.displayMode and
-  // the widget catches up that way.
+  // the next `initialize` response carries the new mode in
+  // hostContext.displayMode and the widget catches up that way.
   useEffect(() => {
     iframeRef.current?.contentWindow?.postMessage(
       {
@@ -334,13 +393,9 @@ export function McpAppIframe({
         const id = msg.id as number | string;
         switch (msg.method) {
           case "ui/initialize": {
-            // Read mode/theme through refs — the iframe may be
-            // re-handshaking after a WebKit reload triggered by a
-            // mode-lift parent move, in which case `mode` here
-            // needs to be the *current* mode, not the one captured
-            // when the listener was first bound. hostContext.
-            // displayMode tells the widget which surface it's
-            // rendering into without it having to track that itself.
+            // Read mode/theme through refs so the init response
+            // reflects the current state, not whatever was captured
+            // when this listener was bound.
             respond(id, {
               protocolVersion: PROTOCOL_VERSION,
               hostInfo: HOST_INFO,
@@ -451,14 +506,11 @@ export function McpAppIframe({
           }
           case "ui/message": {
             // Widget injecting a chat message (app.sendMessage).
-            // Phase 1: extract text from content blocks and route
-            // through the same `shell_input` IPC the chat composer
-            // uses (M6.15 BUG 1: was `chat_user_message`, which is
-            // an OUTBOUND event type from the backend with no
-            // matching IPC handler — the message silently dropped).
-            // Multi-block / image content blocks are flattened to
-            // text — image attachment via this path can be added
-            // later if a widget actually needs it.
+            // Extract text from content blocks and route through the
+            // same `shell_input` IPC the chat composer uses. Multi-
+            // block / image content blocks are flattened to text —
+            // image attachment via this path can be added later if a
+            // widget actually needs it.
             const params = msg.params as
               | { role?: string; content?: Array<{ type?: string; text?: string }> }
               | undefined;
@@ -469,10 +521,9 @@ export function McpAppIframe({
               .join("");
             if (text.trim()) {
               send({ type: "shell_input", text });
-              // M6.15 BUG 3: include `content: []` so the response
-              // is a valid CallToolResult. The MCP-Apps SDK's Zod
-              // validator on the widget side rejects `{isError}`
-              // alone and throws inside app.sendMessage's promise.
+              // Include `content: []` so the response is a valid
+              // CallToolResult — the SDK's Zod validator on the
+              // widget side rejects `{isError}` alone.
               respond(id, { content: [], isError: false });
             } else {
               respond(id, {
@@ -499,15 +550,12 @@ export function McpAppIframe({
       } else if (isNotification) {
         switch (msg.method) {
           case "ui/notifications/initialized": {
-            // Always re-push tool-result on every `initialized`
-            // notification — not just the first one. WebKit reloads
-            // the iframe when its DOM ancestry changes (mode lift),
-            // and the widget's SDK handshakes again from scratch. A
-            // one-shot latch here would leave the post-reload widget
-            // showing its initial "loading" state forever. pinn.ai's
-            // widgets per their README are idempotent in
-            // `ontoolresult` (they just set img.src etc.), so
-            // re-pushing is safe.
+            // Re-push tool-result on every `initialized` notification.
+            // After the CSS-positioning rewrite the iframe survives
+            // mode changes, so this normally fires exactly once per
+            // widget load — but keeping the push idempotent here
+            // means a widget that voluntarily reloads itself (e.g. an
+            // in-widget "reset" button) gets its state back.
             sendNotification("ui/notifications/tool-result", {
               content: stableResult.content,
               isError: stableResult.isError ?? false,
@@ -523,6 +571,15 @@ export function McpAppIframe({
             // image loads) is filtered out here because pinn.ai's
             // widget meta doesn't carry autoSize.
             if (!autoSize) break;
+            // Only honor size changes while inline. In fullscreen / PIP
+            // a widget may re-layout to its larger viewport and report
+            // a different height — but `measuredHeight` drives the
+            // INLINE bubble's placeholder, so accepting a lifted-mode
+            // report would shift the chat layout under the user's
+            // scroll position and snap it back on Back-to-chat. When
+            // the widget returns to inline it re-emits with the inline
+            // size (via host-context-changed → its own re-layout).
+            if (modeRef.current !== "inline") break;
             const params = msg.params as { height?: number } | undefined;
             const h = params?.height;
             if (typeof h !== "number" || !Number.isFinite(h)) break;
@@ -539,11 +596,7 @@ export function McpAppIframe({
 
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-    // themeMode is in deps so the init response uses the current theme;
-    // autoSize is in deps so the size-changed gate sees the current
-    // value if a future caller toggles the prop without remounting.
-    // a re-bind is fine because we only re-bind on those rare changes.
-  }, [stableResult, themeMode, autoSize]);
+  }, [stableResult, themeMode, autoSize, serverPrefix]);
 
   // Clear any pending widget tool-call timers on unmount. Without
   // this, a 60s timeout could fire after the iframe is gone and
@@ -587,247 +640,113 @@ export function McpAppIframe({
     });
   }, []);
 
-  // The actual iframe element — rendered ONCE into the stable
-  // detached container via portal. Never re-mounted after first
-  // render, regardless of mode.
-  const iframeNode = createPortal(
-    <iframe
-      ref={iframeRef}
-      srcDoc={html}
-      title={`MCP App: ${uri}`}
-      // `allow-scripts` is required for the SDK to run; combining it
-      // with `allow-same-origin` would defeat the srcdoc origin
-      // isolation, so we don't. The widget can still postMessage to
-      // the parent and fetch its declared resourceDomains.
-      sandbox={
-        allowSameOrigin
-          ? "allow-scripts allow-popups allow-forms allow-same-origin"
-          : "allow-scripts allow-popups allow-forms"
-      }
-      style={{
-        display: "block",
-        flex: "1 1 auto",
-        width: "100%",
-        border: "none",
-        background: "transparent",
-        minHeight: 0,
-      }}
-    />,
-    iframeContainer,
-  );
-
-  return (
-    <>
-      {iframeNode}
-
-      {/* All three surfaces are ALWAYS mounted; only their visibility
-          changes with the mode. WebKit reloads detached iframes when
-          they re-attach (an old WK quirk shipping in wry too), so
-          unmounting the lifted surfaces would kill the SDK handshake
-          every time the user toggles modes. Display-none keeps them
-          in the DOM at zero pixels and the iframeContainer stays put. */}
-      <InlineSurface
-        slotRef={inlineSlotRef}
-        active={mode === "inline"}
-        height={measuredHeight ?? INLINE_HEIGHT}
-        onFullscreen={() => setMode("fullscreen")}
-        onPip={() => setMode("pip")}
-      />
-
-      {/* Both lifted surfaces portal to document.body so they escape
-          the chat's overflow:auto. They stay mounted across mode
-          changes and use display:none when inactive. */}
-      {createPortal(
-        <FullscreenSurface
-          slotRef={fullscreenSlotRef}
-          active={mode === "fullscreen"}
-          onInline={() => setMode("inline")}
-          onPip={() => setMode("pip")}
-        />,
-        document.body,
-      )}
-      {createPortal(
-        <PipSurface
-          slotRef={pipSlotRef}
-          active={mode === "pip"}
-          rect={pipRect}
-          onRectChange={setPipRect}
-          onInline={() => setMode("inline")}
-          onFullscreen={() => setMode("fullscreen")}
-        />,
-        document.body,
-      )}
-
-      {/* Bubble stub — replaces the inline iframe area while the
-          widget is lifted, so the user has an anchor to find their
-          way back. */}
-      {mode !== "inline" && (
-        <BubbleStub mode={mode} onRestore={() => setMode("inline")} />
-      )}
-    </>
-  );
-}
-
-// ── Inline (bubble) surface ─────────────────────────────────────────
-
-function InlineSurface({
-  slotRef,
-  active,
-  height,
-  onFullscreen,
-  onPip,
-}: {
-  slotRef: React.RefObject<HTMLDivElement | null>;
-  active: boolean;
-  height: number;
-  onFullscreen: () => void;
-  onPip: () => void;
-}) {
-  return (
-    <div
-      // Hidden when the iframe is lifted out, but kept mounted so the
-      // slotRef stays valid for re-attach when mode flips back.
-      style={{
-        marginTop: 8,
-        borderRadius: 6,
-        overflow: "hidden",
-        border: "1px solid var(--border)",
-        background: "var(--bg-primary)",
-        position: "relative",
-        height,
-        display: active ? "block" : "none",
-      }}
-      className="group"
-    >
-      <div
-        ref={slotRef}
-        style={{ width: "100%", height: "100%", display: "flex" }}
-      />
-      <ModeToolbar
-        position="top-right"
-        floating
-        items={[
-          {
-            icon: <Maximize2 size={14} />,
-            title: "Fullscreen",
-            onClick: onFullscreen,
-          },
-          {
-            icon: <PictureInPicture2 size={14} />,
-            title: "Picture-in-picture",
-            onClick: onPip,
-          },
-        ]}
-      />
-    </div>
-  );
-}
-
-// ── Fullscreen surface ──────────────────────────────────────────────
-
-function FullscreenSurface({
-  slotRef,
-  active,
-  onInline,
-  onPip,
-}: {
-  slotRef: React.RefObject<HTMLDivElement | null>;
-  active: boolean;
-  onInline: () => void;
-  onPip: () => void;
-}) {
-  // Esc → back to inline. Bound only while active so we don't steal
-  // the key from other surfaces / modals when the widget isn't on
-  // screen.
+  // Esc → back to inline from fullscreen. Bound only while fullscreen
+  // so we don't steal the key from other modals when the widget is
+  // inline or PIP.
   useEffect(() => {
-    if (!active) return;
+    if (mode !== "fullscreen") return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onInline();
+      if (e.key === "Escape") setMode("inline");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, onInline]);
+  }, [mode]);
 
-  return (
-    <div
-      role="dialog"
-      aria-modal={active}
-      aria-hidden={!active}
-      aria-label="MCP App fullscreen"
-      // z-[55] sits above the chat scroll area but below the approval
-      // modal (z-[60]) so a tool-approval prompt can still surface.
-      className="fixed inset-0 z-[55] flex flex-col"
-      style={{
-        background: "var(--bg-primary)",
-        display: active ? "flex" : "none",
-      }}
-    >
-      <div
-        className="flex items-center justify-between px-3 py-2 border-b"
-        style={{
-          borderColor: "var(--border)",
-          background: "var(--bg-secondary)",
-          color: "var(--text-primary)",
-          fontSize: 13,
-        }}
-      >
-        <button
-          type="button"
-          onClick={onInline}
-          className="px-2 py-1 rounded inline-flex items-center gap-1.5 text-xs"
-          style={{
-            background: "transparent",
-            color: "var(--text-primary)",
-            border: "1px solid var(--border)",
-          }}
-        >
-          ← Back to chat
-        </button>
-        <div className="flex items-center gap-1">
-          <ToolbarButton
-            icon={<PictureInPicture2 size={14} />}
-            title="Picture-in-picture"
-            onClick={onPip}
-          />
-          <ToolbarButton
-            icon={<X size={14} />}
-            title="Close (Esc)"
-            onClick={onInline}
-          />
-        </div>
-      </div>
-      <div ref={slotRef} style={{ flex: "1 1 auto", display: "flex", minHeight: 0 }} />
-    </div>
-  );
-}
+  const inlineHeight = measuredHeight ?? INLINE_HEIGHT;
 
-// ── PIP surface ─────────────────────────────────────────────────────
+  // Compute the outer + inner wrapper styles. The DOM shape is the
+  // same for every mode (outer → inner → iframe) so React never
+  // re-mounts the iframe across mode lifts; only the styles change.
+  //
+  // inline      — outer = chat container's rect (overflow:hidden so the
+  //               iframe is clipped to the visible chat viewport and
+  //               doesn't bleed over the header / input bar). Inner is
+  //               absolute-positioned at the placeholder's offset
+  //               inside outer, sized to the placeholder. Negative
+  //               offsets are valid when the bubble scrolls past the
+  //               top — the iframe simply moves up under the clip.
+  // fullscreen  — outer = full viewport, inner = 100%.
+  // pip         — outer = pipRect, inner = 100%.
+  const baseInner: CSSProperties = {
+    display: "flex",
+    flexDirection: "column",
+    background: "var(--bg-primary)",
+    minHeight: 0,
+  };
+  let outerStyle: CSSProperties;
+  let innerStyle: CSSProperties;
+  if (mode === "inline") {
+    if (!placeholderRect || !containerRect) {
+      outerStyle = { display: "none" };
+      innerStyle = baseInner;
+    } else {
+      outerStyle = {
+        position: "fixed",
+        left: containerRect.x,
+        top: containerRect.y,
+        width: containerRect.w,
+        height: containerRect.h,
+        overflow: "hidden",
+        // Let chat scroll / clicks pass through wherever the wrapper
+        // covers non-iframe space. The inner div re-enables pointer
+        // events for the iframe area itself.
+        pointerEvents: "none",
+        zIndex: 10,
+      };
+      innerStyle = {
+        ...baseInner,
+        position: "absolute",
+        left: placeholderRect.x - containerRect.x,
+        top: placeholderRect.y - containerRect.y,
+        width: placeholderRect.w,
+        height: placeholderRect.h,
+        pointerEvents: "auto",
+        borderRadius: 6,
+        border: "1px solid var(--border)",
+        overflow: "hidden",
+      };
+    }
+  } else if (mode === "fullscreen") {
+    outerStyle = {
+      position: "fixed",
+      inset: 0,
+      zIndex: 55,
+    };
+    innerStyle = {
+      ...baseInner,
+      width: "100%",
+      height: "100%",
+    };
+  } else {
+    // pip
+    outerStyle = {
+      position: "fixed",
+      left: pipRect.x,
+      top: pipRect.y,
+      width: pipRect.w,
+      height: pipRect.h,
+      zIndex: 45,
+    };
+    innerStyle = {
+      ...baseInner,
+      width: "100%",
+      height: "100%",
+      borderRadius: 8,
+      border: "1px solid var(--border)",
+      boxShadow: "0 12px 36px rgba(0,0,0,0.45)",
+      overflow: "hidden",
+    };
+  }
 
-function PipSurface({
-  slotRef,
-  active,
-  rect,
-  onRectChange,
-  onInline,
-  onFullscreen,
-}: {
-  slotRef: React.RefObject<HTMLDivElement | null>;
-  active: boolean;
-  rect: PipRect;
-  onRectChange: (r: PipRect) => void;
-  onInline: () => void;
-  onFullscreen: () => void;
-}) {
-  // Pointer-driven drag from the header. Pointer events are used over
-  // mouse events so a stylus/touch drag works the same on a mac
-  // trackpad force-click.
-  const onHeaderPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    // Don't start a drag from the toolbar buttons.
+  // PIP drag — pointer events so trackpad / stylus work the same as
+  // mouse. Captured on the header to leave the iframe body free to
+  // receive widget interactions.
+  const onPipHeaderPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).closest("button")) return;
     e.preventDefault();
     const startX = e.clientX;
     const startY = e.clientY;
-    const start = rect;
+    const start = pipRect;
 
     const onMove = (ev: PointerEvent) => {
       const vw = window.innerWidth;
@@ -838,7 +757,7 @@ function PipSurface({
         vw - 80,
       );
       const ny = clamp(start.y + (ev.clientY - startY), 0, vh - 40);
-      onRectChange({ ...start, x: nx, y: ny });
+      setPipRect({ ...start, x: nx, y: ny });
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
@@ -849,54 +768,226 @@ function PipSurface({
   };
 
   return (
-    <div
-      aria-hidden={!active}
-      className="fixed z-[45] flex flex-col rounded-lg overflow-hidden"
-      style={{
-        left: rect.x,
-        top: rect.y,
-        width: rect.w,
-        height: rect.h,
-        background: "var(--bg-primary)",
-        border: "1px solid var(--border)",
-        boxShadow: "0 12px 36px rgba(0,0,0,0.45)",
-        display: active ? "flex" : "none",
-      }}
-    >
+    <>
+      {/* Inline placeholder. Always rendered at the full inline height
+          so the chat bubble's geometry stays constant across mode
+          changes — collapsing this when the iframe lifts to Fullscreen
+          / PIP would shift everything below by 480px, and the
+          subsequent return-to-inline would shift it back, producing
+          the "chat jumped down on Back-to-chat" behavior.
+          In inline mode this div is invisible (the portaled wrapper
+          overlays it). In fullscreen/PIP it shows a centered stub so
+          the user has a visible affordance to come back. */}
       <div
-        onPointerDown={onHeaderPointerDown}
-        className="flex items-center justify-between px-2 py-1.5"
+        ref={placeholderRef}
         style={{
-          background: "var(--bg-secondary)",
-          borderBottom: "1px solid var(--border)",
-          color: "var(--text-secondary)",
-          cursor: "move",
-          userSelect: "none",
+          marginTop: 8,
+          height: inlineHeight,
+          borderRadius: 6,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          ...(mode !== "inline"
+            ? {
+                background: "var(--bg-secondary)",
+                border: "1px dashed var(--border)",
+              }
+            : {}),
         }}
       >
-        <div className="inline-flex items-center gap-1.5 text-xs">
-          <GripHorizontal size={14} />
-          <span>Picture-in-picture</span>
-        </div>
-        <div className="flex items-center gap-0.5">
-          <ToolbarButton
-            icon={<Maximize2 size={13} />}
-            title="Fullscreen"
-            onClick={onFullscreen}
-          />
-          <ToolbarButton
-            icon={<Minimize2 size={13} />}
-            title="Restore inline"
-            onClick={onInline}
-          />
-          <ToolbarButton
-            icon={<X size={13} />}
-            title="Close"
-            onClick={onInline}
-          />
-        </div>
+        {mode !== "inline" && (
+          <BubbleStub mode={mode} onRestore={() => setMode("inline")} />
+        )}
       </div>
-      <div ref={slotRef} style={{ flex: "1 1 auto", display: "flex", minHeight: 0 }} />
+
+      {/* The single, permanent iframe + chrome. Portaled to body and
+          positioned with CSS only — never re-parented across mode
+          changes. This is the whole point of the rewrite: WebKit/wry
+          reloads an iframe whose DOM ancestry changes, and keeping
+          this wrapper put is what preserves widget state across
+          Fullscreen / PIP / Back-to-chat clicks. */}
+      {createPortal(
+        <div style={outerStyle}>
+          <div className="group" style={innerStyle}>
+            {mode === "inline" && (
+              <FloatingInlineToolbar
+                onFullscreen={() => setMode("fullscreen")}
+                onPip={() => setMode("pip")}
+              />
+            )}
+            {mode === "fullscreen" && (
+              <FullscreenHeader
+                onInline={() => setMode("inline")}
+                onPip={() => setMode("pip")}
+              />
+            )}
+            {mode === "pip" && (
+              <PipHeader
+                onPointerDown={onPipHeaderPointerDown}
+                onInline={() => setMode("inline")}
+                onFullscreen={() => setMode("fullscreen")}
+              />
+            )}
+
+            <iframe
+              ref={iframeRef}
+              srcDoc={html}
+              title={`MCP App: ${uri}`}
+              // `allow-scripts` is required for the SDK to run;
+              // combining it with `allow-same-origin` would defeat the
+              // srcdoc origin isolation, so we only add it when the
+              // caller has explicitly opted in.
+              sandbox={
+                allowSameOrigin
+                  ? "allow-scripts allow-popups allow-forms allow-same-origin"
+                  : "allow-scripts allow-popups allow-forms"
+              }
+              style={{
+                display: "block",
+                flex: "1 1 auto",
+                width: "100%",
+                border: "none",
+                background: "transparent",
+                minHeight: 0,
+              }}
+            />
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+// ── Inline floating toolbar ─────────────────────────────────────────
+
+function FloatingInlineToolbar({
+  onFullscreen,
+  onPip,
+}: {
+  onFullscreen: () => void;
+  onPip: () => void;
+}) {
+  return (
+    <div
+      className="absolute opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none group-hover:pointer-events-auto"
+      style={{
+        top: 6,
+        right: 6,
+        display: "flex",
+        gap: 4,
+        background: "var(--bg-secondary)",
+        border: "1px solid var(--border)",
+        borderRadius: 6,
+        padding: 2,
+        zIndex: 1,
+      }}
+    >
+      <ToolbarButton
+        icon={<Maximize2 size={14} />}
+        title="Fullscreen"
+        onClick={onFullscreen}
+      />
+      <ToolbarButton
+        icon={<PictureInPicture2 size={14} />}
+        title="Picture-in-picture"
+        onClick={onPip}
+      />
+    </div>
+  );
+}
+
+// ── Fullscreen header ───────────────────────────────────────────────
+
+function FullscreenHeader({
+  onInline,
+  onPip,
+}: {
+  onInline: () => void;
+  onPip: () => void;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between px-3 py-2 border-b"
+      style={{
+        borderColor: "var(--border)",
+        background: "var(--bg-secondary)",
+        color: "var(--text-primary)",
+        fontSize: 13,
+      }}
+    >
+      <button
+        type="button"
+        onClick={onInline}
+        className="px-2 py-1 rounded inline-flex items-center gap-1.5 text-xs"
+        style={{
+          background: "transparent",
+          color: "var(--text-primary)",
+          border: "1px solid var(--border)",
+        }}
+      >
+        ← Back to chat
+      </button>
+      <div className="flex items-center gap-1">
+        <ToolbarButton
+          icon={<PictureInPicture2 size={14} />}
+          title="Picture-in-picture"
+          onClick={onPip}
+        />
+        <ToolbarButton
+          icon={<X size={14} />}
+          title="Close (Esc)"
+          onClick={onInline}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── PIP header (draggable) ──────────────────────────────────────────
+
+function PipHeader({
+  onPointerDown,
+  onInline,
+  onFullscreen,
+}: {
+  onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onInline: () => void;
+  onFullscreen: () => void;
+}) {
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      className="flex items-center justify-between px-2 py-1.5"
+      style={{
+        background: "var(--bg-secondary)",
+        borderBottom: "1px solid var(--border)",
+        color: "var(--text-secondary)",
+        cursor: "move",
+        userSelect: "none",
+      }}
+    >
+      <div className="inline-flex items-center gap-1.5 text-xs">
+        <GripHorizontal size={14} />
+        <span>Picture-in-picture</span>
+      </div>
+      <div className="flex items-center gap-0.5">
+        <ToolbarButton
+          icon={<Maximize2 size={13} />}
+          title="Fullscreen"
+          onClick={onFullscreen}
+        />
+        <ToolbarButton
+          icon={<Minimize2 size={13} />}
+          title="Restore inline"
+          onClick={onInline}
+        />
+        <ToolbarButton
+          icon={<X size={13} />}
+          title="Close"
+          onClick={onInline}
+        />
+      </div>
     </div>
   );
 }
@@ -942,46 +1033,6 @@ function BubbleStub({
 }
 
 // ── Toolbar primitives ──────────────────────────────────────────────
-
-function ModeToolbar({
-  position,
-  floating,
-  items,
-}: {
-  position: "top-right";
-  floating: boolean;
-  items: { icon: ReactNode; title: string; onClick: () => void }[];
-}) {
-  const positional =
-    position === "top-right" ? { top: 6, right: 6 } : {};
-  return (
-    <div
-      className={
-        floating
-          ? "absolute opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none group-hover:pointer-events-auto"
-          : ""
-      }
-      style={{
-        ...positional,
-        display: "flex",
-        gap: 4,
-        background: "var(--bg-secondary)",
-        border: "1px solid var(--border)",
-        borderRadius: 6,
-        padding: 2,
-      }}
-    >
-      {items.map((it, i) => (
-        <ToolbarButton
-          key={i}
-          icon={it.icon}
-          title={it.title}
-          onClick={it.onClick}
-        />
-      ))}
-    </div>
-  );
-}
 
 function ToolbarButton({
   icon,
