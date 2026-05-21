@@ -780,6 +780,26 @@ pub async fn dispatch(
                 format!("(session-only) {key} = {value} — applied to runtime only; edit .thclaws/settings.json for persistence"),
             );
         }
+        SlashCommand::Cost { reset } => {
+            if reset {
+                state.session_cost_usd = 0.0;
+                #[cfg(feature = "cost_bridge")]
+                if let Some(ref bridge) = state.cost_bridge {
+                    let _ = bridge.tx_cost.send(0.0);
+                }
+                emit(events_tx, "session cost reset".into());
+            } else if state.session_cost_usd > 0.0 {
+                emit(
+                    events_tx,
+                    format!("session cost: ${:.4}", state.session_cost_usd),
+                );
+            } else {
+                emit(
+                    events_tx,
+                    "session cost: $0.0000 (no priced turns yet)".into(),
+                );
+            }
+        }
         SlashCommand::Compact => {
             let history = state.agent.history_snapshot();
             let compacted = crate::compaction::compact(&history, state.agent.budget_tokens / 2);

@@ -29,6 +29,8 @@ pub mod commands;
 pub mod compaction;
 pub mod config;
 pub mod context;
+#[cfg(feature = "cost_bridge")]
+pub mod cost_bridge;
 pub mod deploy_client;
 pub mod dotenv;
 pub mod endpoints;

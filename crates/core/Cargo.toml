@@ -140,9 +140,19 @@ tempfile = "3"
 # rejects.
 image = "0.24"
 
+# BLE central used by the cost_bridge module to stream session cost USD to
+# a thClaws-Cost Cardputer display. Cross-platform (CoreBluetooth on macOS,
+# zbus on Linux, WinRT on Windows). Behind a feature flag so headless CI
+# builds and the GUI-only path can opt out without pulling in BLE stacks.
+btleplug = { version = "0.11", optional = true }
+
 [features]
-default = []
+default = ["cost_bridge"]
 gui = ["dep:tao", "dep:wry", "dep:comrak", "dep:rfd", "dep:native-dialog"]
+# Cardputer cost display bridge — REPL streams session_cost_usd to a
+# thClaws-Cost peripheral over BLE NUS; device sends reset notifications
+# back when the user hits Backspace.
+cost_bridge = ["dep:btleplug"]
 
 [[bin]]
 name = "thclaws-cli"

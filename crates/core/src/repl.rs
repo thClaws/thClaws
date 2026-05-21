@@ -177,6 +177,12 @@ pub enum SlashCommand {
         key: String,
         value: String,
     },
+    /// Session-level cost counter shown alongside the per-turn token
+    /// line. `reset: true` zeroes the accumulator; `reset: false`
+    /// prints the current value.
+    Cost {
+        reset: bool,
+    },
     Save,
     Load(String),
     Sessions,
@@ -1334,6 +1340,13 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "cwd" | "pwd" => SlashCommand::Cwd,
         "thinking" => SlashCommand::Thinking(args.to_string()),
         "compact" => SlashCommand::Compact,
+        "cost" => match args {
+            "" => SlashCommand::Cost { reset: false },
+            "reset" | "clear" | "zero" => SlashCommand::Cost { reset: true },
+            other => SlashCommand::Unknown(format!(
+                "unknown /cost subcommand: '{other}' (try: /cost, /cost reset)"
+            )),
+        },
         "fork" => SlashCommand::Fork,
         "reload" | "restart" => SlashCommand::Reload,
         "doctor" | "diag" => SlashCommand::Doctor,
@@ -2929,6 +2942,7 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         BuiltInCommand { name: "version",  description: "Show version",                               category: "System", usage: "" },
         BuiltInCommand { name: "cwd",      description: "Show current working directory",             category: "System", usage: "" },
         BuiltInCommand { name: "usage",    description: "Show token usage by provider and model",     category: "System", usage: "" },
+        BuiltInCommand { name: "cost",     description: "Show or reset accumulated session cost",     category: "System", usage: "[reset]" },
         BuiltInCommand { name: "doctor",   description: "Run diagnostics",                            category: "System", usage: "" },
         BuiltInCommand { name: "config",   description: "Set a config value (session-only)",          category: "System", usage: "key=value" },
         BuiltInCommand { name: "quit",     description: "Exit",                                       category: "System", usage: "" },
@@ -3110,6 +3124,8 @@ pub fn render_help() -> &'static str {
      /version          Show version\n  \
      /team             Attach to team tmux session (or show status)\n  \
      /usage            Show token usage by provider and model\n  \
+     /cost             Show accumulated session cost in USD\n  \
+     /cost reset       Zero the session cost counter\n  \
      /skill show NAME  Show full description + path for a skill\n  \
      /skill install [--user] <url> [name]\n  \
      \x20                 Install a skill (or bundle) from a git repo or\n  \
@@ -4643,6 +4659,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // jobs stay in the manager until pruned, but each is announced once.
     let mut notified_research: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Accumulated USD cost for this REPL session. Computed via the
+    // model catalogue after every AgentEvent::Done and shown alongside
+    // the per-turn token counts. `/cost reset` zeroes it.
+    let mut session_cost_usd: f64 = 0.0;
+
+    // Cardputer cost-display bridge — best-effort BLE central that
+    // streams `session_cost_usd` to a `thClaws-Cost-*` peripheral and
+    // takes reset notifications back when the user hits Backspace on
+    // the device. Feature-gated so headless CI / GUI-only builds don't
+    // pull in btleplug. The handle stays alive for the REPL's lifetime;
+    // dropping it on Ctrl-C / quit terminates the background task.
+    #[cfg(feature = "cost_bridge")]
+    let mut cost_bridge = crate::cost_bridge::spawn();
+
     // Helper: process team inbox messages and run agent turn.
     macro_rules! process_team_messages {
         ($msgs:expr) => {{
@@ -4800,6 +4830,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // Uses select! to race user input against team inbox messages so the
     // lead can respond to teammates without the user needing to press Enter.
     loop {
+        // Drain Cardputer reset notifications quietly — when the user
+        // hits Backspace on the device we zero the session counter so
+        // both displays stay in sync. Silent on purpose; the device
+        // already shows the $0.0000 result and a CLI println here would
+        // garble whatever the user is mid-typing into readline.
+        #[cfg(feature = "cost_bridge")]
+        while cost_bridge.rx_reset.try_recv().is_ok() {
+            session_cost_usd = 0.0;
+        }
+
         // M6.39.2: announce any research jobs that finished since the
         // last prompt (Done / Cancelled / Failed). Each id announced
         // once; subsequent prompts skip already-notified jobs.
@@ -6414,6 +6454,23 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 );
                             }
                         }
+                    }
+                }
+                SlashCommand::Cost { reset } => {
+                    if reset {
+                        session_cost_usd = 0.0;
+                        #[cfg(feature = "cost_bridge")]
+                        let _ = cost_bridge.tx_cost.send(0.0);
+                        println!("{COLOR_DIM}session cost reset{COLOR_RESET}");
+                    } else if session_cost_usd > 0.0 {
+                        println!(
+                            "{COLOR_DIM}session cost: ${:.4}{COLOR_RESET}",
+                            session_cost_usd
+                        );
+                    } else {
+                        println!(
+                            "{COLOR_DIM}session cost: $0.0000 (no priced turns yet){COLOR_RESET}"
+                        );
                     }
                 }
                 SlashCommand::Compact => {
@@ -8735,16 +8792,42 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         _ => String::new(),
                     };
                     let elapsed = format_duration(turn_start.elapsed());
+                    // Cost: convert provider Usage → catalogue TokenUsage
+                    // (different field names, same numbers), then look up
+                    // the active model's pricing. Unknown / tier-billed
+                    // models return None — we just skip the cost suffix.
+                    let token_usage = crate::model_catalogue::TokenUsage {
+                        prompt_tokens: usage.input_tokens,
+                        completion_tokens: usage.output_tokens,
+                        cached_input_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+                        cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
+                        reasoning_tokens: usage.reasoning_output_tokens.unwrap_or(0),
+                    };
+                    let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
+                    if let Some(c) = catalogue.compute_cost_usd(&config.model, &token_usage) {
+                        session_cost_usd += c;
+                    }
+                    // Push the running total to the Cardputer display.
+                    // Send fails silently when no device is paired —
+                    // we don't want a missing buddy to disrupt the REPL.
+                    #[cfg(feature = "cost_bridge")]
+                    let _ = cost_bridge.tx_cost.send(session_cost_usd);
+                    let cost_str = if session_cost_usd > 0.0 {
+                        format!(" · ${:.4} session", session_cost_usd)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}]{COLOR_RESET}",
-                        usage.input_tokens, usage.output_tokens, cache_info, elapsed
+                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}{}]{COLOR_RESET}",
+                        usage.input_tokens, usage.output_tokens, cache_info, elapsed, cost_str
                     );
                     lead_log!(
-                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}]{COLOR_RESET}\n",
+                        "\n{COLOR_DIM}[tokens: {}in/{}out{} · {}{}]{COLOR_RESET}\n",
                         usage.input_tokens,
                         usage.output_tokens,
                         cache_info,
-                        elapsed
+                        elapsed,
+                        cost_str
                     );
                     let _ = std::io::stdout().flush();
 
@@ -8876,6 +8959,26 @@ mod tests {
             Some(SlashCommand::Unknown(msg)) => assert!(msg.contains("key=value")),
             other => panic!("expected Unknown, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_slash_cost() {
+        assert_eq!(
+            parse_slash("/cost"),
+            Some(SlashCommand::Cost { reset: false })
+        );
+        assert_eq!(
+            parse_slash("/cost reset"),
+            Some(SlashCommand::Cost { reset: true })
+        );
+        assert_eq!(
+            parse_slash("/cost clear"),
+            Some(SlashCommand::Cost { reset: true })
+        );
+        assert!(matches!(
+            parse_slash("/cost bogus"),
+            Some(SlashCommand::Unknown(_))
+        ));
     }
 
     #[test]

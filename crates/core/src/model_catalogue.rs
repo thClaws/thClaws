@@ -470,6 +470,19 @@ impl EffectiveCatalogue {
         self.baseline.lookup_context(model)
     }
 
+    /// Two-tier cost computation. Tries the user cache (fresher pricing
+    /// from `/models refresh`) first, then the embedded baseline.
+    /// `None` propagates from `Catalogue::compute_cost_usd` when the
+    /// model is unpriced (e.g. tier-billed) or unknown.
+    pub fn compute_cost_usd(&self, model: &str, usage: &TokenUsage) -> Option<f64> {
+        if let Some(c) = &self.cache {
+            if let Some(cost) = c.compute_cost_usd(model, usage) {
+                return Some(cost);
+            }
+        }
+        self.baseline.compute_cost_usd(model, usage)
+    }
+
     /// Look up an override for `model`, applying the same alias and
     /// prefix-strip rules the catalogue uses. Override keys may be
     /// `provider/model` (preferred) or bare `model` — both forms are

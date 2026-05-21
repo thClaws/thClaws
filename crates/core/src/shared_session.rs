@@ -598,6 +598,17 @@ pub struct WorkerState {
     /// — without this, a `/model` swap or other rebuild would orphan
     /// the queue and any pending message would be lost.
     pub injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// Running USD cost accumulator. Updated after each AgentEvent::Done
+    /// via `EffectiveCatalogue::compute_cost_usd`; surfaced through the
+    /// `/cost` slash command and pushed to the Cardputer display via
+    /// `cost_bridge`. Zeroed by `/cost reset` or by a buddy-side reset.
+    pub session_cost_usd: f64,
+    /// Optional BLE bridge to a thClaws-Cost Cardputer. `Some` whenever
+    /// the worker spawned a bridge at startup (default for both CLI and
+    /// GUI modes when the `cost_bridge` feature is on); `None` when the
+    /// feature is compiled out so the field is harmless to reference.
+    #[cfg(feature = "cost_bridge")]
+    pub cost_bridge: Option<crate::cost_bridge::CostBridge>,
 }
 
 /// M6.29: handle to a running `/loop` task.
@@ -1554,6 +1565,9 @@ async fn run_worker(
         line_session: None,
         line_pre_mode: None,
         line_pre_approver: None,
+        session_cost_usd: 0.0,
+        #[cfg(feature = "cost_bridge")]
+        cost_bridge: Some(crate::cost_bridge::spawn()),
     };
 
     // M6.35 HOOK2: fire session_start hook now that WorkerState is
@@ -3257,6 +3271,33 @@ async fn drive_turn_stream(
                 let tracker =
                     crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
                 tracker.record(provider_name, &state.config.model, &usage);
+
+                // Cost accounting (GUI parity with the CLI REPL). Drain
+                // any pending buddy resets first so a mid-turn Backspace
+                // on the Cardputer takes effect before this turn's
+                // contribution lands. Then accumulate, then push the new
+                // total to the buddy if a bridge is attached.
+                #[cfg(feature = "cost_bridge")]
+                if let Some(ref mut bridge) = state.cost_bridge {
+                    while bridge.rx_reset.try_recv().is_ok() {
+                        state.session_cost_usd = 0.0;
+                    }
+                }
+                let token_usage = crate::model_catalogue::TokenUsage {
+                    prompt_tokens: usage.input_tokens,
+                    completion_tokens: usage.output_tokens,
+                    cached_input_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+                    cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
+                    reasoning_tokens: usage.reasoning_output_tokens.unwrap_or(0),
+                };
+                let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
+                if let Some(c) = catalogue.compute_cost_usd(&state.config.model, &token_usage) {
+                    state.session_cost_usd += c;
+                }
+                #[cfg(feature = "cost_bridge")]
+                if let Some(ref bridge) = state.cost_bridge {
+                    let _ = bridge.tx_cost.send(state.session_cost_usd);
+                }
 
                 // If a skill applied a model override this turn, emit
                 // a revert chat note so the user sees the active
