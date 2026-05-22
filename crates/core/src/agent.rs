@@ -1306,6 +1306,21 @@ impl Agent {
                         // Anthropic rejects any user message with empty
                         // content ("messages.N: user messages must have
                         // non-empty content").
+                        // Pop the partial assistant we just pushed at the
+                        // top of this block. The retry re-asks with a
+                        // larger token budget and the model produces a
+                        // fresh complete response — leaving the partial
+                        // in history would make the next provider.stream
+                        // call's messages end with role=assistant, which
+                        // claude-opus-4-7+ rejects ("This model does not
+                        // support assistant message prefill. The
+                        // conversation must end with a user message.").
+                        {
+                            let mut h = history.lock().expect("history lock");
+                            if h.last().map(|m| m.role) == Some(Role::Assistant) {
+                                h.pop();
+                            }
+                        }
                         continue;
                     } else {
                         // Clear any skill-recommended model override
