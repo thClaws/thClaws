@@ -1118,6 +1118,13 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                         .unwrap_or_default();
                     project.set_model(&new_model);
                     let _ = project.save();
+                    // The user's `--model X` choice has been deemed
+                    // unreachable; drop the CLI override so the reload
+                    // returns the fallback (Y), not X. Without this the
+                    // session would keep re-pinning to a model whose
+                    // provider has no credentials, defeating the entire
+                    // auto-fallback affordance.
+                    crate::config::clear_cli_model_override();
                     config = AppConfig::load().unwrap_or_default();
                 }
                 let provider_name = config.detect_provider().unwrap_or("unknown");

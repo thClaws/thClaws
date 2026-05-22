@@ -38,9 +38,18 @@ struct Cli {
     #[arg(short, long)]
     print: bool,
 
-    /// Override model (e.g. claude-sonnet-4-5, gpt-4o, ollama/llama3.2)
+    /// Override model for this run only — applies to CLI, GUI, and --serve.
+    /// One-shot, in-memory. Pair with --set-model to persist instead.
     #[arg(short, long)]
     model: Option<String>,
+
+    /// Persist a model to `.thclaws/settings.json` as the project
+    /// default, then use it for this run. Unlike --model (one-shot),
+    /// subsequent invocations without --model will pick up this value.
+    /// Refuses to overwrite an unreadable settings file to avoid
+    /// clobbering sibling fields (maxTokens, allowedTools, etc.).
+    #[arg(long, value_name = "MODEL")]
+    set_model: Option<String>,
 
     /// Never ask for tool-call approval (alias: --dangerously-skip-permissions)
     #[arg(long, alias = "dangerously-skip-permissions")]
@@ -404,6 +413,31 @@ async fn main() {
     // exists or if a Claude Code `.claude/settings.json` is present.
     thclaws_core::config::ProjectConfig::ensure_default_exists();
 
+    // Wire up `--set-model` / `--model` before any AppConfig::load runs.
+    // `--set-model` persists to `.thclaws/settings.json` (refusing to
+    // overwrite an unreadable file so we don't clobber sibling settings)
+    // and also takes effect this run; `--model` is in-memory only. Both
+    // route through `set_cli_model_override`, which `AppConfig::load`
+    // applies last — so every surface (CLI, GUI, --serve) sees the same
+    // model without each path re-implementing the override step.
+    if let Some(ref m) = cli.set_model {
+        let resolved = thclaws_core::providers::ProviderKind::resolve_alias(m);
+        match thclaws_core::config::persist_model_to_project_settings(&resolved) {
+            Ok(path) => eprintln!(
+                "\x1b[32m--set-model: persisted model={resolved} to {}\x1b[0m",
+                path.display()
+            ),
+            Err(e) => {
+                eprintln!("\x1b[31m--set-model: {e}\x1b[0m");
+                std::process::exit(1);
+            }
+        }
+        thclaws_core::config::set_cli_model_override(resolved);
+    } else if let Some(ref m) = cli.model {
+        let resolved = thclaws_core::providers::ProviderKind::resolve_alias(m);
+        thclaws_core::config::set_cli_model_override(resolved);
+    }
+
     // In-process scheduler (Step 2): spawn a background tokio task
     // that polls `~/.config/thclaws/schedules.json` every 30s and
     // fires due jobs as `thclaws --print` subprocesses. Skipped for
@@ -511,10 +545,10 @@ async fn main() {
         }
     };
 
-    // CLI overrides.
-    if let Some(m) = cli.model {
-        config.model = thclaws_core::providers::ProviderKind::resolve_alias(&m);
-    }
+    // CLI overrides. `--model` / `--set-model` already routed through
+    // `set_cli_model_override` above, so `AppConfig::load` has applied
+    // them. The rest of these flags are CLI/REPL-only knobs that the
+    // GUI and --serve don't honor today.
     if cli.accept_all {
         config.permissions = "auto".to_string();
     }

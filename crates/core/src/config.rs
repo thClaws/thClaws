@@ -12,6 +12,40 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+
+/// Process-wide one-shot model override set by `app.rs` from
+/// `--model` / `--set-model` before any dispatch path. Applied at the
+/// end of `AppConfig::load`, after the project overlay, so every
+/// surface (CLI, GUI, --serve) sees the same model without each
+/// having to re-implement the override step. `clear_cli_model_override`
+/// drops it — used by the GUI's auto-fallback path so a broken
+/// `--model` doesn't pin the session to an unreachable provider after
+/// the fallback has already switched.
+static CLI_MODEL_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
+
+/// Stash a CLI-supplied model so subsequent `AppConfig::load` calls
+/// return it as `config.model`. Called once at startup from `app.rs`.
+pub fn set_cli_model_override(model: String) {
+    if let Ok(mut guard) = CLI_MODEL_OVERRIDE.write() {
+        *guard = Some(model);
+    }
+}
+
+/// Drop any active CLI model override. Called by the GUI's auto-fallback
+/// flow when the user's `--model` choice is unreachable and a different
+/// provider is being promoted to the project default.
+pub fn clear_cli_model_override() {
+    if let Ok(mut guard) = CLI_MODEL_OVERRIDE.write() {
+        *guard = None;
+    }
+}
+
+/// Inspect the active CLI model override. Returns `None` when no
+/// override is set. Primarily for tests.
+pub fn cli_model_override() -> Option<String> {
+    CLI_MODEL_OVERRIDE.read().ok().and_then(|g| g.clone())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -1039,6 +1073,15 @@ impl AppConfig {
             config.mcp_servers.extend(project_mcp);
         }
 
+        // CLI `--model` / `--set-model` override (set by app.rs once at
+        // startup). Applied last so it wins over user, project, and the
+        // Claude Code fallback — matches the precedence the module docs
+        // promise. Cleared by `clear_cli_model_override` if auto-fallback
+        // decides the user's choice was unreachable.
+        if let Some(m) = cli_model_override() {
+            config.model = m;
+        }
+
         Ok(config)
     }
 
@@ -1148,10 +1191,71 @@ impl AppConfig {
     }
 }
 
+/// Persist a model override into `.thclaws/settings.json` for the
+/// `--set-model` flag. Safer than the obvious `load().unwrap_or_default()
+/// + save()` pattern: if the file exists but fails to parse (transient
+/// I/O, mid-edit, unknown field after a downgrade) we **refuse to
+/// overwrite** rather than constructing a fresh defaults-everywhere
+/// `ProjectConfig` and silently clobbering the user's other settings
+/// (`maxTokens`, `allowedTools`, `kms.active`, etc.). Save errors
+/// propagate as `Error::Config` so `app.rs` can surface them on stderr.
+///
+/// When the file doesn't exist we fall back to the regular
+/// `ProjectConfig::load` chain (which also looks at
+/// `.claude/settings.json`) so users migrating from Claude Code get
+/// their existing settings preserved on first `--set-model` instead of
+/// reset to defaults.
+pub fn persist_model_to_project_settings(resolved_model: &str) -> Result<PathBuf> {
+    let path = ProjectConfig::path();
+    let fallback = || ProjectConfig::load().unwrap_or_default();
+    persist_model_at_path(&path, fallback, resolved_model)?;
+    Ok(path)
+}
+
+/// Inner helper that all the safety / clobber logic lives in, parametrized
+/// on the target path and the "file is missing" fallback. Pulled out so
+/// the tests can exercise it without setting `THCLAWS_PROJECT_ROOT` — env
+/// var mutations on the test thread race with `posix_spawn` in the
+/// `schedule::tests` suite and trip EINVAL out of fork+exec.
+fn persist_model_at_path<F>(path: &Path, missing_fallback: F, resolved_model: &str) -> Result<()>
+where
+    F: FnOnce() -> ProjectConfig,
+{
+    let mut project = match std::fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str::<ProjectConfig>(&contents).map_err(|e| {
+            Error::Config(format!(
+                "{} exists but is unreadable ({e}). Refusing to overwrite to avoid clobbering other settings. Fix or delete the file and retry.",
+                path.display()
+            ))
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing_fallback(),
+        Err(e) => {
+            return Err(Error::Config(format!(
+                "failed to read {}: {e}",
+                path.display()
+            )));
+        }
+    };
+    project.set_model(resolved_model);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string_pretty(&project)?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    /// Serializes tests that mutate process-global env vars
+    /// (`THCLAWS_PROJECT_ROOT`, `THCLAWS_CONFIG`, etc.). Without this,
+    /// cargo's default parallel runner lets one test's `remove_var`
+    /// race with another's mid-flight `read_to_string`.
+    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn default_config_is_anthropic_sonnet() {
@@ -1414,6 +1518,7 @@ mod tests {
     /// assertion fails otherwise.
     #[test]
     fn ensure_default_exists_writes_full_template_then_is_idempotent() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         std::env::set_var("THCLAWS_PROJECT_ROOT", dir.path());
 
@@ -1472,5 +1577,63 @@ mod tests {
         std::env::remove_var("OPENAI_API_KEY");
         assert_eq!(c.api_key_from_env(), None);
         std::env::remove_var("THCLAWS_DISABLE_KEYCHAIN");
+    }
+
+    /// Covers all three behaviors the `--set-model` polish points cared
+    /// about: file-missing → fall-back-and-create, file-present →
+    /// update model in place without touching other settings, and
+    /// file-unreadable → bail rather than clobber. Driven through the
+    /// `persist_model_at_path` helper with an explicit tempdir path so
+    /// we don't need to mutate `THCLAWS_PROJECT_ROOT` — env-var
+    /// mutations on a test thread race with `posix_spawn` in the
+    /// concurrent `schedule::tests` suite (EINVAL out of fork+exec when
+    /// the env table moves mid-walk).
+    #[test]
+    fn persist_model_at_path_handles_missing_existing_and_unreadable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".thclaws/settings.json");
+        let default_fallback = ProjectConfig::default;
+
+        // (1) File missing → uses the fallback and writes it out.
+        persist_model_at_path(&path, default_fallback, "gpt-test-1").unwrap();
+        let pc: ProjectConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(pc.model.as_deref(), Some("gpt-test-1"));
+
+        // (2) Existing settings (`maxTokens`) survive a model update —
+        // guards against dome's original `load().unwrap_or_default()`
+        // clobber footgun.
+        std::fs::write(&path, r#"{"model":"old-model","maxTokens":12345}"#).unwrap();
+        persist_model_at_path(&path, default_fallback, "gpt-test-2").unwrap();
+        let after: ProjectConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after.model.as_deref(), Some("gpt-test-2"));
+        assert_eq!(after.max_tokens, Some(12345));
+
+        // (3) Unreadable existing file → Err, file unchanged. Without
+        // this guard, a transient parse failure would silently reset
+        // every sibling field to its default.
+        std::fs::write(&path, "{not valid json").unwrap();
+        let err = persist_model_at_path(&path, default_fallback, "gpt-test-3").unwrap_err();
+        assert!(
+            format!("{err}").contains("unreadable"),
+            "expected bail message, got: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not valid json");
+    }
+
+    /// In-memory CLI override APIs (set / get / clear) are the bridge
+    /// that lets `app.rs` reach every dispatch surface's
+    /// `AppConfig::load`. Test directly — no env vars — to avoid the
+    /// `posix_spawn` race described above.
+    #[test]
+    fn cli_model_override_set_get_clear() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_cli_model_override();
+        assert_eq!(cli_model_override(), None);
+        set_cli_model_override("cli-override-model".into());
+        assert_eq!(cli_model_override().as_deref(), Some("cli-override-model"));
+        clear_cli_model_override();
+        assert_eq!(cli_model_override(), None);
     }
 }
