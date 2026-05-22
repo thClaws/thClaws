@@ -337,6 +337,15 @@ async fn main() {
     // exists or if a Claude Code `.claude/settings.json` is present.
     thclaws_core::config::ProjectConfig::ensure_default_exists();
 
+    // If --model was passed, persist it to .thclaws/settings.json so
+    // GUI, serve, and CLI all see the same model without needing
+    // per-mode override plumbing.
+    if let Some(ref m) = cli.model {
+        let mut project = thclaws_core::config::ProjectConfig::load().unwrap_or_default();
+        project.set_model(&thclaws_core::providers::ProviderKind::resolve_alias(m));
+        let _ = project.save();
+    }
+
     // In-process scheduler (Step 2): spawn a background tokio task
     // that polls `~/.config/thclaws/schedules.json` every 30s and
     // fires due jobs as `thclaws --print` subprocesses. Skipped for
