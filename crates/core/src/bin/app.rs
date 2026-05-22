@@ -253,6 +253,67 @@ fn detach_console_for_gui() {
 #[cfg(not(windows))]
 fn detach_console_for_gui() {}
 
+/// Windows-only: when about to launch the GUI from a console (cmd.exe /
+/// PowerShell), respawn ourselves as a detached child and exit the parent
+/// so the shell prompt returns immediately. Issue #109.
+///
+/// Background: `thclaws.exe` is built as a **console-subsystem** binary
+/// (PR #60 / issue #48) so that `--cli`'s rustyline gets working stdio.
+/// The side effect is that cmd.exe / PowerShell `WaitForSingleObject` on
+/// every console-subsystem child until exit — `notepad.exe` returns the
+/// prompt instantly only because it's a windows-subsystem binary, and
+/// `FreeConsole()` in the child doesn't change cmd's wait. Result: typing
+/// `thclaws.exe` from a shell blocks the prompt until the GUI window closes.
+///
+/// Workaround: at the GUI dispatch entry, respawn `current_exe()` with
+/// `THCLAWS_GUI_DETACHED=1` and `DETACHED_PROCESS`, then `exit(0)`. The
+/// child sees the env var, skips the respawn, runs the GUI in-process,
+/// and survives parent / terminal closure because `DETACHED_PROCESS`
+/// breaks the parent process group. The parent exits in microseconds,
+/// so cmd's wait returns and the next prompt appears.
+///
+/// Called before the in-process scheduler and `/v1` loopback bind so
+/// neither runs in the doomed parent (avoiding a port-bind race on
+/// 18443). No-op on macOS / Linux — terminals there don't block on
+/// GUI children.
+#[cfg(all(windows, feature = "gui"))]
+fn respawn_detached_for_gui_if_needed(cli: &Cli) {
+    // Skip in the detached child itself.
+    if std::env::var_os("THCLAWS_GUI_DETACHED").is_some() {
+        return;
+    }
+    // Only respawn when the dispatch is actually GUI: not --cli/--print,
+    // and either plain GUI (no --serve) or the --serve --gui combo.
+    let use_cli = cli.cli || cli.print;
+    let is_gui_dispatch = !use_cli && (!cli.serve || cli.gui);
+    if !is_gui_dispatch {
+        return;
+    }
+
+    use std::os::windows::process::CommandExt;
+    // DETACHED_PROCESS (0x00000008) — child has no console, no process-
+    // group ties to the parent shell.
+    const DETACHED_PROCESS: u32 = 0x00000008;
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let spawn = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("THCLAWS_GUI_DETACHED", "1")
+        .creation_flags(DETACHED_PROCESS)
+        .spawn();
+    if spawn.is_ok() {
+        std::process::exit(0);
+    }
+    // Spawn failed (antivirus quarantine, ENOMEM, etc.): fall through
+    // and run the GUI in-process. User loses the prompt-return but
+    // keeps a working app.
+}
+
+#[cfg(not(all(windows, feature = "gui")))]
+fn respawn_detached_for_gui_if_needed(_cli: &Cli) {}
+
 #[tokio::main]
 async fn main() {
     secrets::load_into_env();
@@ -330,6 +391,12 @@ async fn main() {
     }
 
     let use_cli = cli.cli || cli.print;
+
+    // Issue #109: on Windows, respawn detached so cmd.exe / PowerShell
+    // return the prompt instead of waiting on the GUI window. Runs
+    // before the scheduler + /v1 loopback so they don't bind ports in
+    // the doomed parent. See `respawn_detached_for_gui_if_needed`.
+    respawn_detached_for_gui_if_needed(&cli);
 
     // First-run bootstrap: drop a `.thclaws/settings.json` with model +
     // permissions defaults into the project so users get a working
