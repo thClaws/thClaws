@@ -305,6 +305,10 @@ impl Provider for AnthropicProvider {
             let mut buffer: Vec<u8> = Vec::new();
             let mut byte_stream = Box::pin(byte_stream);
             let mut raw = raw_dump;
+            // Anthropic reports prompt/cache tokens in `message_start` and only the
+            // final `output_tokens` in `message_delta`; hold the former so it can be
+            // merged into the terminal MessageStop.
+            let mut start_usage: Option<Usage> = None;
             loop {
                 let maybe_chunk = tokio::time::timeout(
                     chunk_timeout,
@@ -326,8 +330,25 @@ impl Provider for AnthropicProvider {
                     let event_text = String::from_utf8_lossy(&event_bytes);
                     let trimmed = event_text.trim_end_matches('\n');
                     if let Some(ev) = parse_sse_event(trimmed)? {
-                        if let ProviderEvent::TextDelta(ref s) = ev { raw.push(s); }
-                        yield ev;
+                        match ev {
+                            ProviderEvent::MessageStart { .. } => {
+                                // Capture the prompt/cache usage carried here so it
+                                // survives into the terminal MessageStop.
+                                start_usage = message_start_usage(trimmed);
+                                yield ev;
+                            }
+                            ProviderEvent::MessageStop { stop_reason, usage } => {
+                                yield ProviderEvent::MessageStop {
+                                    stop_reason,
+                                    usage: merge_usage(start_usage.take(), usage),
+                                };
+                            }
+                            ProviderEvent::TextDelta(s) => {
+                                raw.push(&s);
+                                yield ProviderEvent::TextDelta(s);
+                            }
+                            other => yield other,
+                        }
                     }
                 }
             }
@@ -423,21 +444,7 @@ pub fn parse_sse_event(raw: &str) -> Result<Option<ProviderEvent>> {
                 .pointer("/delta/stop_reason")
                 .and_then(Value::as_str)
                 .map(String::from);
-            let usage = v.get("usage").map(|u| Usage {
-                input_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-                output_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-                cache_creation_input_tokens: u
-                    .get("cache_creation_input_tokens")
-                    .and_then(Value::as_u64)
-                    .map(|v| v as u32),
-                cache_read_input_tokens: u
-                    .get("cache_read_input_tokens")
-                    .and_then(Value::as_u64)
-                    .map(|v| v as u32),
-                // Anthropic folds extended-thinking tokens into the
-                // standard output count — no separate reasoning rate.
-                reasoning_output_tokens: None,
-            });
+            let usage = v.get("usage").map(parse_usage);
             Some(ProviderEvent::MessageStop { stop_reason, usage })
         }
         "message_stop" | "ping" => None,
@@ -445,6 +452,69 @@ pub fn parse_sse_event(raw: &str) -> Result<Option<ProviderEvent>> {
     };
 
     Ok(event)
+}
+
+/// Build a [`Usage`] from an Anthropic `usage` JSON object.
+fn parse_usage(u: &Value) -> Usage {
+    Usage {
+        input_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+        output_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+        cache_creation_input_tokens: u
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32),
+        cache_read_input_tokens: u
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32),
+        // Anthropic folds extended-thinking tokens into the standard output
+        // count — no separate reasoning rate.
+        reasoning_output_tokens: None,
+    }
+}
+
+/// Extract the usage carried by a `message_start` SSE event.
+///
+/// Anthropic reports the prompt and cache token counts (`input_tokens`,
+/// `cache_creation_input_tokens`, `cache_read_input_tokens`) in
+/// `message_start.message.usage`; the terminal `message_delta` only carries the
+/// final `output_tokens`. Returns `None` for any other event.
+fn message_start_usage(raw: &str) -> Option<Usage> {
+    let data = raw
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:")))?;
+    let v: Value = serde_json::from_str(data).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("message_start") {
+        return None;
+    }
+    v.pointer("/message/usage").map(parse_usage)
+}
+
+/// Merge the prompt/cache usage captured from `message_start` with the
+/// `output_tokens` reported by the terminal `message_delta`. Terminal values win
+/// where present so an existing field is never regressed.
+fn merge_usage(start: Option<Usage>, end: Option<Usage>) -> Option<Usage> {
+    match (start, end) {
+        (Some(s), Some(e)) => Some(Usage {
+            input_tokens: if e.input_tokens > 0 {
+                e.input_tokens
+            } else {
+                s.input_tokens
+            },
+            output_tokens: if e.output_tokens > 0 {
+                e.output_tokens
+            } else {
+                s.output_tokens
+            },
+            cache_creation_input_tokens: e
+                .cache_creation_input_tokens
+                .or(s.cache_creation_input_tokens),
+            cache_read_input_tokens: e.cache_read_input_tokens.or(s.cache_read_input_tokens),
+            reasoning_output_tokens: e.reasoning_output_tokens.or(s.reasoning_output_tokens),
+        }),
+        (start, end) => end.or(start),
+    }
 }
 
 #[cfg(test)]
@@ -744,6 +814,95 @@ mod tests {
             e => panic!("expected MessageStop, got {:?}", e),
         }
         assert_eq!(events.len(), 5, "unexpected events: {:?}", events);
+    }
+
+    #[tokio::test]
+    async fn stream_surfaces_message_start_usage_and_cache_tokens() {
+        // Regression: Anthropic reports input + cache tokens in `message_start`
+        // and only the final `output_tokens` in `message_delta`. The stream must
+        // surface the prompt/cache counts; previously message_start.usage was
+        // dropped, so every turn reported input_tokens=0 and no cache stats.
+        use futures::StreamExt;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":5000,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":4500,\"output_tokens\":1}}}\n",
+            "\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(sse_body.as_bytes().to_vec(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new("test-key")
+            .with_base_url(format!("{}/v1/messages", server.uri()));
+
+        let req = StreamRequest {
+            model: "claude-sonnet-4-5".into(),
+            system: None,
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            max_tokens: 100,
+            thinking_budget: None,
+            stream_chunk_timeout_override: None,
+        };
+
+        let events: Vec<ProviderEvent> = provider
+            .stream(req)
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .expect("all events ok");
+
+        let stop = events
+            .iter()
+            .find_map(|e| match e {
+                ProviderEvent::MessageStop { usage, .. } => usage.as_ref(),
+                _ => None,
+            })
+            .expect("a MessageStop carrying usage");
+
+        assert_eq!(
+            stop.input_tokens, 5000,
+            "prompt tokens from message_start must survive"
+        );
+        assert_eq!(
+            stop.cache_read_input_tokens,
+            Some(4500),
+            "cache read tokens from message_start must survive"
+        );
+        assert_eq!(
+            stop.output_tokens, 42,
+            "output tokens come from message_delta"
+        );
     }
 
     #[tokio::test]
