@@ -261,7 +261,11 @@ pub async fn discover(client: &Client, mcp_url: &str) -> Result<OAuthMetadata> {
             .map_err(|e| Error::Provider(format!("oauth server metadata json: {e}")))
     })
     .await
-    .map_err(|_| Error::Provider(format!("oauth server metadata: timed out fetching {meta_url} (15s)")))??;
+    .map_err(|_| {
+        Error::Provider(format!(
+            "oauth server metadata: timed out fetching {meta_url} (15s)"
+        ))
+    })??;
 
     let authorization_endpoint = meta
         .get("authorization_endpoint")

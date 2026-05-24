@@ -566,7 +566,9 @@ impl McpClient {
 
         // Bridge task: read JSON-RPC lines from client_write side, POST
         // each to the HTTP URL, write the response body back to server_write.
-        // On 401, attempt OAuth discovery + browser flow, then retry.
+        // On 401, attempt OAuth discovery + browser flow, then retry —
+        // UNLESS this is a non-interactive connect (`/mcp add`), in which
+        // case we fail the request fast instead of popping a browser.
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut reader = BufReader::new(server_read);
@@ -638,6 +640,39 @@ impl McpClient {
                             hdrs.chars().take(300).collect::<String>(),
                             body_preview.chars().take(300).collect::<String>(),
                         );
+                        // Non-interactive connect (`/mcp add`): never open a
+                        // browser. The upfront probe can't catch a server
+                        // that lets `ping` through unauthenticated but 401s
+                        // on `initialize`, so guard here too. Fail the
+                        // pending request fast with a JSON-RPC error (echoing
+                        // the numeric id so `handle_incoming` matches it) —
+                        // `initialize()` returns promptly and `/mcp add`
+                        // reports "run /mcp reauth" instead of hanging on a
+                        // browser callback. Issue #114.
+                        if !interactive_oauth {
+                            eprintln!(
+                                "\x1b[33m[mcp-http] {name_for_task}: server requires OAuth — run `/mcp reauth {name_for_task}`\x1b[0m"
+                            );
+                            if let Some(id) = serde_json::from_str::<Value>(trimmed)
+                                .ok()
+                                .and_then(|v| v.get("id").and_then(Value::as_u64))
+                            {
+                                let synthetic = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": {
+                                        "code": -32001,
+                                        "message": format!(
+                                            "{name_for_task}: server requires OAuth — run /mcp reauth {name_for_task}"
+                                        ),
+                                    },
+                                })
+                                .to_string();
+                                write_body_to_pipe(&mut writer, &synthetic, "application/json")
+                                    .await;
+                            }
+                            continue;
+                        }
                         // Invalidate so resolve_oauth_token doesn't just
                         // return the same rejected token from the store.
                         {
@@ -2208,7 +2243,10 @@ mod tests {
         };
         // Braced var resolves.
         assert_eq!(interpolate_with("${FD_KEY}", env), "secret123");
-        assert_eq!(interpolate_with("Bearer ${FD_KEY}", env), "Bearer secret123");
+        assert_eq!(
+            interpolate_with("Bearer ${FD_KEY}", env),
+            "Bearer secret123"
+        );
         // Multiple vars in one value.
         assert_eq!(interpolate_with("${A}-${B}", env), "aa-bb");
         // Unset var → literal preserved (visible misconfig, not silent empty).
@@ -2232,18 +2270,24 @@ mod tests {
         let server_ok = MockServer::start().await;
         Mock::given(method("POST"))
             .and(header("x-api-key", "secret123"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"jsonrpc":"2.0","id":0,"result":{}}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"jsonrpc":"2.0","id":0,"result":{}}"#),
+            )
             .mount(&server_ok)
             .await;
 
         let mut headers = HashMap::new();
         headers.insert("X-API-KEY".to_string(), "secret123".to_string());
         // interactive flag irrelevant when auth succeeds.
-        let res =
-            resolve_token_upfront(&reqwest::Client::new(), &server_ok.uri(), "t", &headers, false)
-                .await;
+        let res = resolve_token_upfront(
+            &reqwest::Client::new(),
+            &server_ok.uri(),
+            "t",
+            &headers,
+            false,
+        )
+        .await;
         assert!(
             matches!(res, UpfrontToken::Proceed(None)),
             "header-authed probe should Proceed with no bearer token",
@@ -2281,9 +2325,7 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_delay(Duration::from_secs(10)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
             .mount(&server)
             .await;
 
@@ -2293,8 +2335,7 @@ mod tests {
             .unwrap();
 
         let started = std::time::Instant::now();
-        let res =
-            resolve_token_upfront(&client, &server.uri(), "t", &HashMap::new(), false).await;
+        let res = resolve_token_upfront(&client, &server.uri(), "t", &HashMap::new(), false).await;
         let elapsed = started.elapsed();
         // Probe errored (timeout) → we proceed without a token, fast.
         assert!(
@@ -2304,6 +2345,64 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(3),
             "probe must not hang on a stalled server; took {elapsed:?}",
+        );
+    }
+
+    // ── Fix 3 (deep): a server that lets `ping` through but 401s on
+    //    `initialize` must NOT trigger the browser flow in a
+    //    non-interactive `/mcp add` — the bridge fails the request fast.
+    //    This is the gap the upfront probe alone can't catch.
+    #[tokio::test]
+    async fn noninteractive_connect_defers_when_initialize_401s() {
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Probe `ping` is allowed through unauthenticated (200).
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"ping\""))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"jsonrpc":"2.0","id":0,"result":{}}"#),
+            )
+            .mount(&server)
+            .await;
+        // …but `initialize` requires auth → 401.
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"initialize\""))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let cfg = McpServerConfig {
+            name: "fd".into(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Default::default(),
+            url: server.uri(),
+            headers: Default::default(),
+            trusted: false,
+        };
+
+        let started = std::time::Instant::now();
+        let res = McpClient::spawn_noninteractive(cfg, None).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            res.is_err(),
+            "initialize 401 must fail the connect, not succeed"
+        );
+        let msg = format!("{}", res.err().unwrap());
+        assert!(
+            msg.contains("reauth") || msg.contains("OAuth"),
+            "error should point the user at /mcp reauth; got: {msg}",
+        );
+        // Must NOT have blocked on a browser callback (5 min) or even the
+        // 30s request timeout — the synthetic error returns immediately.
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "non-interactive connect must fail fast on initialize 401; took {elapsed:?}",
         );
     }
 }

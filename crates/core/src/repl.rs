@@ -1112,7 +1112,13 @@ fn parse_mcp_subcommand(args: &str) -> SlashCommand {
                                     "--header expects \"Key: Value\" (got '{spec}')"
                                 ));
                             };
-                            headers.push((k.trim().to_string(), v.trim().to_string()));
+                            let key = k.trim();
+                            if key.is_empty() {
+                                return SlashCommand::Unknown(format!(
+                                    "--header has an empty key (got '{spec}')"
+                                ));
+                            }
+                            headers.push((key.to_string(), v.trim().to_string()));
                             j += 2;
                         }
                         other => {
@@ -9183,6 +9189,16 @@ mod tests {
         // Malformed --header (no colon) → Unknown.
         assert!(matches!(
             parse_slash("/mcp add fd https://x.test/api --header nocolon"),
+            Some(SlashCommand::Unknown(_))
+        ));
+        // Empty header key → Unknown.
+        assert!(matches!(
+            parse_slash("/mcp add fd https://x.test/api --header \": value\""),
+            Some(SlashCommand::Unknown(_))
+        ));
+        // --header with no following value → Unknown.
+        assert!(matches!(
+            parse_slash("/mcp add fd https://x.test/api --header"),
             Some(SlashCommand::Unknown(_))
         ));
         assert_eq!(
