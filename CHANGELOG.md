@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-05-24
+
+KMS + Files management in the GUI, a LINE reconnect fix, and a clearer
+sandbox boundary message.
+
+### Added
+
+- **KMS sidebar create / rename / delete / edit.** The `+` buttons now
+  open proper modals (the old `window.prompt`/`confirm` silently failed
+  inside the wry webview): create a new KMS base (name + project/user
+  scope), and create a new blank page (title / topic / category / tags)
+  from the per-KMS browser panel. Right-click a page row to **Rename…**
+  (moves the file and rewrites inbound links + the index) or
+  **Delete…**. Edit the page you're viewing — a pencil opens the body
+  in the TipTap editor plus a modal for the raw YAML frontmatter; Save
+  writes it back.
+- **Files tab create file / folder.** Right-click the explorer (or the
+  new FilePlus / FolderPlus header buttons) for **New file…** /
+  **New folder…**, created in the current directory via a name modal.
+  Sandbox-checked; refuses to clobber an existing path. The explorer
+  header now shows a compact `../<last>` path (full path on hover)
+  since the viewer navbar already carries the full path.
+
+### Fixed
+
+- **LINE: reconnect storm after a clean websocket close**
+  ([#120](https://github.com/thClaws/thClaws/pull/120),
+  [@ultramcu](https://github.com/ultramcu)). `LineClient::run` reset
+  backoff and reconnected immediately on a clean close; a relay that
+  closes cleanly on every connect spun an unthrottled connect/close
+  loop. Adds a cancel-aware 1s pause mirroring the error path (shutdown
+  still returns `Cancelled` promptly).
+
+- **Clearer "outside the workspace" sandbox message**
+  ([#119](https://github.com/thClaws/thClaws/issues/119),
+  [@ruzerix](https://github.com/ruzerix)). When a path resolves outside
+  the workspace root, `Sandbox` now states plainly that this is a
+  workspace-path boundary, **not** a permission/approval issue
+  (approving a tool doesn't widen it). #119 turned out not to be a bug:
+  a small model fabricated an out-of-workspace absolute interpreter
+  path, the command failed as an ordinary shell error, and the model
+  paraphrased it as "rejected by the security policy." The Bash tool
+  description now steers models to invoke interpreters via PATH
+  (e.g. `python script.py`) rather than guessing absolute paths.
+
+### Default model — no change
+
+Default stays `claude-sonnet-4-6`.
+
 ## [0.17.0] — 2026-05-24
 
 Two contributor-driven fixes: accurate Anthropic token/cost accounting,

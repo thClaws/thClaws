@@ -30,6 +30,13 @@ impl Tool for BashTool {
          Default timeout: 120000ms (override with `timeout` in milliseconds, max 600000). \
          Always requires approval. Use this for general operations (git, build, \
          test, curl, ls -l, rm, etc.) that the specialized tools don't cover. \
+         Runs from the workspace root. Invoke programs by name so the shell \
+         resolves them via PATH (e.g. `python script.py`) — this works even when \
+         the interpreter is installed outside the workspace. Do NOT fabricate an \
+         absolute path to an interpreter; a guessed/wrong path just fails. \
+         Reference scripts and files by paths inside the workspace. (Only the \
+         `cwd` argument is sandboxed to the workspace — the command itself is not, \
+         but a made-up path won't exist.) \
          IMPORTANT: For long-running processes (servers, watchers, dev servers), \
          append ` &` to run in background, or use `timeout 10 command` to sample \
          initial output. Never run a server in foreground — it blocks until timeout."
@@ -1557,5 +1564,62 @@ mod tests {
         assert!(wrapped.contains("source"));
         assert!(wrapped.contains("activate"));
         assert!(wrapped.contains("uvicorn main:app --port 8800"));
+    }
+
+    // Issue #119 reproduction. Mutates the GLOBAL sandbox root + spawns
+    // subprocesses, so it's #[ignore]d (would race the scheduler tests'
+    // posix_spawn under the parallel runner). Run explicitly:
+    //   cargo test --features gui -- --ignored --test-threads=1 repro_119
+    //
+    // Confirms which mechanism actually blocks the reporter's
+    // `<abs>/python.exe script.py`:
+    //   A) cwd OUTSIDE the workspace root → real sandbox denial.
+    //   B) absolute exe path IN the command (no cwd) → NOT checked; runs
+    //      and fails as an ordinary shell error (which the weak model
+    //      then paraphrased as "rejected by the security policy").
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore]
+    async fn repro_119_bash_sandbox_trigger() {
+        let ws = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::env::set_var("THCLAWS_PROJECT_ROOT", ws.path());
+        crate::sandbox::Sandbox::init().unwrap();
+
+        // A) cwd outside the workspace root → sandbox denies.
+        let a = BashTool
+            .call(json!({"command": "echo hi", "cwd": outside.path().to_str().unwrap()}))
+            .await;
+        eprintln!("[A cwd-outside] {a:?}");
+        let a_err = a.expect_err("cwd outside root must be denied");
+        let a_msg = format!("{a_err}");
+        assert!(
+            a_msg.contains("access denied") && a_msg.contains("outside the workspace root"),
+            "A should be the sandbox boundary error; got: {a_msg}"
+        );
+
+        // B) command runs with default root; the command STRING is not
+        //    path-checked, so an in-workspace echo just works.
+        let b = BashTool
+            .call(json!({"command": "echo IN_WS_OK"}))
+            .await
+            .expect("default-root command should run");
+        eprintln!("[B default-root] {b:?}");
+        assert!(b.contains("IN_WS_OK"));
+
+        // C) absolute exe path in the command, no cwd → NOT a sandbox
+        //    denial. It runs and fails as a plain shell error (exit
+        //    code / not found) — never "access denied".
+        let c = BashTool
+            .call(json!({"command": "/no/such/python_zzz_119 --version"}))
+            .await
+            .expect("a failing command returns Ok(output-with-exit-code), not Err");
+        eprintln!("[C abs-exe-no-cwd] {c:?}");
+        assert!(
+            !c.contains("access denied"),
+            "an absolute exe path in the command must NOT hit the sandbox; got: {c}"
+        );
+
+        std::env::remove_var("THCLAWS_PROJECT_ROOT");
     }
 }

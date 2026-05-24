@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, X, BookOpen, FileText, Link2, Network } from "lucide-react";
+import {
+  ChevronRight,
+  X,
+  BookOpen,
+  FileText,
+  Link2,
+  Network,
+  Plus,
+} from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
+import { KmsCreateModal, type KmsCreateMode } from "./KmsCreateModal";
 
 /// M6.39.9: right-edge KMS browser. Activated by clicking a KMS row's
 /// title in the left sidebar. Lists `pages/*.md` and `sources/*.md`
@@ -66,6 +75,18 @@ export function KmsBrowserSidebar({
   const [sources, setSources] = useState<BrowseFile[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  // Page create / rename / delete modal (null = closed). The backend
+  // re-emits kms_browse_result on success, so the existing subscription
+  // refreshes the list.
+  const [modal, setModal] = useState<KmsCreateMode | null>(null);
+  // Right-click context menu on a page row (null = closed). Anchored to
+  // the cursor; its right edge pins to the click x so it never spills
+  // off the right-edge panel.
+  const [pageMenu, setPageMenu] = useState<{
+    name: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
   useEffect(() => {
     setPages(null);
@@ -134,6 +155,15 @@ export function KmsBrowserSidebar({
           </span>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => setModal({ kind: "page", kms: kmsName })}
+            className="p-0.5 rounded hover:bg-white/10"
+            style={{ color: "var(--text-secondary)" }}
+            title="New blank page in this KMS"
+          >
+            <Plus size={14} />
+          </button>
           <button
             type="button"
             onClick={() => setDismissed(true)}
@@ -230,6 +260,10 @@ export function KmsBrowserSidebar({
                     onClick={() =>
                       onOpenFile({ kms: kmsName, kind: "page", name: p.name })
                     }
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setPageMenu({ name: p.name, x: e.clientX, y: e.clientY });
+                    }}
                   />
                 ))
               )}
@@ -265,6 +299,54 @@ export function KmsBrowserSidebar({
           </>
         )}
       </div>
+      {pageMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-[55]"
+            onClick={() => setPageMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setPageMenu(null);
+            }}
+          />
+          <div
+            className="fixed z-[56] rounded border shadow-lg text-xs py-1"
+            style={{
+              right: Math.max(8, window.innerWidth - pageMenu.x),
+              top: pageMenu.y,
+              minWidth: "150px",
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+          >
+            <button
+              type="button"
+              className="block w-full text-left px-3 py-1.5 hover:bg-white/10"
+              onClick={() => {
+                setModal({ kind: "rename", kms: kmsName, name: pageMenu.name });
+                setPageMenu(null);
+              }}
+            >
+              Rename…
+            </button>
+            <button
+              type="button"
+              className="block w-full text-left px-3 py-1.5 hover:bg-white/10"
+              style={{ color: "var(--danger, #e06c75)" }}
+              onClick={() => {
+                setModal({ kind: "delete", kms: kmsName, name: pageMenu.name });
+                setPageMenu(null);
+              }}
+            >
+              Delete…
+            </button>
+          </div>
+        </>
+      )}
+      {modal && (
+        <KmsCreateModal mode={modal} onClose={() => setModal(null)} />
+      )}
     </div>
   );
 }
@@ -300,10 +382,12 @@ function FileRow({
   file,
   onClick,
   active = false,
+  onContextMenu,
 }: {
   file: BrowseFile;
   onClick: () => void;
   active?: boolean;
+  onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   /// Active row styling: 2px accent left-border + tinted bg + accent
   /// text + slightly heavier weight. The chosen tint (`color-mix`
@@ -320,6 +404,7 @@ function FileRow({
     <button
       type="button"
       onClick={onClick}
+      onContextMenu={onContextMenu}
       className="flex items-baseline justify-between w-full text-left px-3 py-1"
       style={{
         color: textColor,

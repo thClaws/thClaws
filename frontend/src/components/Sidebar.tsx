@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Plus } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { ModelPickerDropdown } from "./ModelPickerDropdown";
+import { KmsCreateModal, type KmsCreateMode } from "./KmsCreateModal";
 
 type SessionInfo = { id: string; model: string; messages: number; title?: string | null };
 type KmsInfo = { name: string; scope: "user" | "project"; active: boolean };
@@ -76,6 +77,9 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
     { name: string; tools: number }[]
   >([]);
   const [kmss, setKmss] = useState<KmsInfo[]>([]);
+  // KMS create modal (new KMS base). null = closed. Replaces the old
+  // window.prompt() flow that silently failed inside the webview.
+  const [kmsModal, setKmsModal] = useState<KmsCreateMode | null>(null);
   // Right-click context menu anchored to the session row the user
   // right-clicked; null when closed. Click anywhere else dismisses.
   const [sessionMenu, setSessionMenu] = useState<
@@ -441,21 +445,7 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
           <button
             className="p-0.5 rounded hover:bg-white/10"
             title="New KMS"
-            onClick={() => {
-              const name = window.prompt(
-                "New KMS name (letters, digits, -, _):",
-                "",
-              );
-              if (!name) return;
-              const trimmed = name.trim();
-              if (!trimmed) return;
-              const scope = window.confirm(
-                `Scope?\n\nOK = user (~/.config/thclaws/kms/${trimmed})\nCancel = project (./.thclaws/kms/${trimmed})`,
-              )
-                ? "user"
-                : "project";
-              send({ type: "kms_new", name: trimmed, scope });
-            }}
+            onClick={() => setKmsModal({ kind: "kms" })}
           >
             <Plus size={12} />
           </button>
@@ -662,6 +652,9 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
             </form>
           </div>
         </div>
+      )}
+      {kmsModal && (
+        <KmsCreateModal mode={kmsModal} onClose={() => setKmsModal(null)} />
       )}
     </div>
   );

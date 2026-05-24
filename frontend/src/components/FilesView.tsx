@@ -1,5 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Folder, File, ArrowUp, Pencil, Eye, Save, X } from "lucide-react";
+import {
+  Folder,
+  File,
+  ArrowUp,
+  Pencil,
+  Eye,
+  Save,
+  X,
+  FilePlus,
+  FolderPlus,
+} from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
 import { MarkdownEditor } from "./MarkdownEditor";
@@ -98,6 +108,14 @@ function isTextEditable(path: string): boolean {
   return TEXT_EDITABLE.has(extOf(path));
 }
 
+// Compact path for the explorer header — the viewer navbar already
+// shows the full path. Root stays "."; nested dirs show "../<last>".
+function shortPath(p: string): string {
+  if (p === "." || p === "") return ".";
+  const last = p.split("/").filter(Boolean).pop() ?? p;
+  return p.includes("/") ? `../${last}` : last;
+}
+
 function isMarkdownPath(path: string): boolean {
   // Used to gate the iframe's `srcDoc` branch (vs. the asset-URL fetch
   // branch). Backend-rendered HTML previews — Markdown source files
@@ -148,6 +166,15 @@ function injectBaseHref(html: string, filePath: string): string {
 export function FilesView({ active }: Props) {
   const [currentPath, setCurrentPath] = useState(".");
   const [entries, setEntries] = useState<FileEntry[]>([]);
+  // Explorer right-click context menu (null = closed).
+  const [explorerMenu, setExplorerMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  // New file / folder name modal. null = closed; otherwise which kind.
+  const [createKind, setCreateKind] = useState<"file" | "folder" | null>(null);
+  const [createName, setCreateName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const { resolved: themeMode } = useTheme();
 
   // The file being displayed. `content` is what the backend returned —
@@ -277,6 +304,45 @@ export function FilesView({ active }: Props) {
       : ".";
     send({ type: "file_list", path: parent || "." });
   };
+
+  // Open the new file / folder modal, creating in the current directory.
+  const startCreate = (kind: "file" | "folder") => {
+    setExplorerMenu(null);
+    setCreateName("");
+    setCreateError(null);
+    setCreateKind(kind);
+  };
+
+  const submitCreate = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (creating || createKind === null) return;
+    const n = createName.trim();
+    if (!n) return setCreateError("name required");
+    if (n.includes("/")) return setCreateError("name can't contain '/'");
+    const path = currentPath === "." ? n : `${currentPath}/${n}`;
+    setCreating(true);
+    setCreateError(null);
+    send({ type: createKind === "folder" ? "file_mkdir" : "file_create", path });
+  };
+
+  // Resolve the create round-trip; refresh the listing on success.
+  useEffect(() => {
+    if (createKind === null) return;
+    const wanted =
+      createKind === "folder" ? "file_mkdir_result" : "file_create_result";
+    const unsub = subscribe((msg) => {
+      if (msg.type !== wanted) return;
+      setCreating(false);
+      if (msg.ok) {
+        setCreateKind(null);
+        setCreateName("");
+        send({ type: "file_list", path: currentPath });
+      } else {
+        setCreateError((msg.error as string) ?? "create failed");
+      }
+    });
+    return unsub;
+  }, [createKind, currentPath]);
 
   const openFile = useCallback((path: string) => {
     setMode("preview");
@@ -524,10 +590,32 @@ export function FilesView({ active }: Props) {
           >
             <ArrowUp size={12} />
           </button>
-          <span className="truncate">{currentPath}</span>
+          <span className="truncate flex-1" title={currentPath}>
+            {shortPath(currentPath)}
+          </span>
+          <button
+            onClick={() => startCreate("file")}
+            className="p-0.5 rounded hover:bg-white/10 shrink-0"
+            title={`New file in ${currentPath}`}
+          >
+            <FilePlus size={12} />
+          </button>
+          <button
+            onClick={() => startCreate("folder")}
+            className="p-0.5 rounded hover:bg-white/10 shrink-0"
+            title={`New folder in ${currentPath}`}
+          >
+            <FolderPlus size={12} />
+          </button>
         </div>
 
-        <div className="overflow-y-auto flex-1 p-1">
+        <div
+          className="overflow-y-auto flex-1 p-1"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setExplorerMenu({ x: e.clientX, y: e.clientY });
+          }}
+        >
           {entries.length === 0 ? (
             <div className="text-xs p-2" style={{ color: "var(--text-secondary)" }}>
               Empty directory
@@ -731,6 +819,125 @@ export function FilesView({ active }: Props) {
           </div>
         )}
       </div>
+
+      {explorerMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-[55]"
+            onClick={() => setExplorerMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setExplorerMenu(null);
+            }}
+          />
+          <div
+            className="fixed z-[56] rounded border shadow-lg text-xs py-1"
+            style={{
+              left: explorerMenu.x,
+              top: explorerMenu.y,
+              minWidth: "160px",
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+          >
+            <button
+              type="button"
+              className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+              onClick={() => startCreate("file")}
+            >
+              <FilePlus size={13} /> New file…
+            </button>
+            <button
+              type="button"
+              className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-white/10"
+              onClick={() => startCreate("folder")}
+            >
+              <FolderPlus size={13} /> New folder…
+            </button>
+          </div>
+        </>
+      )}
+
+      {createKind && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center"
+          style={{ background: "var(--modal-backdrop, rgba(0,0,0,0.55))" }}
+          onClick={() => setCreateKind(null)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setCreateKind(null);
+          }}
+        >
+          <form
+            className="rounded-lg border shadow-xl w-[420px] max-w-[92vw]"
+            style={{
+              background: "var(--bg-primary)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={submitCreate}
+          >
+            <div
+              className="px-4 py-2 border-b text-sm font-semibold flex items-center gap-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <span style={{ color: "var(--accent)" }}>●</span>
+              <span>
+                New {createKind} in {currentPath}
+              </span>
+            </div>
+            <div className="px-4 py-3 space-y-2 text-xs">
+              <input
+                autoFocus
+                type="text"
+                value={createName}
+                onChange={(e) => setCreateName(e.target.value)}
+                placeholder={createKind === "folder" ? "src" : "notes.md"}
+                className="w-full px-2 py-1.5 rounded border font-mono text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-primary)",
+                }}
+              />
+              {createError && (
+                <div style={{ color: "var(--danger, #e06c75)" }}>{createError}</div>
+              )}
+            </div>
+            <div
+              className="px-4 py-2.5 border-t flex justify-end gap-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <button
+                type="button"
+                onClick={() => setCreateKind(null)}
+                className="px-3 py-1.5 rounded border text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={creating}
+                className="px-3 py-1.5 rounded text-xs font-medium"
+                style={{
+                  background: "var(--accent)",
+                  color: "var(--accent-fg, #fff)",
+                  opacity: creating ? 0.6 : 1,
+                  cursor: creating ? "default" : "pointer",
+                }}
+              >
+                {creating ? "Creating…" : "Create"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

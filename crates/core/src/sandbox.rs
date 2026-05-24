@@ -147,8 +147,19 @@ impl Sandbox {
     }
 
     fn denied(path: &Path, root: &Path) -> Error {
+        // Keep the "access denied" prefix (tests + callers match on it) but
+        // spell out that this is a workspace-boundary limit, not a
+        // permission/approval gate. Weak models otherwise paraphrase the
+        // terse old message as "rejected by the security policy even though
+        // you approved" (issue #119), which sends users hunting in
+        // settings.json for a permission that was never the problem.
         Error::Tool(format!(
-            "access denied: {} is outside the project directory {}",
+            "access denied: '{}' is outside the workspace root '{}'. File \
+             tools and the Bash working directory are confined to the \
+             workspace — this is a path boundary, NOT a permission/approval \
+             issue (approving a tool does not widen it). Use a path inside \
+             the workspace, or relaunch thClaws with a root that contains \
+             this path.",
             path.display(),
             root.display()
         ))
@@ -241,6 +252,26 @@ mod tests {
             let result = Sandbox::validate_against(root, root, "new_file.txt").unwrap();
             assert!(result.starts_with(root));
             assert!(result.ends_with("new_file.txt"));
+        });
+    }
+
+    // Issue #119: the denied message must read as a workspace-boundary
+    // limit, not a permission gate, so weak models stop paraphrasing it
+    // as "rejected by the security policy even though you approved".
+    #[test]
+    fn denied_message_names_workspace_boundary_not_permission() {
+        with_sandbox(|root| {
+            let err = Sandbox::validate_against(root, root, "/etc/passwd").unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("access denied"), "keeps prefix; got: {msg}");
+            assert!(
+                msg.contains("outside the workspace root"),
+                "names the boundary; got: {msg}"
+            );
+            assert!(
+                msg.contains("NOT a permission"),
+                "disclaims the permission framing; got: {msg}"
+            );
         });
     }
 

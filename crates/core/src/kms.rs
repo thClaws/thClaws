@@ -1428,6 +1428,93 @@ pub fn delete_page(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Rename a KMS page: move `pages/<old>.md` → `pages/<new>.md` and
+/// rewrite every inbound link (`pages/<old>.md`, `[[old]]`,
+/// `[[old|display]]`) across the KMS's pages, sources, and `index.md`
+/// so the vault stays self-consistent — same machinery the `merge`
+/// path uses for collision renames. `new_name` is slugified the same
+/// way new pages are. The page's frontmatter `title:` (its display
+/// heading) is intentionally left alone — this renames the page's
+/// identity/filename, not its title. Refuses to overwrite an existing
+/// page. Returns the new path.
+pub fn rename_page(kref: &KmsRef, old_name: &str, new_name: &str) -> Result<PathBuf> {
+    let old_path = writable_page_path(kref, old_name)?;
+    if !old_path.exists() {
+        return Err(Error::Tool(format!(
+            "page not found: {}",
+            old_path.display()
+        )));
+    }
+    let old_stem = old_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(old_name)
+        .to_string();
+
+    let new_slug = sanitize_alias(new_name);
+    if new_slug.is_empty() {
+        return Err(Error::Tool(
+            "new name has no usable characters for a filename".into(),
+        ));
+    }
+    if new_slug == old_stem {
+        return Ok(old_path); // no-op rename
+    }
+    let new_path = writable_page_path(kref, &new_slug)?;
+    if new_path.exists() {
+        return Err(Error::Tool(format!(
+            "a page named '{new_slug}' already exists"
+        )));
+    }
+
+    std::fs::rename(&old_path, &new_path)
+        .map_err(|e| Error::Tool(format!("rename {}: {e}", old_path.display())))?;
+
+    // Rewrite inbound links across pages/ + sources/ (the renamed file
+    // now lives in pages/, so its own self-links get fixed too).
+    let mut page_renames: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    page_renames.insert(old_stem.clone(), new_slug.clone());
+    let source_renames: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for dir in [kref.pages_dir(), kref.root.join("sources")] {
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| Error::Tool(format!("readdir {}: {e}", dir.display())))?
+        {
+            let entry = entry.map_err(|e| Error::Tool(format!("readdir entry: {e}")))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let rewritten = rewrite_merge_links(&body, &page_renames, &source_renames);
+            if rewritten != body {
+                std::fs::write(&path, rewritten.as_bytes())
+                    .map_err(|e| Error::Tool(format!("write {}: {e}", path.display())))?;
+            }
+        }
+    }
+
+    // Fix the index link target (preserves the bullet's summary +
+    // category placement, unlike remove+re-add).
+    let index = kref.read_index();
+    if !index.is_empty() {
+        let rewritten = rewrite_merge_links(&index, &page_renames, &source_renames);
+        if rewritten != index {
+            std::fs::write(kref.index_path(), rewritten.as_bytes())
+                .map_err(|e| Error::Tool(format!("write {}: {e}", kref.index_path().display())))?;
+        }
+    }
+
+    append_log_header(kref, "renamed", &format!("{old_stem} → {new_slug}"))?;
+    Ok(new_path)
+}
+
 /// M6.39.9: list every readable `*.md` file inside a KMS, split by
 /// kind (`pages/` and `sources/`). Drives the right-edge KMS browser
 /// panel — clicking the title of a KMS row in the sidebar opens this
