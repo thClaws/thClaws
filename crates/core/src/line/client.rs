@@ -271,6 +271,14 @@ impl LineClient {
                 Ok(()) => {
                     eprintln!("[line] ws closed cleanly; reconnecting");
                     backoff = Duration::from_secs(1);
+                    // Pause briefly before reconnecting. A relay that
+                    // repeatedly closes the connection cleanly (e.g. on
+                    // restart, idle timeout, or an immediate close on
+                    // connect) would otherwise spin this loop in an
+                    // unthrottled connect/close reconnect storm.
+                    if self.sleep_with_cancel(Duration::from_secs(1)).await {
+                        return Err(LineClientError::Cancelled);
+                    }
                 }
                 Err(LineClientError::Cancelled) => return Err(LineClientError::Cancelled),
                 Err(e) => {
