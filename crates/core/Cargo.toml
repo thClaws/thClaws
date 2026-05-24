@@ -147,11 +147,18 @@ image = "0.24"
 btleplug = { version = "0.11", optional = true }
 
 [features]
-default = ["cost_bridge"]
+# `cost_bridge` is OPT-IN, not default: it starts a BLE scan on launch
+# (cost_bridge::spawn → adapter.start_scan), which on macOS triggers a
+# TCC SIGABRT for any binary without an NSBluetoothAlwaysUsageDescription
+# Info.plist — i.e. every `cargo build` and every GitHub release archive
+# (no .app bundle). It also pops a Bluetooth permission prompt for the
+# ~99% of users who don't own a thClaws-Cost Cardputer. Cardputer users
+# build with `--features cost_bridge`. Issue #116.
+default = []
 gui = ["dep:tao", "dep:wry", "dep:comrak", "dep:rfd", "dep:native-dialog"]
 # Cardputer cost display bridge — REPL streams session_cost_usd to a
 # thClaws-Cost peripheral over BLE NUS; device sends reset notifications
-# back when the user hits Backspace.
+# back when the user hits Backspace. Opt-in (see note on `default`).
 cost_bridge = ["dep:btleplug"]
 
 [[bin]]
