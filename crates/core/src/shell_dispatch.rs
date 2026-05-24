@@ -2490,7 +2490,12 @@ pub async fn dispatch(
                 emit(events_tx, out);
             }
         }
-        SlashCommand::McpAdd { name, url, user } => {
+        SlashCommand::McpAdd {
+            name,
+            url,
+            user,
+            headers,
+        } => {
             // Hand-add is untrusted by default; enabling widget UI
             // requires the user to edit mcp.json and set
             // `"trusted": true` explicitly.
@@ -2501,7 +2506,9 @@ pub async fn dispatch(
                 args: Vec::new(),
                 env: Default::default(),
                 url,
-                headers: Default::default(),
+                // Stored verbatim; `${VAR}` resolved from env at connect
+                // time (mcp::connect_http) so secrets stay out of mcp.json.
+                headers: headers.into_iter().collect(),
                 trusted: false,
             };
             persist_and_register_mcp(state, events_tx, cfg, user).await;
@@ -3864,7 +3871,11 @@ async fn persist_and_register_mcp(
             return;
         }
     };
-    match crate::mcp::McpClient::spawn_with_approver(cfg.clone(), Some(state.approver.clone()))
+    // Non-interactive: an HTTP server needing OAuth returns a "run
+    // /mcp reauth" error instead of blocking the worker thread for up
+    // to 5 min on a browser callback (issue #114). stdio keeps the GUI
+    // approver for the command-allowlist gate.
+    match crate::mcp::McpClient::spawn_noninteractive(cfg.clone(), Some(state.approver.clone()))
         .await
     {
         Ok(client) => match client.list_tools().await {

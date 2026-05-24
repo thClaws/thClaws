@@ -215,15 +215,25 @@ pub async fn discover(client: &Client, mcp_url: &str) -> Result<OAuthMetadata> {
     let resource_meta_url = format!("{origin}/.well-known/oauth-protected-resource");
     eprintln!("\x1b[2m[oauth] fetching {resource_meta_url}\x1b[0m");
 
-    let resource_resp = client
-        .get(&resource_meta_url)
-        .send()
-        .await
-        .map_err(|e| Error::Provider(format!("oauth discovery: {e}")))?;
-    let resource: Value = resource_resp
-        .json()
-        .await
-        .map_err(|e| Error::Provider(format!("oauth resource metadata: {e}")))?;
+    // Hard timeout so a stalled/black-holed discovery endpoint can't hang
+    // the caller (`/mcp add`, a startup spawn) indefinitely. Wraps both
+    // the connect+send and the body read.
+    let resource: Value = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let resp = client
+            .get(&resource_meta_url)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("oauth discovery: {e}")))?;
+        resp.json::<Value>()
+            .await
+            .map_err(|e| Error::Provider(format!("oauth resource metadata: {e}")))
+    })
+    .await
+    .map_err(|_| {
+        Error::Provider(format!(
+            "oauth discovery: timed out fetching {resource_meta_url} (15s)"
+        ))
+    })??;
 
     let auth_server = resource
         .get("authorization_servers")
@@ -240,15 +250,18 @@ pub async fn discover(client: &Client, mcp_url: &str) -> Result<OAuthMetadata> {
         "{}/.well-known/oauth-authorization-server",
         auth_server.trim_end_matches('/')
     );
-    let meta_resp = client
-        .get(&meta_url)
-        .send()
-        .await
-        .map_err(|e| Error::Provider(format!("oauth server metadata: {e}")))?;
-    let meta: Value = meta_resp
-        .json()
-        .await
-        .map_err(|e| Error::Provider(format!("oauth server metadata json: {e}")))?;
+    let meta: Value = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let resp = client
+            .get(&meta_url)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("oauth server metadata: {e}")))?;
+        resp.json::<Value>()
+            .await
+            .map_err(|e| Error::Provider(format!("oauth server metadata json: {e}")))
+    })
+    .await
+    .map_err(|_| Error::Provider(format!("oauth server metadata: timed out fetching {meta_url} (15s)")))??;
 
     let authorization_endpoint = meta
         .get("authorization_endpoint")

@@ -297,6 +297,10 @@ pub enum SlashCommand {
         name: String,
         url: String,
         user: bool,
+        /// Optional HTTP headers from repeatable `--header "K: V"` flags.
+        /// Values may contain `${VAR}` — resolved from the environment at
+        /// connection time so secrets stay out of mcp.json.
+        headers: Vec<(String, String)>,
     },
     /// `/mcp add <name> <command> [args...]` — stdio transport, sibling
     /// of `McpAdd` (HTTP). Routed by `parse_mcp_subcommand` based on
@@ -1054,45 +1058,81 @@ fn parse_mcp_subcommand(args: &str) -> SlashCommand {
     let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
     match sub {
         "add" => {
-            let mut parts: Vec<&str> = rest.split_whitespace().collect();
+            // Quote-aware tokenize so `--header "X-API-KEY: abc"` keeps
+            // its value (which contains a space after the colon) intact.
+            let tokens = tokenize_quoted(rest);
             let mut user = false;
-            if parts.first().copied() == Some("--user") {
-                user = true;
-                parts.remove(0);
-            } else if parts.first().copied() == Some("--project") {
-                parts.remove(0);
+            let mut idx = 0;
+            // Leading scope flags. (`--header` is parsed *after* the URL,
+            // curl-style, so a stdio command's own flags pass through.)
+            while idx < tokens.len() {
+                match tokens[idx].as_str() {
+                    "--user" => {
+                        user = true;
+                        idx += 1;
+                    }
+                    "--project" => {
+                        idx += 1;
+                    }
+                    _ => break,
+                }
             }
+            let positionals = &tokens[idx..];
             // Need at least <name> <url-or-command>.
-            if parts.len() < 2 {
+            if positionals.len() < 2 {
                 return SlashCommand::Unknown(
-                    "usage: /mcp add [--user] <name> <url>\n   or: /mcp add [--user] <name> <command> [args...]"
+                    "usage: /mcp add [--user] <name> <url> [--header \"Key: Value\"]\n   or: /mcp add [--user] <name> <command> [args...]"
                         .into(),
                 );
             }
-            let name = parts[0].to_string();
-            let target = parts[1];
+            let name = positionals[0].clone();
+            let target = positionals[1].clone();
+            let trailing = &positionals[2..];
             // Route by shape: a URL means HTTP transport; anything
             // else is treated as a stdio command. We don't probe the
             // command — first spawn happens in the dispatch arm and
             // surfaces any failure (missing binary, missing env, etc.)
             // via the existing error path.
             if target.starts_with("http://") || target.starts_with("https://") {
-                if parts.len() != 2 {
-                    return SlashCommand::Unknown(
-                        "usage: /mcp add [--user] <name> <url> (HTTP transport takes no extra args)"
-                            .into(),
-                    );
+                // Trailing tokens for HTTP are `--header`/`-H "Key: Value"`
+                // pairs (repeatable). Values may contain `${VAR}`, resolved
+                // from the environment at connect time.
+                let mut headers: Vec<(String, String)> = Vec::new();
+                let mut j = 0;
+                while j < trailing.len() {
+                    match trailing[j].as_str() {
+                        "--header" | "-H" => {
+                            let Some(spec) = trailing.get(j + 1) else {
+                                return SlashCommand::Unknown(
+                                    "--header expects a following \"Key: Value\"".into(),
+                                );
+                            };
+                            let Some((k, v)) = spec.split_once(':') else {
+                                return SlashCommand::Unknown(format!(
+                                    "--header expects \"Key: Value\" (got '{spec}')"
+                                ));
+                            };
+                            headers.push((k.trim().to_string(), v.trim().to_string()));
+                            j += 2;
+                        }
+                        other => {
+                            return SlashCommand::Unknown(format!(
+                                "unexpected arg '{other}' after <url> — HTTP transport accepts only --header \"Key: Value\""
+                            ));
+                        }
+                    }
                 }
                 SlashCommand::McpAdd {
                     name,
-                    url: target.to_string(),
+                    url: target,
                     user,
+                    headers,
                 }
             } else {
                 SlashCommand::McpAddStdio {
                     name,
-                    command: target.to_string(),
-                    args: parts[2..].iter().map(|s| (*s).to_string()).collect(),
+                    command: target,
+                    args: trailing.iter().map(|s| s.to_string()).collect(),
                     user,
                 }
             }
@@ -3095,10 +3135,13 @@ pub fn render_help() -> &'static str {
      /memory           List memory entries\n  \
      /memory read NAME Show a memory entry by name\n  \
      /mcp              List active MCP servers and their tools\n  \
-     /mcp add [--user] <name> <url>\n  \
+     /mcp add [--user] <name> <url> [--header \"K: V\"]\n  \
                        Register a remote (HTTP) MCP server. Writes to\n  \
                        .thclaws/mcp.json (or ~/.config/thclaws/mcp.json\n  \
                        with --user), then connects and registers tools.\n  \
+                       --header (repeatable) sets auth headers, e.g.\n  \
+                       --header \"X-API-KEY: ${MY_KEY}\" (${VAR} resolves\n  \
+                       from the environment at connect time).\n  \
      /mcp add [--user] <name> <command> [args...]\n  \
                        Register a local (stdio) MCP server. Same persist\n  \
                        + spawn flow; first arg is the binary, remaining\n  \
@@ -6238,7 +6281,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     }
                 }
-                SlashCommand::McpAdd { name, url, user } => {
+                SlashCommand::McpAdd {
+                    name,
+                    url,
+                    user,
+                    headers,
+                } => {
                     let scope = if user { "user" } else { "project" };
                     // /mcp add is hand-add — untrusted by default. To
                     // enable widget rendering on a self-added server,
@@ -6251,7 +6299,11 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         args: Vec::new(),
                         env: Default::default(),
                         url: url.clone(),
-                        headers: Default::default(),
+                        // Stored verbatim — `${VAR}` is resolved from the
+                        // environment at connect time (mcp::connect_http),
+                        // so a `${API_KEY}` placeholder keeps the literal
+                        // secret out of mcp.json.
+                        headers: headers.iter().cloned().collect(),
                         trusted: false,
                     };
                     // 1. Persist to disk.
@@ -6262,8 +6314,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             continue;
                         }
                     };
-                    // 2. Connect and list tools.
-                    match crate::mcp::McpClient::spawn(cfg.clone()).await {
+                    // 2. Connect and list tools. Non-interactive: if the
+                    //    server requires OAuth we don't block the REPL on a
+                    //    browser callback — the error tells the user to run
+                    //    `/mcp reauth <name>` (issue #114). CLI has no GUI
+                    //    approver (stdio falls back to stdin).
+                    match crate::mcp::McpClient::spawn_noninteractive(cfg.clone(), None).await {
                         Ok(client) => match client.list_tools().await {
                             Ok(tools) => {
                                 let names: Vec<String> =
@@ -9068,6 +9124,7 @@ mod tests {
                 name: "weather".into(),
                 url: "https://example.com/mcp".into(),
                 user: false,
+                headers: vec![],
             })
         );
         assert_eq!(
@@ -9076,8 +9133,58 @@ mod tests {
                 name: "weather".into(),
                 url: "https://example.com/mcp".into(),
                 user: true,
+                headers: vec![],
             })
         );
+        // --header "K: V" (quoted, space after colon) → one header pair.
+        assert_eq!(
+            parse_slash(
+                "/mcp add fd https://mcp.financialdatasets.ai/api --header \"X-API-KEY: abc123\""
+            ),
+            Some(SlashCommand::McpAdd {
+                name: "fd".into(),
+                url: "https://mcp.financialdatasets.ai/api".into(),
+                user: false,
+                headers: vec![("X-API-KEY".into(), "abc123".into())],
+            })
+        );
+        // Repeatable; -H alias; flags before positionals; ${VAR} preserved
+        // verbatim (resolved later at connect time).
+        assert_eq!(
+            parse_slash(
+                "/mcp add --user fd https://x.test/api -H \"X-API-KEY: ${FD_KEY}\" --header \"X-Trace: on\""
+            ),
+            Some(SlashCommand::McpAdd {
+                name: "fd".into(),
+                url: "https://x.test/api".into(),
+                user: true,
+                headers: vec![
+                    ("X-API-KEY".into(), "${FD_KEY}".into()),
+                    ("X-Trace".into(), "on".into()),
+                ],
+            })
+        );
+        // After a stdio (non-URL) command, --header is just a passed-through
+        // arg, not one of our flags.
+        assert_eq!(
+            parse_slash("/mcp add foo some-cmd --header bar"),
+            Some(SlashCommand::McpAddStdio {
+                name: "foo".into(),
+                command: "some-cmd".into(),
+                args: vec!["--header".into(), "bar".into()],
+                user: false,
+            })
+        );
+        // After a URL, only --header is accepted — a bare positional is rejected.
+        assert!(matches!(
+            parse_slash("/mcp add fd https://x.test/api bogus"),
+            Some(SlashCommand::Unknown(_))
+        ));
+        // Malformed --header (no colon) → Unknown.
+        assert!(matches!(
+            parse_slash("/mcp add fd https://x.test/api --header nocolon"),
+            Some(SlashCommand::Unknown(_))
+        ));
         assert_eq!(
             parse_slash("/mcp remove weather"),
             Some(SlashCommand::McpRemove {

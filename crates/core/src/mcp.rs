@@ -414,6 +414,25 @@ impl McpClient {
         Self::spawn_with_approver(config, None).await
     }
 
+    /// Like [`spawn_with_approver`] but never launches the interactive
+    /// OAuth browser flow for HTTP servers. Used by `/mcp add` (CLI and
+    /// GUI): an HTTP server that requires OAuth returns an error telling
+    /// the user to run `/mcp reauth <name>` instead of freezing the
+    /// command (CLI) or the worker thread (GUI) for up to 5 minutes
+    /// waiting on a browser callback the user may not be ready for
+    /// (issue #114). stdio transport is unaffected — it still goes
+    /// through `spawn_with_approver` with the caller's approver, so the
+    /// command-allowlist gate keeps working in GUI mode.
+    pub async fn spawn_noninteractive(
+        config: McpServerConfig,
+        approver: Option<Arc<dyn crate::permissions::ApprovalSink>>,
+    ) -> Result<Arc<Self>> {
+        if config.transport == "http" {
+            return Self::connect_http(config, false).await;
+        }
+        Self::spawn_with_approver(config, approver).await
+    }
+
     /// Same as [`spawn`] but lets the caller provide an `ApprovalSink`
     /// for the first-time spawn prompt. GUI mode passes its
     /// `GuiApprover` here so MCP approval pops up in the same modal as
@@ -424,7 +443,7 @@ impl McpClient {
         approver: Option<Arc<dyn crate::permissions::ApprovalSink>>,
     ) -> Result<Arc<Self>> {
         if config.transport == "http" {
-            return Self::connect_http(config).await;
+            return Self::connect_http(config, true).await;
         }
 
         // Allowlist gate: MCP stdio configs come from project-scoped
@@ -466,7 +485,7 @@ impl McpClient {
     /// HTTP POST → JSON response. We simulate the stream pair by piping
     /// through an in-memory duplex so the rest of the client (reader task,
     /// pending map) works unchanged.
-    async fn connect_http(config: McpServerConfig) -> Result<Arc<Self>> {
+    async fn connect_http(config: McpServerConfig, interactive_oauth: bool) -> Result<Arc<Self>> {
         if config.url.is_empty() {
             return Err(Error::Provider(format!(
                 "mcp http server '{}': missing 'url' field",
@@ -481,7 +500,15 @@ impl McpClient {
 
         let url = config.url.clone();
         let name_for_task = config.name.clone();
-        let extra_headers = config.headers.clone();
+        // Interpolate `${VAR}` in header values from the environment so a
+        // secret (API key, bearer token) can live in the shell / `.env`
+        // instead of plaintext in mcp.json. Resolved once here; both the
+        // auth probe and every bridge POST use this map.
+        let extra_headers: HashMap<String, String> = config
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), interpolate_env(v)))
+            .collect();
         // Disable auto-redirects: reqwest strips the Authorization header on
         // ALL redirects (even same-origin 307). Our `write_response_lines`
         // handles 307/308 manually, preserving auth + fixing http→https.
@@ -497,12 +524,34 @@ impl McpClient {
         //   2. Try refresh if expired.
         //   3. Probe the server → if 401, run full OAuth browser flow.
         //   4. Only then set up the bridge with the token already loaded.
+        // Probe + discovery get hard timeouts so a stalled server can't
+        // hang `/mcp add` (or a startup spawn) forever. The bridge
+        // `http_client` above deliberately has NO blanket timeout — it
+        // carries streaming SSE responses, and per-request deadlines are
+        // enforced separately by REQUEST_TIMEOUT_SECS in `request()`.
         let http_probe = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let resolved_token =
-            resolve_token_upfront(&http_probe, &url, &config.name, &config.headers).await;
+        let resolved_token = match resolve_token_upfront(
+            &http_probe,
+            &url,
+            &config.name,
+            &extra_headers,
+            interactive_oauth,
+        )
+        .await
+        {
+            UpfrontToken::Proceed(tok) => tok,
+            UpfrontToken::OAuthRequired => {
+                return Err(Error::Provider(format!(
+                    "MCP server '{}' requires OAuth — run `/mcp reauth {}` to authenticate (opens a browser)",
+                    config.name, config.name
+                )));
+            }
+        };
 
         let token: std::sync::Arc<tokio::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(tokio::sync::Mutex::new(resolved_token));
@@ -1245,12 +1294,69 @@ async fn write_response_lines(
 /// Pre-resolve an OAuth token before the bridge task starts. Runs the
 /// full discovery + browser flow if needed so the bridge never blocks on
 /// OAuth during the time-sensitive MCP initialize handshake.
+/// Substitute `${VAR}` occurrences in `s` with the corresponding
+/// environment variable. Used on MCP header values so a secret can be
+/// stored as `"X-API-KEY": "${MY_KEY}"` in mcp.json and resolved from
+/// the environment (or `.env`, already loaded into the process env at
+/// startup) at connection time — keeping the literal secret out of the
+/// committed config. An unset variable is left as the literal `${VAR}`
+/// so the misconfiguration is visible (a bogus header → a diagnosable
+/// 401) rather than silently sent as an empty value. `$VAR` without
+/// braces is intentionally NOT expanded — header values legitimately
+/// contain bare `$`.
+fn interpolate_env(s: &str) -> String {
+    interpolate_with(s, |k| std::env::var(k).ok())
+}
+
+/// Core of [`interpolate_env`], parametrized on the variable lookup so
+/// it's testable without mutating process env (which races with the
+/// `posix_spawn` in the scheduler tests under the parallel runner).
+fn interpolate_with(s: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find('}') {
+            let var = &after[..end];
+            match lookup(var) {
+                Some(val) => out.push_str(&val),
+                // Unset → keep the literal `${VAR}` for visibility.
+                None => {
+                    out.push_str("${");
+                    out.push_str(var);
+                    out.push('}');
+                }
+            }
+            rest = &after[end + 1..];
+        } else {
+            // No closing brace — emit the rest verbatim and stop.
+            out.push_str(&rest[start..]);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Outcome of the upfront auth probe in [`McpClient::connect_http`].
+enum UpfrontToken {
+    /// Proceed to build the bridge with this optional bearer token.
+    Proceed(Option<String>),
+    /// Server demands OAuth and the caller asked us NOT to run the
+    /// interactive browser flow (`/mcp add`). The caller bails with a
+    /// "run /mcp reauth" message instead of blocking on a browser
+    /// callback. Issue #114.
+    OAuthRequired,
+}
+
 async fn resolve_token_upfront(
     client: &reqwest::Client,
     mcp_url: &str,
     server_name: &str,
     extra_headers: &HashMap<String, String>,
-) -> Option<String> {
+    interactive: bool,
+) -> UpfrontToken {
     let mut store = crate::oauth::TokenStore::load();
 
     // Try cached token (or refreshed) — but ALWAYS verify against the
@@ -1302,6 +1408,12 @@ async fn resolve_token_upfront(
                 mcp_debug!("\x1b[33m[mcp-http] {server_name}: token rejected (401)\x1b[0m");
                 store.remove(mcp_url);
             }
+            if !interactive {
+                // `/mcp add`: don't pop a browser mid-command. Signal the
+                // caller to save the server and defer to `/mcp reauth`.
+                mcp_debug!("\x1b[36m[mcp-http] {server_name}: OAuth required (non-interactive — deferring)\x1b[0m");
+                return UpfrontToken::OAuthRequired;
+            }
             // KEEP this on by default — a browser window is about to
             // pop up and the user needs to know why.
             eprintln!("\x1b[36m[mcp-http] {server_name}: server requires OAuth — starting browser flow…\x1b[0m");
@@ -1309,16 +1421,16 @@ async fn resolve_token_upfront(
         Ok(r) => {
             let status = r.status();
             mcp_debug!("\x1b[2m[mcp-http] {server_name}: probe → {status} (auth OK)\x1b[0m");
-            return candidate;
+            return UpfrontToken::Proceed(candidate);
         }
         Err(e) => {
             eprintln!("\x1b[33m[mcp-http] {server_name}: probe failed ({e})\x1b[0m");
-            return candidate;
+            return UpfrontToken::Proceed(candidate);
         }
     }
 
-    // Full OAuth discovery + browser flow.
-    resolve_oauth_token(client, mcp_url, server_name).await
+    // Full OAuth discovery + browser flow (interactive callers only).
+    UpfrontToken::Proceed(resolve_oauth_token(client, mcp_url, server_name).await)
 }
 
 /// Try to get a valid OAuth token for an MCP URL:
@@ -2079,6 +2191,119 @@ mod tests {
         assert!(
             msg.contains("transport closed"),
             "expected 'transport closed', got: {msg}",
+        );
+    }
+
+    // ── Fix 4: header ${VAR} interpolation (issue #114) ──────────────
+    // Closure-injected lookup so no process env is mutated (which would
+    // race with the scheduler tests' posix_spawn under the parallel
+    // runner — see config.rs TEST_ENV_LOCK note).
+    #[test]
+    fn interpolate_with_resolves_braced_vars_only() {
+        let env = |k: &str| match k {
+            "FD_KEY" => Some("secret123".to_string()),
+            "A" => Some("aa".to_string()),
+            "B" => Some("bb".to_string()),
+            _ => None,
+        };
+        // Braced var resolves.
+        assert_eq!(interpolate_with("${FD_KEY}", env), "secret123");
+        assert_eq!(interpolate_with("Bearer ${FD_KEY}", env), "Bearer secret123");
+        // Multiple vars in one value.
+        assert_eq!(interpolate_with("${A}-${B}", env), "aa-bb");
+        // Unset var → literal preserved (visible misconfig, not silent empty).
+        assert_eq!(interpolate_with("${MISSING}", env), "${MISSING}");
+        // Bare $ is NOT expanded (header values legitimately contain `$`).
+        assert_eq!(interpolate_with("$FD_KEY", env), "$FD_KEY");
+        // No interpolation token.
+        assert_eq!(interpolate_with("plain-value", env), "plain-value");
+        // Unterminated brace → emitted verbatim, no panic.
+        assert_eq!(interpolate_with("${oops", env), "${oops");
+    }
+
+    // ── Fix 1 + Fix 3: probe sends configured headers; non-interactive
+    //    401 defers to OAuth instead of blocking. Wiremock — no real API.
+    #[tokio::test]
+    async fn probe_sends_headers_and_defers_oauth_when_noninteractive() {
+        use wiremock::matchers::{header, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Server A: requires X-API-KEY. Probe ping with the header → 200.
+        let server_ok = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("x-api-key", "secret123"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"jsonrpc":"2.0","id":0,"result":{}}"#,
+            ))
+            .mount(&server_ok)
+            .await;
+
+        let mut headers = HashMap::new();
+        headers.insert("X-API-KEY".to_string(), "secret123".to_string());
+        // interactive flag irrelevant when auth succeeds.
+        let res =
+            resolve_token_upfront(&reqwest::Client::new(), &server_ok.uri(), "t", &headers, false)
+                .await;
+        assert!(
+            matches!(res, UpfrontToken::Proceed(None)),
+            "header-authed probe should Proceed with no bearer token",
+        );
+
+        // Server B: always 401 (no/By-wrong key). Non-interactive → must
+        // return OAuthRequired (defer to /mcp reauth), NOT block/try browser.
+        let server_401 = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server_401)
+            .await;
+        let res = resolve_token_upfront(
+            &reqwest::Client::new(),
+            &server_401.uri(),
+            "t",
+            &HashMap::new(),
+            false, // non-interactive (= /mcp add)
+        )
+        .await;
+        assert!(
+            matches!(res, UpfrontToken::OAuthRequired),
+            "non-interactive 401 must defer to OAuth, not block",
+        );
+    }
+
+    // ── Fix 2: a stalled server can't hang the probe — the client
+    //    timeout converts it to a prompt "proceed without token" rather
+    //    than an indefinite hang. Uses a short test timeout to prove the
+    //    mechanism (production uses 15s, verified by reading connect_http).
+    #[tokio::test]
+    async fn probe_timeout_does_not_hang() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_delay(Duration::from_secs(10)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let res =
+            resolve_token_upfront(&client, &server.uri(), "t", &HashMap::new(), false).await;
+        let elapsed = started.elapsed();
+        // Probe errored (timeout) → we proceed without a token, fast.
+        assert!(
+            matches!(res, UpfrontToken::Proceed(None)),
+            "timed-out probe should proceed without a token",
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "probe must not hang on a stalled server; took {elapsed:?}",
         );
     }
 }
