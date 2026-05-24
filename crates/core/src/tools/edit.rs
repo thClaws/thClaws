@@ -52,6 +52,13 @@ impl Tool for EditTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
+        // An empty old_string matches between every character, so with
+        // replace_all it would inject new_string throughout the file and
+        // corrupt it. Reject it, matching docx_edit's find_replace guard.
+        if old.is_empty() {
+            return Err(Error::Tool("old_string must not be empty".into()));
+        }
+
         if old == new {
             return Err(Error::Tool(
                 "old_string and new_string are identical".into(),
@@ -164,5 +171,26 @@ mod tests {
         std::fs::write(&path, "x").unwrap();
         let err = edit(&path, "x", "x").await.unwrap_err();
         assert!(format!("{err}").contains("identical"));
+    }
+
+    #[tokio::test]
+    async fn empty_old_string_rejected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "abc").unwrap();
+        // Even with replace_all, an empty old_string must be rejected
+        // rather than injecting new_string between every character.
+        let err = EditTool
+            .call(json!({
+                "path": path.to_string_lossy(),
+                "old_string": "",
+                "new_string": "X",
+                "replace_all": true
+            }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("must not be empty"));
+        // file untouched
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "abc");
     }
 }
