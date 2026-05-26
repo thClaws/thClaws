@@ -2,3 +2,6 @@
 members = [
     "crates/core"
 ]
+
+[patch.crates-io]
+rustyline = { path = "vendor/rustyline" }
