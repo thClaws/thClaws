@@ -2249,7 +2249,9 @@ mod tests {
     fn shard_path_from_id_splits_hex_correctly() {
         // Normal hex id: first 8 chars after "sess-" become 4 dirs.
         assert_eq!(
-            shard_path_from_id("sess-18b1f3dc2e3e8ed8").to_str().unwrap(),
+            shard_path_from_id("sess-18b1f3dc2e3e8ed8")
+                .to_str()
+                .unwrap(),
             "18/b1/f3/dc"
         );
         // Shorter but still 8 hex chars.
@@ -2283,9 +2285,7 @@ mod tests {
         store.save(&mut session).unwrap();
 
         // Verify file lands in the sharded directory.
-        let expected = dir
-            .path()
-            .join("12/34/56/78/sess-1234567890abcdef.jsonl");
+        let expected = dir.path().join("12/34/56/78/sess-1234567890abcdef.jsonl");
         assert!(expected.exists(), "file should be at sharded path");
 
         // Round-trip through store.load.
