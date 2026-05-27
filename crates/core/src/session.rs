@@ -1058,6 +1058,33 @@ pub struct SessionStore {
     pub root: PathBuf,
 }
 
+/// Compute the sharded subdirectory path for a session id.
+///
+/// Extracts the first 8 hex characters after the `sess-` prefix and
+/// splits them into four 2-character directory levels. For example:
+/// `sess-18b1f3dc2e3e8ed8` → `18/b1/f3/dc/`
+///
+/// If the id doesn't start with `sess-`, has fewer than 8 hex chars
+/// after the prefix, or contains non-hex characters, returns an empty
+/// path (no sharding).
+fn shard_path_from_id(id: &str) -> PathBuf {
+    let hex_prefix = "sess-";
+    if let Some(rest) = id.strip_prefix(hex_prefix) {
+        // Need at least 8 chars and they must all be valid hex.
+        if rest.len() >= 8 {
+            let first8: &str = &rest[..8];
+            if first8.chars().all(|c| c.is_ascii_hexdigit()) {
+                let d1 = &first8[0..2];
+                let d2 = &first8[2..4];
+                let d3 = &first8[4..6];
+                let d4 = &first8[6..8];
+                return PathBuf::from(format!("{d1}/{d2}/{d3}/{d4}"));
+            }
+        }
+    }
+    PathBuf::new()
+}
+
 impl SessionStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -1075,7 +1102,13 @@ impl SessionStore {
     }
 
     pub fn path_for(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{id}.jsonl"))
+        let shard = shard_path_from_id(id);
+        if shard.as_os_str().is_empty() {
+            // Fallback: no sharding for ids that don't match the pattern.
+            self.root.join(format!("{id}.jsonl"))
+        } else {
+            self.root.join(shard).join(format!("{id}.jsonl"))
+        }
     }
 
     /// Reject session ids that could escape the sessions dir via path
@@ -1212,22 +1245,39 @@ impl SessionStore {
     /// `SessionListRefresh` from "read + parse all message bodies"
     /// (potentially hundreds of MB) to "stream + count" (a few KB of
     /// headers + timestamps).
+    ///
+    /// Sharded layout (M6.30+): recursively walks the sessions root to
+    /// discover `.jsonl` files in both the flat root and nested shard
+    /// directories (e.g. `18/b1/f3/dc/sess-*.jsonl`).
     pub fn list(&self) -> Result<Vec<SessionMeta>> {
         if !self.root.exists() {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(&self.root)?.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Ok(meta) = Session::load_meta_from(&path) {
-                out.push(meta);
-            }
-        }
+        Self::walk_dir_for_jsonl(&self.root, &mut out)?;
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(out)
+    }
+
+    /// Recursively walk a directory tree and collect `.jsonl` session
+    /// metadata. Follows symlinks = false; only regular files with
+    /// `.jsonl` extension are considered.
+    fn walk_dir_for_jsonl(root: &Path, out: &mut Vec<SessionMeta>) -> Result<()> {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                    if let Ok(meta) = Session::load_meta_from(&path) {
+                        out.push(meta);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn latest(&self) -> Result<Option<Session>> {
@@ -1255,12 +1305,33 @@ impl SessionStore {
     /// Delete a session from disk. Returns Ok if removed or already
     /// gone (idempotent), Err if the id is malformed or fs::remove_file
     /// fails for a real reason (permissions, etc.).
+    ///
+    /// After removing the file, attempts to clean up empty parent
+    /// shard directories up to the store root (best-effort — non-fatal
+    /// if cleanup fails).
     pub fn delete(&self, id: &str) -> Result<()> {
         Self::validate_id(id)?;
         let path = self.path_for(id);
         if path.exists() {
             std::fs::remove_file(&path)
                 .map_err(|e| Error::Config(format!("failed to delete session '{id}': {e}")))?;
+            // Best-effort cleanup of empty shard directories.
+            // Walk up from the file's parent, removing empty dirs
+            // until we hit the store root or a non-empty dir.
+            if let Some(parent) = path.parent() {
+                let mut current = parent;
+                while current != self.root && current != self.root.parent().unwrap_or(current) {
+                    if std::fs::read_dir(current)
+                        .map(|mut d| d.next().is_none())
+                        .unwrap_or(false)
+                    {
+                        let _ = std::fs::remove_dir(current);
+                        current = current.parent().unwrap_or(current);
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2170,5 +2241,119 @@ mod tests {
         // No header injected because the file already has content.
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "existing line\n");
+    }
+
+    // ── Sharded directory layout tests ──────────────────────────────
+
+    #[test]
+    fn shard_path_from_id_splits_hex_correctly() {
+        // Normal hex id: first 8 chars after "sess-" become 4 dirs.
+        assert_eq!(
+            shard_path_from_id("sess-18b1f3dc2e3e8ed8").to_str().unwrap(),
+            "18/b1/f3/dc"
+        );
+        // Shorter but still 8 hex chars.
+        assert_eq!(
+            shard_path_from_id("sess-aabbccdd").to_str().unwrap(),
+            "aa/bb/cc/dd"
+        );
+        // Non-hex chars → no sharding (empty path).
+        assert!(shard_path_from_id("sess-no-header").as_os_str().is_empty());
+        // Too short (< 8 chars after prefix) → no sharding.
+        assert!(shard_path_from_id("sess-abc").as_os_str().is_empty());
+        // No "sess-" prefix → no sharding.
+        assert!(shard_path_from_id("my-session").as_os_str().is_empty());
+        // Mixed case hex → still valid.
+        assert_eq!(
+            shard_path_from_id("sess-AaBbCcDd1234").to_str().unwrap(),
+            "Aa/Bb/Cc/Dd"
+        );
+    }
+
+    #[test]
+    fn save_and_load_roundtrip_uses_sharded_path() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+
+        let mut session = Session::new("claude-sonnet-4-5", "/tmp/proj");
+        // Force a known hex id for predictability.
+        session.id = "sess-1234567890abcdef".into();
+        session.sync(vec![Message::user("hello")]);
+
+        store.save(&mut session).unwrap();
+
+        // Verify file lands in the sharded directory.
+        let expected = dir
+            .path()
+            .join("12/34/56/78/sess-1234567890abcdef.jsonl");
+        assert!(expected.exists(), "file should be at sharded path");
+
+        // Round-trip through store.load.
+        let loaded = store.load(&session.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[test]
+    fn list_discovers_sharded_sessions() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+
+        // Manually create two sessions in different shard dirs.
+        let path_a = dir.path().join("aa/bb/cc/dd/sess-aabbccdd00000001.jsonl");
+        std::fs::create_dir_all(path_a.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path_a,
+            concat!(
+                r#"{"type":"header","id":"sess-aabbccdd00000001","model":"m1","cwd":"/a","created_at":100}"#,
+                "\n",
+                r#"{"type":"user","content":[{"type":"text","text":"hi"}],"timestamp":100}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let path_b = dir.path().join("11/22/33/44/sess-1122334400000002.jsonl");
+        std::fs::create_dir_all(path_b.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path_b,
+            concat!(
+                r#"{"type":"header","id":"sess-1122334400000002","model":"m2","cwd":"/b","created_at":200}"#,
+                "\n",
+                r#"{"type":"user","content":[{"type":"text","text":"hi"}],"timestamp":200}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let metas = store.list().unwrap();
+        let ids: Vec<&str> = metas.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["sess-1122334400000002", "sess-aabbccdd00000001"]);
+    }
+
+    #[test]
+    fn delete_removes_file_and_cleans_empty_shard_dirs() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+
+        // Create a session via the store (uses sharded path).
+        let mut session = Session::new("m", "/tmp");
+        session.id = "sess-deadbeef00000001".into();
+        session.sync(vec![Message::user("hi")]);
+        store.save(&mut session).unwrap();
+
+        let shard_dir = dir.path().join("de/ad/be/ef");
+        assert!(shard_dir.join("sess-deadbeef00000001.jsonl").exists());
+
+        store.delete(&session.id).unwrap();
+
+        // File is gone.
+        assert!(!shard_dir.join("sess-deadbeef00000001.jsonl").exists());
+        // Empty shard directories are cleaned up.
+        assert!(!shard_dir.exists());
+        assert!(!dir.path().join("de/ad/be").exists());
+        assert!(!dir.path().join("de/ad").exists());
+        assert!(!dir.path().join("de").exists());
+        // Store root still exists.
+        assert!(dir.path().exists());
     }
 }
