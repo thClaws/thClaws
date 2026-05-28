@@ -429,20 +429,60 @@ impl Provider for OpenAIProvider {
             let mut byte_stream = Box::pin(byte_stream);
             let mut state = ParseState::default();
             let mut raw = raw_dump;
+            let mut last_activity = std::time::Instant::now();
+            let mut idle_total = std::time::Duration::ZERO;
+            let mut spinner_tick: u32 = 0;
+            let mut is_animating = false;
 
             loop {
+                let wait = if is_animating {
+                    crate::tool_display::SPINNER_INTERVAL
+                } else {
+                    let since = last_activity.elapsed();
+                    let threshold = crate::tool_display::THINKING_HEARTBEAT_AFTER;
+                    let thinking_wait = if since >= threshold {
+                        crate::tool_display::SPINNER_INTERVAL
+                    } else {
+                        threshold - since
+                    };
+                    thinking_wait.min(chunk_timeout.saturating_sub(idle_total))
+                };
+
                 let maybe_chunk = tokio::time::timeout(
-                    chunk_timeout,
+                    wait,
                     byte_stream.next(),
                 )
-                .await
-                .map_err(|_| Error::Provider(format!(
-                    "stream idle for {}s — provider stopped sending; try again",
-                    chunk_timeout.as_secs()
-                )))?;
-                let Some(chunk) = maybe_chunk else { break };
-                let chunk = chunk.map_err(|e| Error::Provider(format!("stream: {e}")))?;
-                buffer.extend_from_slice(&chunk);
+                .await;
+
+                match maybe_chunk {
+                    Err(_) => {
+                        idle_total += wait;
+                        if idle_total >= chunk_timeout {
+                            Err(Error::Provider(format!(
+                                "stream idle for {}s — provider stopped sending; try again",
+                                chunk_timeout.as_secs()
+                            )))?;
+                        }
+                        is_animating = true;
+                        spinner_tick += 1;
+                        yield ProviderEvent::TextDelta(
+                            crate::tool_display::format_thinking_spinner(idle_total, spinner_tick)
+                        );
+                        continue;
+                    }
+                    Ok(maybe) => {
+                        let Some(chunk) = maybe else { break };
+                        let chunk = chunk.map_err(|e| Error::Provider(format!("stream: {e}")))?;
+                        buffer.extend_from_slice(&chunk);
+                        if is_animating {
+                            yield ProviderEvent::TextDelta(crate::tool_display::clear_thinking_line());
+                            is_animating = false;
+                            spinner_tick = 0;
+                        }
+                        last_activity = std::time::Instant::now();
+                        idle_total = std::time::Duration::ZERO;
+                    }
+                }
 
                 while let Some(boundary) = super::find_bytes(&buffer, b"\n\n") {
                     let event_bytes: Vec<u8> = buffer.drain(..boundary + 2).collect();

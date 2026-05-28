@@ -93,6 +93,7 @@ pub mod team;
 pub mod telegram;
 pub mod theme;
 pub mod tokens;
+pub mod tool_display;
 pub mod tools;
 pub mod types;
 pub mod uploads;

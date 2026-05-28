@@ -337,12 +337,47 @@ impl Provider for AgentSdkProvider {
             let mut seen_start = false;
             let mut first_text_yielded = false;
             let mut raw = raw_dump;
-
+            let mut active_tools: std::collections::HashMap<String, crate::tool_display::ActiveToolDisplay> =
+                std::collections::HashMap::new();
+            let mut spinner_tick: u32 = 0;
+            let mut anon_counter: u32 = 0;
             loop {
                 line_buf.clear();
-                let n = reader.read_line(&mut line_buf).await
+
+                let heartbeat_delay = if !active_tools.is_empty() {
+                    crate::tool_display::SPINNER_INTERVAL
+                } else {
+                    std::time::Duration::from_secs(300)
+                };
+
+                let got_line: std::result::Result<Option<usize>, std::io::Error> =
+                    tokio::select! {
+                        biased;
+                        result = reader.read_line(&mut line_buf) => { result.map(Some) }
+                        _ = tokio::time::sleep(heartbeat_delay) => { Ok(None) }
+                    };
+                let got_line = got_line
                     .map_err(|e| Error::Provider(format!("read stdout: {e}")))?;
-                if n == 0 { break; } // EOF
+
+                if let Some(0) = got_line { break; } // EOF
+
+                if got_line.is_none() {
+                    spinner_tick += 1;
+                    if !active_tools.is_empty() {
+                        if let Some((id, _)) = active_tools.iter().min_by_key(|(_, td)| td.started_at) {
+                            let id = id.clone();
+                            if let Some(td) = active_tools.get_mut(&id) {
+                                yield ProviderEvent::TextDelta(
+                                    crate::tool_display::format_tool_spinner(&td.label, td.elapsed(), spinner_tick)
+                                );
+                                td.last_heartbeat_at = std::time::Instant::now();
+                            }
+                        }
+                    }
+                    continue;
+                }
+                spinner_tick = 0;
+
                 let trimmed = line_buf.trim();
                 if trimmed.is_empty() { continue; }
                 let Ok(v) = serde_json::from_str::<Value>(trimmed) else { continue };
@@ -384,12 +419,22 @@ impl Provider for AgentSdkProvider {
                                         }
                                     }
                                     "tool_use" => {
-                                        // Surface tool calls inline as a dim
-                                        // marker — actual execution happens
-                                        // server-side in Claude Code.
                                         let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                                        let id = block.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                                        let input = block.get("input").cloned().unwrap_or(Value::Null);
+                                        let label = crate::tool_display::tool_label(name, &input);
                                         yield ProviderEvent::TextDelta(
-                                            format!("\n\x1b[2m🔧 [{name}]\x1b[0m\n")
+                                            crate::tool_display::format_tool_spinner(&label, std::time::Duration::ZERO, 0)
+                                        );
+                                        let tracking_id = if id.is_empty() {
+                                            anon_counter += 1;
+                                            format!("__anon_{anon_counter}")
+                                        } else {
+                                            id
+                                        };
+                                        active_tools.insert(
+                                            tracking_id,
+                                            crate::tool_display::ActiveToolDisplay::new(label),
                                         );
                                     }
                                     _ => {}
@@ -397,17 +442,25 @@ impl Provider for AgentSdkProvider {
                             }
                         }
                     }
-                    // Tool result / user echo — claude echoes these on stdout
-                    // as it runs tools server-side. We ignore them; the model
-                    // already has them server-side.
-                    "user" => {}
-                    // Inbound control_request from claude. With
-                    // --permission-mode bypassPermissions we don't get
-                    // permission prompts, but the SDK MCP bridge sends
-                    // `mcp_message` requests here whenever the model
-                    // calls a bridged tool — we dispatch via
-                    // crate::sdk_mcp and write a control_response back
-                    // through stdin.
+                    "user" => {
+                        if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
+                            for block in blocks {
+                                let btype = block.get("type").and_then(Value::as_str).unwrap_or("");
+                                if btype == "tool_result" {
+                                    let tu_id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                                    let is_error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                                    if let Some(td) = active_tools.remove(tu_id) {
+                                        yield ProviderEvent::TextDelta(
+                                            crate::tool_display::format_tool_done(&td.label, td.elapsed(), is_error)
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if active_tools.is_empty() {
+                            spinner_tick = 0;
+                        }
+                    }
                     "control_request" => {
                         let req_id = v.get("request_id").and_then(Value::as_str).unwrap_or("").to_string();
                         let subtype = v.pointer("/request/subtype").and_then(Value::as_str).unwrap_or("");
@@ -432,9 +485,12 @@ impl Provider for AgentSdkProvider {
                                     },
                                 });
                                 if let Some(stdin) = stdin_handle.as_mut() {
-                                    let _ = stdin.write_all(envelope.to_string().as_bytes()).await;
-                                    let _ = stdin.write_all(b"\n").await;
-                                    let _ = stdin.flush().await;
+                                    if let Err(e) = stdin.write_all(envelope.to_string().as_bytes()).await {
+                                        eprintln!("[agent-sdk] mcp bridge: stdin write failed: {e}");
+                                    } else {
+                                        let _ = stdin.write_all(b"\n").await;
+                                        let _ = stdin.flush().await;
+                                    }
                                 }
                             }
                         }
