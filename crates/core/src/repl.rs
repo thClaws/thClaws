@@ -6758,6 +6758,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             PermissionMode::Plan => "plan",
                             PermissionMode::LineGated => "linegated",
                             PermissionMode::TelegramGated => "telegramgated",
+                            PermissionMode::MessengerGated => "messengergated",
                         };
                         println!(
                             "{COLOR_DIM}permissions: {label} (auto = never prompt, ask = prompt on mutating tools, plan = read-only exploration; mutating tools blocked, linegated = approval routed to LINE chat — auto-active while LINE is paired, see chapter 21){COLOR_RESET}"

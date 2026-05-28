@@ -51,6 +51,12 @@ pub enum PermissionMode {
     /// `BotGated` mode in Tier 2; kept parallel for Tier 1 to avoid
     /// churning the LINE path.
     TelegramGated,
+    /// Messenger-gated (dev-plan/31) — the Facebook Page Messenger
+    /// analogue of [`Self::LineGated`]. Same gating semantics; the
+    /// prompt is routed to the Messenger thread as quick replies via
+    /// the `MessengerApprover` sink. Folds into `BotGated` alongside
+    /// the others in Tier 2.
+    MessengerGated,
 }
 
 impl PermissionMode {
@@ -58,7 +64,10 @@ impl PermissionMode {
     /// calls. Centralised so a future "Slack-gated" / "Discord-
     /// gated" variant just opts into the same arm.
     pub fn asks_for_approval(&self) -> bool {
-        matches!(self, Self::Ask | Self::LineGated | Self::TelegramGated)
+        matches!(
+            self,
+            Self::Ask | Self::LineGated | Self::TelegramGated | Self::MessengerGated
+        )
     }
 
     /// True when this mode blocks mutating calls outright (Plan

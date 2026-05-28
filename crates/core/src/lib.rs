@@ -59,6 +59,7 @@ pub mod login_codex;
 pub mod marketplace;
 pub mod mcp;
 pub mod memory;
+pub mod messenger;
 pub mod model_catalogue;
 pub mod oauth;
 pub mod permissions;

@@ -140,6 +140,14 @@ struct Cli {
     #[arg(long)]
     telegram: bool,
 
+    /// Run the Facebook Page Messenger bridge headless (no GUI window).
+    /// Connects to the relay using the binding JWT in
+    /// ~/.config/thclaws/messenger.json (pair via the GUI first). The
+    /// agent runs locally; Messenger is just the chat surface.
+    /// dev-plan/31.
+    #[arg(long)]
+    messenger: bool,
+
     /// Prompt (positional args joined with spaces)
     prompt: Vec<String>,
 }
@@ -199,6 +207,14 @@ enum Command {
         #[command(subcommand)]
         cmd: TelegramCmd,
     },
+    /// Manage the Facebook Page Messenger adapter (dev-plan/31).
+    /// `status` prints the resolved binding config; `pair` prints setup
+    /// instructions. Connecting a Page is done from the GUI Messenger
+    /// Connect modal.
+    Messenger {
+        #[command(subcommand)]
+        cmd: MessengerCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -208,6 +224,15 @@ enum TelegramCmd {
     Status,
     /// Print step-by-step instructions for creating a bot with
     /// @BotFather and connecting it.
+    Pair,
+}
+
+#[derive(Subcommand)]
+enum MessengerCmd {
+    /// Print the resolved Messenger binding config: relay URL, whether
+    /// a binding token is present (redacted), cached Page name/id.
+    Status,
+    /// Print step-by-step instructions for connecting a Facebook Page.
     Pair,
 }
 
@@ -328,9 +353,9 @@ fn respawn_detached_for_gui_if_needed(cli: &Cli) {
         return;
     }
     // Only respawn when the dispatch is actually GUI: not --cli/--print/
-    // --telegram, and either plain GUI (no --serve) or the --serve --gui
-    // combo.
-    let use_cli = cli.cli || cli.print || cli.telegram;
+    // --telegram/--messenger, and either plain GUI (no --serve) or the
+    // --serve --gui combo.
+    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger;
     let is_gui_dispatch = !use_cli && (!cli.serve || cli.gui);
     if !is_gui_dispatch {
         return;
@@ -437,10 +462,14 @@ async fn main() {
             let code = run_telegram_subcommand(cmd);
             std::process::exit(code);
         }
+        Some(Command::Messenger { cmd }) => {
+            let code = run_messenger_subcommand(cmd);
+            std::process::exit(code);
+        }
         None => {}
     }
 
-    let use_cli = cli.cli || cli.print || cli.telegram;
+    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger;
 
     // Issue #109: on Windows, respawn detached so cmd.exe / PowerShell
     // return the prompt instead of waiting on the GUI window. Runs
@@ -624,6 +653,13 @@ async fn main() {
             eprintln!("\n\x1b[31m[telegram] error: {e}\x1b[0m");
             std::process::exit(1);
         }
+    } else if cli.messenger {
+        // Headless Facebook Page Messenger bridge — its own agent loop.
+        // Runs until Ctrl-C. dev-plan/31 Tier 1.
+        if let Err(e) = thclaws_core::messenger::headless::run(config).await {
+            eprintln!("\n\x1b[31m[messenger] error: {e}\x1b[0m");
+            std::process::exit(1);
+        }
     } else if cli.print {
         let prompt = cli.prompt.join(" ");
         if prompt.is_empty() {
@@ -689,6 +725,63 @@ fn run_telegram_subcommand(cmd: TelegramCmd) -> i32 {
                     with thClaws over Telegram.\n\
                  \n\
                  Run `thclaws telegram status` to confirm the token is detected."
+            );
+            0
+        }
+    }
+}
+
+/// `thclaws messenger …` — print binding status or setup help.
+fn run_messenger_subcommand(cmd: MessengerCmd) -> i32 {
+    use thclaws_core::messenger::MessengerConfig;
+    match cmd {
+        MessengerCmd::Status => {
+            let cfg = match MessengerConfig::load() {
+                Ok(Some(c)) => c,
+                Ok(None) => MessengerConfig::default(),
+                Err(e) => {
+                    eprintln!("\x1b[31m[messenger] failed to read config: {e}\x1b[0m");
+                    return 1;
+                }
+            };
+            println!("Messenger adapter status");
+            println!("  relay:          {}", cfg.resolved_server_url());
+            if cfg.binding_token.trim().is_empty() {
+                println!("  binding token:  <none> (pair a Page via the GUI Messenger Connect)");
+            } else {
+                let shown = cfg.binding_token.chars().take(6).collect::<String>();
+                println!("  binding token:  {shown}… (present)");
+            }
+            println!(
+                "  page:           {}",
+                cfg.page_name.as_deref().unwrap_or("<unknown>")
+            );
+            println!(
+                "  page id:        {}",
+                cfg.page_id.as_deref().unwrap_or("<unknown>")
+            );
+            0
+        }
+        MessengerCmd::Pair => {
+            println!(
+                "Connect a Facebook Page to thClaws (Messenger)\n\
+                 \n\
+                 1. In Meta for Developers, create an app (type: Business) and add the\n\
+                    Messenger product. Generate a Page Access Token for your Page and\n\
+                    note your App Secret.\n\
+                 2. Configure the relay (operator step) with MESSENGER_PAGE_ACCESS_TOKEN,\n\
+                    MESSENGER_APP_SECRET, MESSENGER_VERIFY_TOKEN, MESSENGER_PAGE_ID, and\n\
+                    point the app's webhook at https://<relay>/messenger/webhook\n\
+                    subscribed to the `messages` field.\n\
+                 3. Message your Page. The relay DMs a pairing code; paste it into the\n\
+                    GUI \u{2192} Messenger Connect modal to bind this machine.\n\
+                 4. Run `thclaws --messenger` (or connect from the GUI) to start the\n\
+                    bridge. You're then chatting with thClaws from the Page inbox.\n\
+                 \n\
+                 Note: messaging users beyond your app's admins/testers needs Meta App\n\
+                 Review + Business Verification for the pages_messaging permission.\n\
+                 \n\
+                 Run `thclaws messenger status` to confirm the binding is detected."
             );
             0
         }

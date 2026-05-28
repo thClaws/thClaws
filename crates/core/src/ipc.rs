@@ -841,6 +841,134 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             }
         }
 
+        // ── Messenger bridge wiring (dev-plan/31) ──────────────────
+        // The GUI MessengerConnectModal hits these. Pairing redemption
+        // mirrors `line_pair`: POST the relay's /pair with the code the
+        // relay DMed the user, save the binding JWT, hand off to the
+        // worker. Status / disconnect mirror the LINE arms.
+        "messenger_status" => {
+            let _ = ctx.shared.input_tx.send(ShellInput::MessengerStatusRequest);
+        }
+        "messenger_pair" => {
+            let code = msg
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cwd = msg
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".into())
+                });
+            let machine_label = msg
+                .get("machine_label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    std::env::var("HOSTNAME")
+                        .or_else(|_| std::env::var("COMPUTERNAME"))
+                        .unwrap_or_else(|_| "this-machine".into())
+                });
+            let server_url = std::env::var("THCLAWS_MESSENGER_SERVER")
+                .ok()
+                .map(|u| u.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| {
+                    crate::messenger::config::DEFAULT_SERVER_URL
+                        .trim_end_matches('/')
+                        .to_string()
+                });
+            let pair_url = format!("{server_url}/pair");
+            let input_tx = ctx.shared.input_tx.clone();
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                let body = serde_json::json!({
+                    "code": code,
+                    "cwd": cwd,
+                    "machine_label": machine_label,
+                });
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
+                    .build()
+                    .expect("reqwest client build");
+                let resp = match client.post(&pair_url).json(&body).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let payload = serde_json::json!({
+                            "type": "messenger_pair_result",
+                            "ok": false,
+                            "error": format!("relay HTTP: {e}"),
+                        });
+                        (dispatch)(payload.to_string());
+                        return;
+                    }
+                };
+                let status = resp.status();
+                let response_text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    let payload = serde_json::json!({
+                        "type": "messenger_pair_result",
+                        "ok": false,
+                        "error": format!("relay {status}: {response_text}"),
+                    });
+                    (dispatch)(payload.to_string());
+                    return;
+                }
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&response_text).unwrap_or(serde_json::Value::Null);
+                let token = parsed
+                    .get("token")
+                    .and_then(|t| t.as_str())
+                    .filter(|t| !t.is_empty())
+                    .map(String::from);
+                let Some(token) = token else {
+                    let payload = serde_json::json!({
+                        "type": "messenger_pair_result",
+                        "ok": false,
+                        "error": "relay response missing 'token'",
+                    });
+                    (dispatch)(payload.to_string());
+                    return;
+                };
+                let cfg = crate::messenger::MessengerConfig {
+                    binding_token: token,
+                    server_url: Some(server_url.clone()),
+                    page_name: None,
+                    page_id: None,
+                };
+                if let Err(e) = cfg.save() {
+                    let payload = serde_json::json!({
+                        "type": "messenger_pair_result",
+                        "ok": false,
+                        "error": format!("save config: {e}"),
+                    });
+                    (dispatch)(payload.to_string());
+                    return;
+                }
+                let _ = input_tx.send(crate::shared_session::ShellInput::MessengerConnect(cfg));
+                let payload = serde_json::json!({
+                    "type": "messenger_pair_result",
+                    "ok": true,
+                    "server_url": server_url,
+                });
+                (dispatch)(payload.to_string());
+            });
+        }
+        "messenger_disconnect" => {
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::MessengerDisconnect);
+            let payload = serde_json::json!({
+                "type": "messenger_disconnect_ack",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // ── Working directory (M6.36 SERVE9d — migrated from gui.rs) ─
         "get_cwd" => {
             let cwd = std::env::current_dir()

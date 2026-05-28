@@ -19,7 +19,8 @@ type Choice =
   | "folder-instructions"
   | "api-keys"
   | "line-connect"
-  | "telegram-connect";
+  | "telegram-connect"
+  | "messenger-connect";
 
 export function SettingsMenu({
   anchorRef,
@@ -118,6 +119,12 @@ export function SettingsMenu({
       icon: <Send size={12} />,
       label: "Telegram Connect…",
       hint: "Pair this thClaws install with a Telegram bot",
+    },
+    {
+      id: "messenger-connect",
+      icon: <MessageCircle size={12} />,
+      label: "Messenger Connect…",
+      hint: "Pair this thClaws install with a Facebook Page",
     },
   ];
 

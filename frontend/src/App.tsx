@@ -20,6 +20,7 @@ import { KmsGraphView } from "./components/KmsGraphView";
 import { SettingsModal } from "./components/SettingsModal";
 import { LineConnectModal } from "./components/LineConnectModal";
 import { TelegramConnectModal } from "./components/TelegramConnectModal";
+import { MessengerConnectModal } from "./components/MessengerConnectModal";
 import { SettingsMenu } from "./components/SettingsMenu";
 import { InstructionsEditorModal } from "./components/InstructionsEditorModal";
 import { SecretsBackendDialog } from "./components/SecretsBackendDialog";
@@ -348,6 +349,7 @@ export default function App() {
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showLineConnect, setShowLineConnect] = useState(false);
   const [showTelegramConnect, setShowTelegramConnect] = useState(false);
+  const [showMessengerConnect, setShowMessengerConnect] = useState(false);
   const [instructionsScope, setInstructionsScope] =
     useState<"global" | "folder" | null>(null);
   const closeInstructions = useCallback(() => setInstructionsScope(null), []);
@@ -671,6 +673,8 @@ export default function App() {
                 else if (choice === "line-connect") setShowLineConnect(true);
                 else if (choice === "telegram-connect")
                   setShowTelegramConnect(true);
+                else if (choice === "messenger-connect")
+                  setShowMessengerConnect(true);
               }}
             />
           )}
@@ -684,6 +688,11 @@ export default function App() {
       {showTelegramConnect && (
         <TelegramConnectModal
           onClose={() => setShowTelegramConnect(false)}
+        />
+      )}
+      {showMessengerConnect && (
+        <MessengerConnectModal
+          onClose={() => setShowMessengerConnect(false)}
         />
       )}
       {instructionsScope && (

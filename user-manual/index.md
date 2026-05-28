@@ -31,8 +31,9 @@ teams.
 | 21 | [LINE chat & web browser bridge](ch21-line-and-browser-chat.md) |
 | 22 | [Paperclip adapter](ch22-paperclip-adapter.md) |
 | 23 | [Telegram bot](ch23-telegram.md) |
+| 24 | [Facebook Page Messenger bot](ch24-messenger.md) |
 
-> **Part II — Case studies (chapters 24–27)** — applied walkthroughs
+> **Part II — Case studies (chapters 25–28)** — applied walkthroughs
 > for building real projects with thClaws (static sites, Node.js apps,
 > AI agents, deploying to Agentic Press) are in active development and
 > will be added to this manual as each is reviewed and ready.
