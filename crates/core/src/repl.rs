@@ -8874,17 +8874,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 }
             };
             let Some(ev) = ev else { break };
-            let is_tool_display =
-                matches!(&ev, Ok(AgentEvent::Text(s)) if s.starts_with("\r\x1b[2K\x1b[2m  "));
-            let is_content_event = !is_tool_display
-                && matches!(
-                    &ev,
-                    Ok(AgentEvent::Text(_))
-                        | Ok(AgentEvent::Thinking(_))
-                        | Ok(AgentEvent::ToolCallStart { .. })
-                        | Ok(AgentEvent::ToolCallResult { .. })
-                        | Err(_)
-                );
+            let is_content_event = matches!(
+                &ev,
+                Ok(AgentEvent::Text(_))
+                    | Ok(AgentEvent::Thinking(_))
+                    | Ok(AgentEvent::ToolCallStart { .. })
+                    | Ok(AgentEvent::ToolCallResult { .. })
+                    | Err(_)
+            );
             if (is_connecting || is_thinking_after_tool) && is_content_event {
                 if !matches!(&ev, Ok(AgentEvent::ToolCallStart { .. })) {
                     print!("{}", crate::tool_display::clear_thinking_line());
@@ -8906,35 +8903,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         println!();
                         last_was_thinking = false;
                     }
-                    let is_td = s.starts_with("\r\x1b[2K\x1b[2m  ");
-                    if is_td {
-                        print!("{s}");
-                        let _ = std::io::stdout().flush();
-                        if s.contains('✓') || s.contains('✗') {
-                            is_thinking_after_tool = true;
-                            spinner_tick = 0;
-                            print!(
-                                "{}",
-                                crate::tool_display::format_thinking_spinner(
-                                    turn_start.elapsed(),
-                                    0
-                                )
-                            );
-                            let _ = std::io::stdout().flush();
-                        }
-                    } else if !s.starts_with('\r') && !s.starts_with('\x1b') && s.len() > 80 {
-                        let chars: Vec<char> = s.chars().collect();
-                        for chunk in chars.chunks(10) {
-                            for ch in chunk {
-                                print!("{ch}");
-                            }
-                            let _ = std::io::stdout().flush();
-                            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-                        }
-                    } else {
-                        print!("{s}");
-                        let _ = std::io::stdout().flush();
-                    }
+                    print!("{s}");
+                    let _ = std::io::stdout().flush();
                     lead_log!("{s}");
                 }
                 Ok(AgentEvent::Thinking(s)) => {
@@ -8972,7 +8942,6 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         eprintln!("{COLOR_DIM}[tool-display] result for '{name}' (id={id}) has no matching start{COLOR_RESET}");
                     }
                     let dur_val = td.as_ref().map(|t| t.elapsed()).unwrap_or_default();
-                    let is_error = output.is_err();
                     match output {
                         Ok(ref body) => {
                             let src_suffix = crate::tools::extract_tool_source(body)
@@ -9040,6 +9009,65 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     }
                     print!("{COLOR_GREEN}");
                     let _ = std::io::stdout().flush();
+                }
+                Ok(AgentEvent::Progress(kind)) => {
+                    use crate::providers::ProgressKind;
+                    match kind {
+                        ProgressKind::Thinking => {}
+                        ProgressKind::ToolStart { id, label } => {
+                            if is_connecting || is_thinking_after_tool {
+                                is_connecting = false;
+                                is_thinking_after_tool = false;
+                                spinner_tick = 0;
+                            }
+                            active_tools.insert(
+                                id,
+                                crate::tool_display::ActiveToolDisplay::new(label.clone()),
+                            );
+                            print!(
+                                "{}",
+                                crate::tool_display::format_tool_spinner(
+                                    &label,
+                                    std::time::Duration::ZERO,
+                                    0
+                                )
+                            );
+                            lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}");
+                            let _ = std::io::stdout().flush();
+                        }
+                        ProgressKind::ToolDone {
+                            id,
+                            label,
+                            is_error,
+                        } => {
+                            let td = active_tools.remove(&id);
+                            let dur = td.as_ref().map(|t| t.elapsed()).unwrap_or_default();
+                            print!(
+                                "{}",
+                                crate::tool_display::format_tool_done(&label, dur, is_error)
+                            );
+                            lead_log!(
+                                " {COLOR_DIM}{} {}{COLOR_RESET}\n{COLOR_GREEN}",
+                                if is_error { "✗" } else { "✓" },
+                                crate::tool_display::format_duration(dur)
+                            );
+                            let _ = std::io::stdout().flush();
+                            if active_tools.is_empty() {
+                                is_thinking_after_tool = true;
+                                spinner_tick = 0;
+                                print!(
+                                    "{}",
+                                    crate::tool_display::format_thinking_spinner(
+                                        turn_start.elapsed(),
+                                        0
+                                    )
+                                );
+                                let _ = std::io::stdout().flush();
+                            }
+                            print!("{COLOR_GREEN}");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
                 }
                 Ok(AgentEvent::Done { stop_reason, usage }) => {
                     if is_thinking_after_tool || is_connecting {

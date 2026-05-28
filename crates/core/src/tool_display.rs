@@ -81,6 +81,16 @@ fn redact_secrets(s: &str) -> String {
     out
 }
 
+static SENSITIVE_KEY_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn is_sensitive_key(key: &str) -> bool {
+    let re = SENSITIVE_KEY_REGEX.get_or_init(|| {
+        Regex::new(r"(?i)^(api[_-]?key|apikey|token|password|secret|authorization|credentials?)$")
+            .unwrap()
+    });
+    re.is_match(key)
+}
+
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub(crate) fn redact_json_value(value: &Value) -> Value {
     match value {
@@ -88,7 +98,17 @@ pub(crate) fn redact_json_value(value: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(k, v)| (redact_secrets(k), redact_json_value(v)))
+                .map(|(k, v)| {
+                    let redacted_v = if is_sensitive_key(k) {
+                        match v {
+                            Value::String(_) => Value::String("<redacted>".to_string()),
+                            _ => redact_json_value(v),
+                        }
+                    } else {
+                        redact_json_value(v)
+                    };
+                    (redact_secrets(k), redacted_v)
+                })
                 .collect(),
         ),
         _ => value.clone(),
@@ -488,6 +508,25 @@ mod tests {
         assert_eq!(redacted["todos"][0]["content"], "normal task");
         assert!(!redacted.to_string().contains("sk-123"));
         assert!(!redacted.to_string().contains("token=abc"));
+    }
+
+    #[test]
+    fn redact_json_value_redacts_sensitive_keys() {
+        let redacted = redact_json_value(&json!({
+            "token": "sk-123",
+            "api_key": "deadbeef",
+            "password": "p@ss",
+            "Authorization": "Bearer sk-456",
+            "safe_field": "visible",
+            "nested": { "secret": "shhh", "data": "ok" }
+        }));
+        assert_eq!(redacted["token"], "<redacted>");
+        assert_eq!(redacted["api_key"], "<redacted>");
+        assert_eq!(redacted["password"], "<redacted>");
+        assert_eq!(redacted["Authorization"], "<redacted>");
+        assert_eq!(redacted["safe_field"], "visible");
+        assert_eq!(redacted["nested"]["secret"], "<redacted>");
+        assert_eq!(redacted["nested"]["data"], "ok");
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! turn result, or consumes it live when the UI wants streaming text.
 
 use crate::error::Result;
-use crate::providers::{ProviderEvent, Usage};
+use crate::providers::{ProgressKind, ProviderEvent, Usage};
 use crate::types::ContentBlock;
 use async_stream::try_stream;
 use futures::{Stream, StreamExt};
@@ -39,6 +39,8 @@ pub enum AssembledEvent {
         stop_reason: Option<String>,
         usage: Option<Usage>,
     },
+    /// Display-only progress signal — passed through from provider.
+    Progress(ProgressKind),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -307,6 +309,9 @@ where
                 ProviderEvent::MessageStop { stop_reason, usage } => {
                     yield AssembledEvent::Done { stop_reason, usage };
                 }
+                ProviderEvent::Progress(kind) => {
+                    yield AssembledEvent::Progress(kind);
+                }
             }
         }
     }
@@ -323,6 +328,7 @@ where
             AssembledEvent::Text(s) => out.text.push_str(&s),
             AssembledEvent::Thinking(s) => out.thinking.push_str(&s),
             AssembledEvent::ToolUse(block) => out.tool_uses.push(block),
+            AssembledEvent::Progress(_) => {}
             AssembledEvent::ToolParseFailed { id, name, .. } => {
                 // Synthesize an empty-input ToolUse so collectors that
                 // count tool calls still see one. The matching error

@@ -68,6 +68,9 @@ pub enum AgentEvent {
     /// uses this to flip a "queued" badge to "delivered" on the
     /// corresponding chat bubble (see issue #106).
     UserMessageInjected { text: String },
+    /// Display-only progress signal from the provider layer.
+    /// Not part of the conversation — never persisted or accumulated.
+    Progress(crate::providers::ProgressKind),
     /// Turn is complete. No further events follow.
     Done {
         stop_reason: Option<String>,
@@ -1241,6 +1244,9 @@ impl Agent {
                             }
                             turn_tool_uses.push(block);
                         }
+                        AssembledEvent::Progress(kind) => {
+                            yield AgentEvent::Progress(kind);
+                        }
                         AssembledEvent::Done { stop_reason, usage } => {
                             turn_stop_reason = stop_reason;
                             if let Some(u) = &usage {
@@ -1835,6 +1841,7 @@ where
             AgentEvent::ToolCallResult { .. } => {}
             AgentEvent::ToolCallDenied { name, .. } => out.tool_denials.push(name),
             AgentEvent::UserMessageInjected { .. } => {}
+            AgentEvent::Progress(_) => {}
             AgentEvent::Done { stop_reason, usage } => {
                 out.stop_reason = stop_reason;
                 out.usage = Some(usage);

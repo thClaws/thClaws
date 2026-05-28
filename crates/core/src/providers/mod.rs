@@ -842,6 +842,23 @@ pub struct ModelInfo {
     pub display_name: Option<String>,
 }
 
+/// Display-only progress signal from the provider layer.
+/// Never accumulated into messages or persisted — renderers use it to
+/// drive spinners and tool-activity indicators.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProgressKind {
+    /// Provider is idle / waiting for first response chunk.
+    Thinking,
+    /// A tool started within the provider (agent-SDK internal execution).
+    ToolStart { id: String, label: String },
+    /// A tool finished within the provider.
+    ToolDone {
+        id: String,
+        label: String,
+        is_error: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderEvent {
     MessageStart {
@@ -866,6 +883,11 @@ pub enum ProviderEvent {
         stop_reason: Option<String>,
         usage: Option<Usage>,
     },
+    /// Display-only progress signal — not content, never persisted.
+    /// Providers emit this instead of sending spinner frames as
+    /// [`TextDelta`] so animation never leaks into logs, session
+    /// JSONL, GUI adapters, or accumulated assistant text.
+    Progress(ProgressKind),
 }
 
 pub type EventStream = BoxStream<'static, Result<ProviderEvent>>;

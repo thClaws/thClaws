@@ -264,6 +264,7 @@ async fn agent_run_stream(
                     })));
                 }
                 Ok(AgentEvent::IterationStart { .. }) => {}
+                Ok(AgentEvent::Progress(_)) => {}
                 Ok(AgentEvent::UserMessageInjected { text }) => {
                     yield Ok(named_event("user_message_injected", json!({ "text": text })));
                 }

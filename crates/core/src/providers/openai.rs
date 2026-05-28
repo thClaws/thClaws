@@ -431,22 +431,16 @@ impl Provider for OpenAIProvider {
             let mut raw = raw_dump;
             let mut last_activity = std::time::Instant::now();
             let mut idle_total = std::time::Duration::ZERO;
-            let mut spinner_tick: u32 = 0;
-            let mut is_animating = false;
 
             loop {
-                let wait = if is_animating {
-                    crate::tool_display::SPINNER_INTERVAL
+                let since = last_activity.elapsed();
+                let threshold = crate::tool_display::THINKING_HEARTBEAT_AFTER;
+                let wait = if since >= threshold {
+                    crate::tool_display::HEARTBEAT_EVERY
                 } else {
-                    let since = last_activity.elapsed();
-                    let threshold = crate::tool_display::THINKING_HEARTBEAT_AFTER;
-                    let thinking_wait = if since >= threshold {
-                        crate::tool_display::SPINNER_INTERVAL
-                    } else {
-                        threshold - since
-                    };
-                    thinking_wait.min(chunk_timeout.saturating_sub(idle_total))
-                };
+                    threshold - since
+                }
+                .min(chunk_timeout.saturating_sub(idle_total));
 
                 let maybe_chunk = tokio::time::timeout(
                     wait,
@@ -463,22 +457,13 @@ impl Provider for OpenAIProvider {
                                 chunk_timeout.as_secs()
                             )))?;
                         }
-                        is_animating = true;
-                        spinner_tick += 1;
-                        yield ProviderEvent::TextDelta(
-                            crate::tool_display::format_thinking_spinner(idle_total, spinner_tick)
-                        );
+                        yield ProviderEvent::Progress(super::ProgressKind::Thinking);
                         continue;
                     }
                     Ok(maybe) => {
                         let Some(chunk) = maybe else { break };
                         let chunk = chunk.map_err(|e| Error::Provider(format!("stream: {e}")))?;
                         buffer.extend_from_slice(&chunk);
-                        if is_animating {
-                            yield ProviderEvent::TextDelta(crate::tool_display::clear_thinking_line());
-                            is_animating = false;
-                            spinner_tick = 0;
-                        }
                         last_activity = std::time::Instant::now();
                         idle_total = std::time::Duration::ZERO;
                     }
@@ -1565,6 +1550,7 @@ mod tests {
                 ProviderEvent::ToolUseDelta { .. } => "ToolUseDelta",
                 ProviderEvent::ContentBlockStop => "ContentBlockStop",
                 ProviderEvent::MessageStop { .. } => "MessageStop",
+                ProviderEvent::Progress(_) => "Progress",
             })
             .collect();
         assert_eq!(

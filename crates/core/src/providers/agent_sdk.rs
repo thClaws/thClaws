@@ -339,13 +339,13 @@ impl Provider for AgentSdkProvider {
             let mut raw = raw_dump;
             let mut active_tools: std::collections::HashMap<String, crate::tool_display::ActiveToolDisplay> =
                 std::collections::HashMap::new();
-            let mut spinner_tick: u32 = 0;
+            // Fallback counter for tool_use blocks the CLI emits without an id.
             let mut anon_counter: u32 = 0;
             loop {
                 line_buf.clear();
 
                 let heartbeat_delay = if !active_tools.is_empty() {
-                    crate::tool_display::SPINNER_INTERVAL
+                    crate::tool_display::next_heartbeat_delay(&active_tools)
                 } else {
                     std::time::Duration::from_secs(300)
                 };
@@ -362,21 +362,9 @@ impl Provider for AgentSdkProvider {
                 if let Some(0) = got_line { break; } // EOF
 
                 if got_line.is_none() {
-                    spinner_tick += 1;
-                    if !active_tools.is_empty() {
-                        if let Some((id, _)) = active_tools.iter().min_by_key(|(_, td)| td.started_at) {
-                            let id = id.clone();
-                            if let Some(td) = active_tools.get_mut(&id) {
-                                yield ProviderEvent::TextDelta(
-                                    crate::tool_display::format_tool_spinner(&td.label, td.elapsed(), spinner_tick)
-                                );
-                                td.last_heartbeat_at = std::time::Instant::now();
-                            }
-                        }
-                    }
+                    yield ProviderEvent::Progress(super::ProgressKind::Thinking);
                     continue;
                 }
-                spinner_tick = 0;
 
                 let trimmed = line_buf.trim();
                 if trimmed.is_empty() { continue; }
@@ -423,15 +411,16 @@ impl Provider for AgentSdkProvider {
                                         let id = block.get("id").and_then(Value::as_str).unwrap_or("").to_string();
                                         let input = block.get("input").cloned().unwrap_or(Value::Null);
                                         let label = crate::tool_display::tool_label(name, &input);
-                                        yield ProviderEvent::TextDelta(
-                                            crate::tool_display::format_tool_spinner(&label, std::time::Duration::ZERO, 0)
-                                        );
                                         let tracking_id = if id.is_empty() {
                                             anon_counter += 1;
                                             format!("__anon_{anon_counter}")
                                         } else {
                                             id
                                         };
+                                        yield ProviderEvent::Progress(super::ProgressKind::ToolStart {
+                                            id: tracking_id.clone(),
+                                            label: label.clone(),
+                                        });
                                         active_tools.insert(
                                             tracking_id,
                                             crate::tool_display::ActiveToolDisplay::new(label),
@@ -450,16 +439,16 @@ impl Provider for AgentSdkProvider {
                                     let tu_id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
                                     let is_error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                                     if let Some(td) = active_tools.remove(tu_id) {
-                                        yield ProviderEvent::TextDelta(
-                                            crate::tool_display::format_tool_done(&td.label, td.elapsed(), is_error)
-                                        );
+                                        yield ProviderEvent::Progress(super::ProgressKind::ToolDone {
+                                            id: tu_id.to_string(),
+                                            label: td.label.clone(),
+                                            is_error,
+                                        });
                                     }
                                 }
                             }
                         }
-                        if active_tools.is_empty() {
-                            spinner_tick = 0;
-                        }
+                        // no-op: active_tools draining handled above
                     }
                     "control_request" => {
                         let req_id = v.get("request_id").and_then(Value::as_str).unwrap_or("").to_string();
