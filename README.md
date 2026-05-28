@@ -1,12 +1,23 @@
+<div align="center">
+
 # thClaws 🦞
 
-> **Open-source Agent Harness Platform** — a native AI agent workspace that codes, automates, remembers, and coordinates. Runs on your own machine. Sovereign by design.
+**The open-source agent harness, in your terminal and on your desktop.**
 
-thClaws is a **native-Rust AI agent workspace** that runs locally on your machine. Not just coding — it edits code, automates workflows, searches your knowledge bases, and coordinates teams of agents, all in one binary. You tell it what you want in natural language; it reads your files, runs commands, uses tools, and talks back to you while it works.
+A native-Rust AI agent workspace that codes, automates, remembers, and coordinates — running on your own machine. One binary. Sovereign by design. Built by a small team hacking in public.
 
+[![GitHub stars](https://img.shields.io/github/stars/thClaws/thClaws?style=social)](https://github.com/thClaws/thClaws/stargazers)
+[![Contributors](https://img.shields.io/github/contributors/thClaws/thClaws.svg)](https://github.com/thClaws/thClaws/graphs/contributors)
+[![Discussions](https://img.shields.io/github/discussions/thClaws/thClaws)](https://github.com/thClaws/thClaws/discussions)
+[![Release](https://img.shields.io/github/v/release/thClaws/thClaws)](https://github.com/thClaws/thClaws/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/thClaws/thClaws/release.yml?branch=main)](https://github.com/thClaws/thClaws/actions)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Platform: macOS · Windows · Linux](https://img.shields.io/badge/platform-macOS%20·%20Windows%20·%20Linux-lightgrey.svg)](#installation)
+[![Platform](https://img.shields.io/badge/platform-macOS%20·%20Windows%20·%20Linux-lightgrey.svg)](#installation)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
+
+[Website](https://thclaws.ai) · [Download](https://thclaws.ai/downloads.html) · [Manual](https://thclaws.ai/manual) · [Discussions](https://github.com/thClaws/thClaws/discussions) · [Contribute](#contribute)
+
+</div>
 
 ---
 
@@ -14,25 +25,23 @@ thClaws is a **native-Rust AI agent workspace** that runs locally on your machin
 
 Three tabs, one binary — captured from a live thClaws session looking at its own source.
 
-<table>
-  <tr>
-    <td width="33%" align="center">
-      <a href="docs/img/screen-files.webp"><img src="docs/img/screen-files.webp" alt="thClaws Files tab — landing-page source open in the editor with file tree" /></a><br/>
-      <strong>Files</strong><br/>
-      <sub>preview · edit · browse — codemirror + tiptap</sub>
-    </td>
-    <td width="33%" align="center">
-      <a href="docs/img/screen-terminal.webp"><img src="docs/img/screen-terminal.webp" alt="thClaws Terminal tab — REPL session with ASCII banner" /></a><br/>
-      <strong>Terminal</strong><br/>
-      <sub>raw REPL · slash commands · ANSI tool output</sub>
-    </td>
-    <td width="33%" align="center">
-      <a href="docs/img/screen-chat.webp"><img src="docs/img/screen-chat.webp" alt="thClaws Chat tab — conversational interface answering a product question" /></a><br/>
-      <strong>Chat</strong><br/>
-      <sub>conversational · markdown render · tool indicators</sub>
-    </td>
-  </tr>
-</table>
+<div align="center">
+
+<a href="docs/img/screens-carousel.webp"><img src="docs/img/screens-carousel.webp" alt="thClaws Desktop GUI — cycling through Files, Terminal, and Chat tabs" width="900" /></a>
+
+**Files** (codemirror + tiptap)  ·  **Terminal** (REPL · slash commands · ANSI tool output)  ·  **Chat** (markdown render · tool indicators)
+
+</div>
+
+---
+
+## Hacking in public
+
+thClaws started in April 2026. As of this writing the project has shipped **20+ releases**, drawn **27 contributors**, and lands roughly a release a week. It's developed by a small team at **ThaiGPT Co., Ltd.** — and a meaningful chunk of the codebase comes from outside contributors who heard about it and stayed.
+
+We're aiming for **v1.0 = "the multi-platform agent"**: the same agent loop on your desktop, in your terminal, and bridged into Telegram, Discord, Slack, WhatsApp, Facebook Messenger, and LINE. Telegram, LINE, and Messenger are already shipping. Discord, Slack, and WhatsApp are next — and they're great places to plug in. ([Contribute →](#contribute))
+
+> Built in Thailand. Meant for the world.
 
 ---
 
@@ -40,82 +49,134 @@ Three tabs, one binary — captured from a live thClaws session looking at its o
 
 The same `Agent` loop, `Session`, and `ToolRegistry` back every UX:
 
-- **Desktop GUI** (`thclaws`) — a native window with Terminal, Chat, Files, and optional Team tabs.
-- **CLI REPL** (`thclaws --cli`) — an interactive terminal prompt for SSH, headless servers, or when you want zero GUI overhead.
-- **Non-interactive mode** (`thclaws -p "prompt"`) — runs a single turn and exits. Handy for scripts, CI pipelines, and shell one-liners. Add `-v` to see per-turn token usage on stderr.
-- **Webapp** (`thclaws --serve --port 7878`) — same engine over WebSocket/HTTP, served from your laptop. Reach it remotely via SSH tunnel for "Claude Code anywhere" without opening a port.
+- **Desktop GUI** (`thclaws`) — native window with Terminal, Chat, Files, and optional Team tabs.
+- **CLI REPL** (`thclaws --cli`) — interactive terminal prompt for SSH, headless servers, or zero-GUI workflows.
+- **Non-interactive mode** (`thclaws -p "prompt"`) — single turn, exits. Pipe-friendly for scripts and CI. `-v` for token usage on stderr.
+- **Webapp** (`thclaws --serve --port 7878`) — same engine over WebSocket/HTTP. SSH-tunnel for "Claude Code anywhere" without opening a port.
 
 ---
 
-## What makes it different
+## Features
 
-- **Multi-provider.** Anthropic (native + Claude Agent SDK via Claude Code auth), OpenAI (Chat Completions + Responses/Codex), Google Gemini & Gemma, Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding Plan), NVIDIA NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma, THaLLE), OpenRouter, Agentic Press, Azure AI Foundry, Ollama (local, local Anthropic-compatible, and Ollama Cloud), LMStudio, plus a generic **OpenAI-compatible** slot (`oai/*`) for LiteLLM / Portkey / Helicone / vLLM / internal proxies — auto-detected by model name prefix. Switch mid-session with `/model` or swap the whole provider with `/provider`.
+Everything's in one binary. Pick the surface that fits the task, swap the provider, drop in a skill, glue in an MCP server, then walk away while a scheduled job or background agent finishes the work.
 
-- **Any knowledge worker, not just engineers.** Chat tab for researchers, PMs, ops, legal, marketing, finance — natural-language prompts, file access, knowledge-base lookup, drafting. Terminal tab for engineers who want the raw REPL. Same engine, same sessions, same config — different preferred surface.
+- **Multi-provider** — Anthropic (native + Claude Agent SDK via Claude Code auth), OpenAI (Chat Completions + Responses/Codex), Google Gemini & Gemma, Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding Plan), NVIDIA NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma, THaLLE), OpenRouter, Agentic Press, Azure AI Foundry, Ollama (local + Anthropic-compatible + Cloud), LMStudio, plus a generic **OpenAI-compatible** slot (`oai/*`) for LiteLLM / Portkey / Helicone / vLLM / internal proxies. Switch mid-session with `/model` or `/provider`.
+- **Open standards, not a walled garden** — [Model Context Protocol](https://modelcontextprotocol.io/) for tools, [`AGENTS.md`](https://agents.md) for project instructions (adopted by Google, OpenAI, Factory, Sourcegraph, Cursor), `SKILL.md` with YAML frontmatter for packaged workflows. Configuration portable between thClaws, other compliant agents, and whatever comes next.
+- **Skills, plugins, MCP servers, hooks** — extend the agent without touching Rust. Skills are folders with a `SKILL.md`. Plugins bundle skills + commands + agent definitions + MCP servers under one manifest. MCP brings in third-party tools (GitHub, filesystems, browsers, Slack…) over stdio or HTTP-Streamable with OAuth 2.1+PKCE. Hooks run shell scripts on lifecycle events (`pre_tool_use`, `permission_denied`, `session_start`, …).
+- **Three tiers of agent orchestration** — model-driven subagents (`Task` tool, blocking, up to 3 levels deep); user-driven concurrent side-channels (`/agent <name> <prompt>`, parallel to main, own cancel token); multi-process **Agent Teams** with shared mailbox, task queue, tmux panes, and optional git worktrees.
+- **Knowledge bases (KMS) + `/dream`** — per-project and per-user wikis under `.thclaws/kms/<name>/pages/`, indexed by a one-line `index.md`. Grep + read (no embeddings), following Andrej Karpathy's LLM-wiki pattern. `/dream` mines your recent sessions in the background and writes a dated audit-trail page to review with `git diff`.
+- **Plan mode** — `EnterPlanMode` proposes an ordered list of steps you Approve / Cancel / Skip / Retry. Same UX in GUI sidebar and `/plan` slash command.
+- **Schedule recurring jobs** — `/schedule add` runs an agent on cron, fixed intervals, or filesystem changes (`watchWorkspace`). In-process scheduler for ephemeral, native daemon (`launchd` / `systemd-user`) for survives-reboot.
+- **Long-running loops & overnight builds** — `/loop` for fixed-interval iteration, `/goal` for audit-driven completion. `/goal --auto` is a Ralph-style overnight builder that keeps going until the goal is satisfied or you wake up.
+- **Document workflow** — native PDF, DOCX, PPTX, XLSX read + edit + create tools, plus image rendering. Ingest a 50-page PDF, summarize into KMS, produce a follow-up deck — one conversation.
+- **Memory & project instructions** — `AGENTS.md` (or `CLAUDE.md`) walked up from `cwd` and injected into the system prompt. Persistent memory store classified as `user` / `feedback` / `project` / `reference`, stored as markdown you can read, edit, or commit.
+- **Settings as one file** — `.thclaws/settings.json` (project) or `~/.config/thclaws/settings.json` (user). API keys go in the OS keychain by default (macOS Keychain / Windows Credential Manager / Linux Secret Service) with `.env` fallback for CI.
+- **Session resume** — `thclaws --resume last` or `--resume <id>`. Sessions live as JSONL under `.thclaws/sessions/` — git-friendly, grep-friendly, never opaque.
+- **Safety first** — filesystem sandbox scoped to working directory. Destructive shell commands flagged. You approve every mutating tool call unless you've opted into auto-approve. Permission requests label which agent is asking when multiple are running.
+- **Offline-capable** — Ollama (native + Anthropic-compatible) lets you run entirely against a local model. No cloud round-trip, no API key.
+- **Deploy what you build** — ship landing pages, web apps, APIs, and AI agents through [Agentic Press Hosting](https://agentic-press.com) (partnered with SIS Cloud Service and Artech.Cloud) — or any host you prefer. Deploy flow ships as a plugin (`/plugin install …-deploy`), so hosts are swappable. The client never locks you in.
+- **Shell escape** — prefix any REPL line with `!` to run a shell command directly. No tokens, no approval prompt, no agent round-trip (`! git status`, `! ls`).
 
-- **Open standards, not a walled garden.** Built on the conventions the agent-tooling industry is converging on, not bespoke formats you have to learn only for us. [Model Context Protocol](https://modelcontextprotocol.io/) for tool servers. [`AGENTS.md`](https://agents.md) for project instructions — the vendor-neutral standard adopted by Google, OpenAI, Factory, Sourcegraph, and Cursor. `SKILL.md` with YAML frontmatter for packaged workflows. Your configuration is portable between thClaws, other agents that speak the same standards, and whatever comes next.
+---
 
-- **Skills.** Reusable expert workflows packaged as a directory with `SKILL.md` plus optional scripts. The agent picks the right skill automatically when a request matches the `whenToUse` trigger, or you can invoke one explicitly as `/<skill-name>`. Install from a git URL or `.zip` archive with `/skill install`.
+## Contribute
 
-- **MCP servers.** Plug in tools built by third parties — GitHub, filesystems, databases, browsers, Slack, and more. Both stdio and HTTP Streamable transports, with OAuth 2.1 + PKCE for protected servers. Add one with `/mcp add` or ship a `.mcp.json` in your project.
+**We'd love your help.** thClaws is built in the open by a small team and ~25 contributors so far. Reviews are typically fast, the codebase is approachable, and there's plenty of room to make a real dent.
 
-- **Plugin system.** Skills + commands + agent definitions + MCP servers bundled under a single manifest, installable from git or `.zip`. One install, one uninstall, one version to pin — ideal for sharing a team's extensions.
+### Quick start for contributors
 
-- **Memory & project instructions.** Drop an `AGENTS.md` (or `CLAUDE.md`) in your repo — thClaws walks up from `cwd` and injects every match into the system prompt. A persistent memory store holds longer-lived facts the agent has learned about you, classified as `user` / `feedback` / `project` / `reference` and stored as markdown you can read, edit, or commit.
+```sh
+git clone https://github.com/thClaws/thClaws.git
+cd thClaws
 
-- **Knowledge bases (KMS).** Per-project and per-user wikis the agent can search and read on demand. Drop markdown pages under `.thclaws/kms/<name>/pages/`, give each a one-line entry in `index.md`, and the agent gets a table of contents every turn plus `KmsRead` / `KmsSearch` / `KmsWrite` / `KmsAppend` / `KmsDelete` tools. No embeddings — grep + read, following Andrej Karpathy's LLM-wiki pattern. Run `/dream` and a built-in side-channel agent mines the 10 most recent sessions, dedupes pages, surfaces new insights, and writes a dated audit-trail page — review with `git diff`.
+# One-shot: build frontend, then cargo build --features gui
+./scripts/build.sh           # macOS / Linux
+./scripts/build.ps1          # Windows PowerShell
 
-- **Three tiers of agent orchestration.**
-  - **`Task` tool** — model-driven subagents that block the parent's turn. Each gets its own tool registry, recurses up to 3 levels deep.
-  - **`/agent <name> <prompt>`** — user-driven concurrent side-channels. Spawned on a fresh tokio task, runs in parallel with main, never enters main's history, has its own cancel token. Use it when *you* know exactly what you want a specialist to do (`/agent translator แปลไฟล์ x` while you keep coding).
-  - **Agent Teams** — multiple thClaws processes coordinating through a shared mailbox and task queue, each in its own tmux pane and optional git worktree. One agent writes your backend while a teammate builds the frontend in parallel, lead merges the branches when both are done.
+# Verification suite (cargo fmt --check, clippy, tsc, cargo test)
+./scripts/build.sh --check
 
-- **Plan mode.** For multi-step work, the agent can `EnterPlanMode`, propose an ordered list of steps, and let *you* review and approve before execution. Each step runs sequentially with its own retry budget; failures stop the chain so you can decide. Same UX in GUI (sidebar with Approve / Cancel / Skip / Retry per step) and REPL (`/plan` slash command).
+# Run
+cargo run --features gui              # GUI
+cargo run -- --cli                    # CLI REPL
+cargo run -- -p "explain crates/core" # one-shot
+```
 
-- **Schedule recurring jobs.** `/schedule add` runs an agent on cron (`0 9 * * MON-FRI`), at fixed intervals, or whenever a watched directory changes (`watchWorkspace`). Three composable layers: manual `/schedule run`, in-process scheduler (lives as long as your REPL), and a native daemon (`launchd` on macOS / `systemd-user` on Linux) that survives reboots. Per-job working directory, optional model override, full output capture.
+**Prerequisites:** Rust 1.85+, Node.js 20+, pnpm 9+. The helper enforces frontend-before-cargo order (the GUI build embeds `frontend/dist/index.html` at compile time via `include_str!`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full PR workflow.
 
-- **Long-running loops & overnight builds.** `/loop` for fixed-interval iteration, `/goal` for audit-driven completion (the agent works toward a goal until an audit prompt confirms "done" or hits the budget). Compose them: `/goal --auto` is a Ralph-style overnight builder that keeps going until the goal is satisfied or you wake up.
+### Where we need help right now
 
-- **Document workflow.** Native PDF, DOCX, PPTX, XLSX read + edit + create tools, plus image rendering. The agent can ingest a 50-page PDF, summarize it into KMS, and produce a follow-up PowerPoint deck — all in one conversation, no separate file-conversion step.
+If you want to land something impactful, these are the places we'd most love a hand:
 
-- **Hooks.** Run shell scripts on agent lifecycle events: `pre_tool_use`, `post_tool_use`, `permission_denied`, `session_start`, `pre_compact`, etc. Audit every Bash invocation, gate Edit/Write through your linter, fire a Slack notification when long sessions end. Eight events × per-event environment variables × timeout-with-SIGKILL guarantees.
+- 🚀 **Discord adapter** — bridge the agent into a Discord guild (same shape as our shipping Telegram + Messenger adapters in `crates/core/src/messenger/` and friends).
+- 🚀 **Slack adapter** — same idea, Slack-side.
+- 🚀 **WhatsApp adapter** — round out the v1.0 multi-platform thesis.
+- 🪟 **Windows ARM polish** — installer, GUI smoke-test on Surface / Snapdragon X.
+- 🧠 **KMS embeddings (opt-in)** — current KMS is grep + read; an optional embeddings layer alongside (not replacing) would be welcome.
+- 🌏 **i18n & translations** — manual chapters and UI strings are EN/TH today; we'd love help with more locales.
+- 🧩 **Skills, plugins, MCP servers** — no Rust needed. Build one, ship it on GitHub, list it on the marketplace. (See [Skills documentation](https://thclaws.ai/manual).)
+- 📝 **Docs, examples, walkthroughs** — typo fixes welcome, case studies even more welcome.
 
-- **Settings as one file.** Every knob — permission mode, thinking budget, allowed/disallowed tools, provider endpoints, KMS attachments, max output tokens — lives in `.thclaws/settings.json` (project) or `~/.config/thclaws/settings.json` (user). API keys go in the OS keychain by default (macOS Keychain / Windows Credential Manager / Linux Secret Service) with `.env` fallback for CI.
+Browse [**good first issues**](https://github.com/thClaws/thClaws/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22) or [**help wanted**](https://github.com/thClaws/thClaws/issues?q=is%3Aopen+is%3Aissue+label%3A%22help+wanted%22) to start. If you want to land something bigger, drop into [Discussions](https://github.com/thClaws/thClaws/discussions) and pitch it first — that's the lowest-friction path.
 
-- **Session resume.** `thclaws --resume last` picks up where you left off; `thclaws --resume <id>` jumps to a specific session. Sessions live as JSONL under `.thclaws/sessions/` — git-friendly, grep-friendly, never opaque.
+### Codebase tour
 
-- **Safety first.** A filesystem sandbox scopes file tools to the working directory. Destructive shell commands are flagged before execution. You approve every mutating tool call unless you've opted into auto-approve. Permission requests label which agent is asking when multiple are running concurrently (main vs. side-channel vs. subagent), so you don't approve a translator's `Bash` thinking it's main's.
+Everything ships from a single crate, `crates/core/`. The interesting modules:
 
-- **Offline-capable.** Ollama (native and Anthropic-compatible) lets you run entirely against a local model — no cloud round-trip, no API key.
+| Path | What it does |
+|---|---|
+| `crates/core/src/agent.rs` + `agent_runtime.rs` | The agent loop — turns, tool calls, streaming, cancellation |
+| `crates/core/src/commands.rs` | Slash-command registry (`/help`, `/model`, `/skill`, `/schedule`, …) |
+| `crates/core/src/kms.rs` | Knowledge bases (per-project + per-user) with `KmsRead`/`Search`/`Write`/`Append` tools |
+| `crates/core/src/memory.rs` | Persistent memory store (user / feedback / project / reference) |
+| `crates/core/src/mcp.rs` | MCP transport (stdio + HTTP-Streamable + OAuth 2.1 PKCE) |
+| `crates/core/src/hooks.rs` | Lifecycle hooks (`pre_tool_use`, `post_tool_use`, …) |
+| `crates/core/src/marketplace.rs` | Skill / plugin marketplace client |
+| `crates/core/src/permissions.rs` | Filesystem sandbox + tool approval flow |
+| `crates/core/src/compaction.rs` | Context-window management |
+| `crates/core/src/messenger/`, `line/` | Multi-platform adapters (the v1.0 thesis) |
+| `crates/core/src/gui.rs` + `ipc.rs` | Tauri ↔ React bridge |
+| `frontend/src/` | React + Vite GUI (bundled into a single HTML file via `include_str!`) |
 
-- **Deploy what you build.** Ship the landing pages, web apps, APIs, and AI agents you create through [Agentic Press Hosting](https://agentic-press.com) (partnered with SIS Cloud Service and Artech.Cloud) — or any other host you prefer. Schedule agents on cron, respond to webhooks, stream from public URLs. The deploy flow ships as a plugin (`/plugin install …-deploy`), so hosts are swappable; the client never locks you in.
+Deeper engineering reference: [`thclaws-technical-manual/`](thclaws-technical-manual/) — agent loop, provider abstraction, KMS internals, side-channel + `/dream` plumbing, schedule daemon, hooks lifecycle, plan-mode driver, and the rest. **Read this before sending non-trivial PRs.**
 
-- **Shell escape.** Prefix any REPL line with `!` to run a shell command directly — no tokens, no approval prompt, no agent round-trip (`! git status`, `! ls`, etc.).
+### Contributors
+
+A huge thank you to the people who've shaped thClaws so far:
+
+<a href="https://github.com/thClaws/thClaws/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=thClaws/thClaws" alt="thClaws contributors" />
+</a>
 
 ---
 
 ## Installation
 
+### Build from source
+
+The fastest path if you want to contribute or just see how it's built. See [Contribute → Quick start](#quick-start-for-contributors).
+
 ### Pre-built binaries
 
-Download the latest release for your platform from the [Releases page](https://github.com/thClaws/thClaws/releases) or from [thclaws.ai/downloads](https://thclaws.ai/downloads.html).
+Download for your platform from the [Releases page](https://github.com/thClaws/thClaws/releases) or [thclaws.ai/downloads](https://thclaws.ai/downloads.html).
 
 Supported: macOS (Apple Silicon & Intel), Windows (x86_64 & ARM64), Linux (x86_64 & ARM64).
 
-#### Linux runtime dependencies
+<details>
+<summary><b>Linux runtime dependencies</b> — needed for the GUI binary on headless servers</summary>
 
-The Linux GUI binary links against the Wayland and webkit2gtk client libraries at runtime. Most desktop distros (Ubuntu Desktop, Fedora Workstation, etc.) ship them by default. **Headless servers** (cloud VMs, AWS EC2, Docker images without a display) typically don't — `thclaws` will fail at startup with `error while loading shared libraries: libwayland-client.so.0`.
+The Linux GUI binary links against Wayland and webkit2gtk at runtime. Desktop distros (Ubuntu Desktop, Fedora Workstation) ship these by default. **Headless servers** (cloud VMs, EC2, Docker images without a display) typically don't — `thclaws` will fail at startup with `error while loading shared libraries: libwayland-client.so.0`.
 
-Two options on a headless box:
+Two options:
 
 **(a) Use CLI mode** — no GUI deps required:
 
 ```sh
-thclaws --cli                       # interactive REPL
-thclaws -p "what does src/main.rs do?"  # one-shot
+thclaws --cli
+thclaws -p "what does src/main.rs do?"
 ```
 
-**(b) Install the GUI deps** — only if you actually want to run the webview:
+**(b) Install the GUI deps**:
 
 ```sh
 # Debian / Ubuntu
@@ -125,25 +186,7 @@ sudo apt install libwayland-client0 libwebkit2gtk-4.1-0 libsoup-3.0-0
 sudo dnf install wayland libsoup3 webkit2gtk4.1
 ```
 
-### Build from source
-
-**Prerequisites:** Rust 1.85+, Node.js 20+, pnpm 9+.
-
-```sh
-git clone https://github.com/thClaws/thClaws.git
-cd thClaws
-
-# Build frontend (React + Vite, bundled as a single HTML file)
-cd frontend && pnpm install && pnpm build && cd ..
-
-# Build Rust (CLI + GUI)
-cargo build --release --features gui --bin thclaws
-
-# Run
-./target/release/thclaws          # GUI
-./target/release/thclaws --cli    # CLI
-./target/release/thclaws -p "what does src/main.rs do?"  # one-shot
-```
+</details>
 
 ---
 
@@ -190,15 +233,15 @@ thclaws --serve --port 7878   # then ssh -L 7878:localhost:7878 user@remote
 
 ## Configuration
 
-thClaws reads settings in this precedence order (higher wins):
+Settings are read in this precedence (higher wins):
 
 1. CLI flags
 2. `.thclaws/settings.json` (project)
 3. `~/.config/thclaws/settings.json` (user)
-4. `~/.claude/settings.json` (fallback location)
+4. `~/.claude/settings.json` (fallback)
 5. Compiled-in defaults
 
-Open-standard files are honored directly:
+Open-standard files honored directly:
 
 - `CLAUDE.md` / `AGENTS.md` — system prompt additions, walked up from `cwd`
 - `.thclaws/skills/` / `.claude/skills/` — skill catalog
@@ -206,19 +249,28 @@ Open-standard files are honored directly:
 - `.mcp.json` / `.thclaws/mcp.json` — MCP server configuration
 - `.thclaws-plugin/plugin.json` / `.claude-plugin/plugin.json` — plugin manifest
 
-API keys are **never stored in config files** — only in the OS keychain (default) or `.env`.
+API keys are **never stored in config files** — only the OS keychain (default) or `.env`.
+
+---
+
+## Community
+
+- 💬 **[GitHub Discussions](https://github.com/thClaws/thClaws/discussions)** — questions, ideas, show-and-tell. The best place to start.
+- 🐛 **[Issues](https://github.com/thClaws/thClaws/issues)** — bug reports + concrete feature requests.
+- ✉️ **Email** — for security disclosures or commercial inquiries: [jimmy@thaigpt.com](mailto:jimmy@thaigpt.com) (see also [SECURITY.md](SECURITY.md)).
 
 ---
 
 ## Documentation
 
 - **Official site** — [thclaws.ai](https://thclaws.ai)
-- **Full user manual** — [thclaws.ai/manual](https://thclaws.ai/manual) *(soon)* or [`user-manual/`](user-manual/) (English) / [`user-manual-th/`](user-manual-th/) (ภาษาไทย) — 24 chapters covering every feature plus 7 walkthrough case studies (static site deploy, Node.js reservation site, news-aggregation agent, etc.).
-- **Technical manual** — [`thclaws-technical-manual/`](thclaws-technical-manual/) — engineering reference for the agent loop, provider abstraction, KMS internals, side-channel + dream feature plumbing, schedule daemon, hooks lifecycle, plan-mode driver, and the rest. Read this before sending non-trivial PRs.
+- **Full user manual** — [thclaws.ai/manual](https://thclaws.ai/manual) or [`user-manual/`](user-manual/) (EN) / [`user-manual-th/`](user-manual-th/) (ภาษาไทย) — 24 chapters + 7 walkthrough case studies (static site deploy, Node.js reservation site, news-aggregation agent, …).
+- **Technical manual** — [`thclaws-technical-manual/`](thclaws-technical-manual/) — engineering reference.
 - [Contributing](CONTRIBUTING.md) — dev setup, PR flow, commit style
 - [Changelog](CHANGELOG.md) — version history
 - [Code of Conduct](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
 - [Security](SECURITY.md) — vulnerability disclosure
+- [Enterprise](ENTERPRISE.md) — EE features, private marketplaces, policy overrides
 
 For books, training, and commercial deployment, see [agentic-press.com](https://agentic-press.com).
 
@@ -231,7 +283,7 @@ Dual-licensed under either:
 - [MIT License](LICENSE-MIT)
 - [Apache License 2.0](LICENSE-APACHE)
 
-at your option. Contributions are accepted under the same dual license.
+at your option. Contributions are accepted under the same dual license — you keep your copyright; we just need permission to ship it.
 
 ---
 
@@ -239,4 +291,4 @@ at your option. Contributions are accepted under the same dual license.
 
 thClaws is developed by **ThaiGPT Co., Ltd.** and published under a dual MIT/Apache-2.0 license. The client is free and open source forever. Enterprise Edition, hosting, and support are commercial offerings — see [agentic-press.com](https://agentic-press.com) or contact [jimmy@thaigpt.com](mailto:jimmy@thaigpt.com).
 
-Built in Thailand. Meant for the world.
+> Built in Thailand. Meant for the world.
