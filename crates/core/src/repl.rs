@@ -5085,21 +5085,29 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             continue;
         }
 
-        // Immediate feedback: show spinner right after Enter.
-        print!(
-            "{}",
-            crate::tool_display::format_thinking_spinner(std::time::Duration::ZERO, 0)
-        );
-        let _ = std::io::stdout().flush();
-        let mut _early_spinner_shown = true;
+        // Immediate feedback: show spinner right after Enter. Gate on
+        // TTY so piped / headless invocations don't accumulate ANSI
+        // control bytes in their stdout (logs, redirected output, …).
+        use std::io::IsTerminal as _;
+        let early_spinner_shown = if std::io::stdout().is_terminal() {
+            print!(
+                "{}",
+                crate::tool_display::format_thinking_spinner(std::time::Duration::ZERO, 0)
+            );
+            let _ = std::io::stdout().flush();
+            true
+        } else {
+            false
+        };
 
         // `!<cmd>` shell escape — user-initiated shell command, runs
         // through BashTool (sandbox cwd, non-interactive env, etc.)
         // and prints the output. Doesn't touch agent history. Mirrors
         // the GUI handle_line path in shared_session.rs.
         if let Some(cmd) = crate::shell_bang::parse_bang(&line) {
-            print!("{}", crate::tool_display::clear_thinking_line());
-            _early_spinner_shown = false;
+            if early_spinner_shown {
+                print!("{}", crate::tool_display::clear_thinking_line());
+            }
             println!("{COLOR_DIM}[!] {cmd}{COLOR_RESET}");
             match crate::shell_bang::run_bang_command(cmd).await {
                 Ok(output) => {
@@ -5301,10 +5309,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         }
 
         if let Some(cmd) = parse_slash(&line) {
-            if _early_spinner_shown {
+            if early_spinner_shown {
                 print!("{}", crate::tool_display::clear_thinking_line());
                 let _ = std::io::stdout().flush();
-                _early_spinner_shown = false;
             }
             match cmd {
                 SlashCommand::Help => println!("{}", render_help()),

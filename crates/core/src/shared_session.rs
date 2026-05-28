@@ -4141,10 +4141,6 @@ fn format_provider_model(provider: &str, model: &str) -> String {
     }
 }
 
-fn sanitize_label_field(s: &str) -> String {
-    crate::tool_display::sanitize_label_field(s)
-}
-
 /// Translate the worker's `ViewEvent` into the chat envelope
 /// shape the plan-10 browser SPA expects. Subset of all events —
 /// only the ones that drive the user-visible chat (text deltas,
@@ -4195,10 +4191,6 @@ fn view_event_to_chat_envelope(ev: &ViewEvent) -> Option<serde_json::Value> {
         })),
         _ => None,
     }
-}
-
-fn format_tool_label(name: &str, input: &serde_json::Value) -> String {
-    crate::tool_display::tool_label(name, input)
 }
 
 /// Placeholder provider used when the worker starts without any usable
