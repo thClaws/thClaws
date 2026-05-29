@@ -31,6 +31,7 @@ pub mod plan_state;
 pub mod pptx_create;
 pub mod pptx_edit;
 pub mod pptx_read;
+pub mod quiz_render;
 pub mod read;
 pub mod search;
 pub mod session_rename;
@@ -64,6 +65,7 @@ pub use plan::{EnterPlanModeTool, ExitPlanModeTool, SubmitPlanTool, UpdatePlanSt
 pub use pptx_create::PptxCreateTool;
 pub use pptx_edit::PptxEditTool;
 pub use pptx_read::PptxReadTool;
+pub use quiz_render::QuizRenderTool;
 pub use read::ReadTool;
 pub use search::WebSearchTool;
 pub use session_rename::SessionRenameTool;
@@ -201,6 +203,7 @@ impl ToolRegistry {
         r.register(Arc::new(WebScrapeTool::new()));
         r.register(Arc::new(AskUserTool));
         r.register(Arc::new(TodoWriteTool));
+        r.register(Arc::new(QuizRenderTool::new()));
         r.register(Arc::new(EnterPlanModeTool));
         r.register(Arc::new(ExitPlanModeTool));
         r.register(Arc::new(SubmitPlanTool));
@@ -400,6 +403,7 @@ mod tests {
                 "PptxCreate",
                 "PptxEdit",
                 "PptxRead",
+                "QuizRender",
                 "Read",
                 "SubmitPlan",
                 "TodoWrite",

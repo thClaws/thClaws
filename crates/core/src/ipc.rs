@@ -2115,9 +2115,16 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let user_cmds = crate::commands::CommandStore::discover_with_extra(
                 &crate::plugins::plugin_command_dirs(),
             );
+            // Names already shown as built-ins above (e.g. the seeded `/quiz`)
+            // must not be listed a second time as a "Custom" command.
+            let builtin_names: std::collections::HashSet<&str> =
+                crate::repl::built_in_commands().iter().map(|c| c.name).collect();
             let mut user_names: Vec<&str> = user_cmds.commands.keys().map(String::as_str).collect();
             user_names.sort();
             for name in user_names {
+                if builtin_names.contains(name) {
+                    continue;
+                }
                 if let Some(cmd) = user_cmds.get(name) {
                     entries.push(serde_json::json!({
                         "name": cmd.name,

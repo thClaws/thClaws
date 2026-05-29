@@ -3026,6 +3026,9 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         // Deploy
         BuiltInCommand { name: "deploy",   description: "Ship .thclaws/ to a remote pod (dev-plan/28)", category: "Deploy", usage: "[--pod URL] [--token T] [--dry-run] [--full] [--no-restart]" },
 
+        // Learn
+        BuiltInCommand { name: "quiz",     description: "Generate & play a study quiz from a URL, file, or topic", category: "Learn", usage: "<topic|url|file>" },
+
         // System
         BuiltInCommand { name: "help",     description: "Show this help",                             category: "System", usage: "" },
         BuiltInCommand { name: "version",  description: "Show version",                               category: "System", usage: "" },
