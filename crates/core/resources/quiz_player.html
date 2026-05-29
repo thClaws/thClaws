@@ -92,6 +92,9 @@ var root = document.getElementById("root");
 var S = {
   questions: Array.isArray(QUIZ.questions) ? QUIZ.questions : [],
   title: QUIZ.title || "StudyQuiz",
+  kms: QUIZ.kms || "",    // when set, offer "save score to KMS"
+  source: QUIZ.source || "",
+  saved: false,           // latch: one save per quiz run
   i: 0, score: 0, results: [], answered: false, lastOk: false,
   selected: -1, inputVal: "",
   match: null,            // {order:[], assign:[], armed:-1}
@@ -321,6 +324,51 @@ function answerText(q) {
   return "";
 }
 
+// ── save score: report the result back to the agent as a chat turn ───────
+// Emits a line-oriented [QUIZ-RESULT] payload the quiz.md prompt knows how to
+// parse and append to the KMS `_scores` page. Only meaningful when a KMS was
+// the source (S.kms set by QuizRender).
+function missedStems() {
+  var out = [];
+  for (var k = 0; k < S.questions.length; k++) {
+    if (S.results[k] === false) out.push(String(S.questions[k].stem).replace(/\s+/g, " "));
+  }
+  return out;
+}
+function resultSummaryText() {
+  var n = S.questions.length;
+  var pct = n ? Math.round(S.score / n * 100) : 0;
+  var lines = [
+    "[QUIZ-RESULT]",
+    "kms: " + S.kms,
+    "title: " + S.title,
+    "source: " + S.source,
+    "score: " + S.score + "/" + n,
+    "percent: " + pct + "%",
+    "missed:",
+  ];
+  var miss = missedStems();
+  if (miss.length === 0) lines.push("- (none)");
+  else miss.forEach(function (m) { lines.push("- " + m); });
+  return lines.join("\n");
+}
+function saveScore() {
+  if (S.saved || !S.kms) return;
+  S.saved = true;
+  // ui/message is handled as a request by the host (it calls respond(id,…)),
+  // so the message must carry a JSON-RPC id. We don't await the reply — the
+  // latch above is the idempotency guard against a double-save.
+  try {
+    parent.postMessage({
+      jsonrpc: "2.0",
+      id: "quiz-save-" + Date.now(),
+      method: "ui/message",
+      params: { content: [{ type: "text", text: resultSummaryText() }] },
+    }, "*");
+  } catch (e) {}
+  render();
+}
+
 function renderResult() {
   var n = S.questions.length;
   var pct = n ? Math.round(S.score / n * 100) : 0;
@@ -337,6 +385,12 @@ function renderResult() {
   var rev = el("button", "btn ghost", "ทบทวนคำตอบ"); rev.onclick = function () { S.review = 0; S.screen = "review"; render(); };
   var again = el("button", "btn", "เริ่มใหม่"); again.onclick = function () { S.i = 0; S.score = 0; S.results = []; S.screen = "question"; startQuestion(); render(); };
   bar.appendChild(rev); bar.appendChild(again);
+  if (S.kms) {
+    var save = el("button", "btn", S.saved ? "บันทึกแล้ว ✓" : "บันทึกคะแนนลงคลังความรู้");
+    save.disabled = S.saved;
+    save.onclick = saveScore;
+    bar.appendChild(save);
+  }
   root.appendChild(bar);
   postSize();
 }

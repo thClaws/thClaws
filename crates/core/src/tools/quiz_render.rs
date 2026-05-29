@@ -155,8 +155,11 @@ fn normalize_questions(raw: Option<&Value>) -> Vec<Value> {
 
 /// Build the self-contained player HTML with the quiz inlined as a safely
 /// escaped JS string literal (defuses `</script>` and U+2028/U+2029 breakouts).
-fn build_player_html(title: &str, questions: &[Value]) -> Result<String> {
-    let quiz = json!({ "title": title, "questions": questions });
+/// `source` is provenance shown on the review/result screen; `kms` (when
+/// non-empty) is the knowledge base the quiz was drawn from — its presence is
+/// what makes the player offer a "save score" button.
+fn build_player_html(title: &str, source: &str, kms: &str, questions: &[Value]) -> Result<String> {
+    let quiz = json!({ "title": title, "source": source, "kms": kms, "questions": questions });
     let inner = serde_json::to_string(&quiz)?; // the quiz JSON text
     let literal = serde_json::to_string(&inner)? // a valid JS string literal
         .replace('<', "\\u003c")
@@ -186,6 +189,7 @@ impl Tool for QuizRenderTool {
             "properties": {
                 "title": { "type": "string", "description": "Short quiz title shown on the result screen." },
                 "source": { "type": "string", "description": "Optional provenance: the URL, file path, or topic the quiz was built from." },
+                "kms": { "type": "string", "description": "Optional knowledge-base name. Set this only for closed-book quizzes drawn from a KMS — it makes the player show a 'save score' button that records the attempt into this KMS's `_scores` page. Omit for URL/file/topic quizzes." },
                 "questions": {
                     "type": "array",
                     "minItems": 1,
@@ -221,6 +225,16 @@ impl Tool for QuizRenderTool {
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "Quiz".to_string());
+        let source = input
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let kms = input
+            .get("kms")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let questions = normalize_questions(input.get("questions"));
         if questions.is_empty() {
@@ -231,7 +245,7 @@ impl Tool for QuizRenderTool {
             ));
         }
 
-        let html = build_player_html(&title, &questions)?;
+        let html = build_player_html(&title, &source, &kms, &questions)?;
         *self.last_html.lock().unwrap() = Some(html);
 
         Ok(format!(
@@ -291,13 +305,48 @@ mod tests {
         let questions = normalize_questions(Some(&json!([
             { "type": "mcq", "stem": "Has a </script> breakout?", "choices": ["yes","no"], "answer": 1, "explanation": "e" }
         ])));
-        let html = build_player_html("T", &questions).unwrap();
+        let html = build_player_html("T", "", "", &questions).unwrap();
         // token fully substituted
         assert!(!html.contains(QUIZ_DATA_TOKEN));
         // the stem text survives (the player will JSON.parse it back)
         assert!(html.contains("\\u003c/script>"));
         // the only literal </script> is the player's own closing tag — the
         // injected one must be escaped, so exactly one remains.
+        assert_eq!(html.matches("</script>").count(), 1);
+    }
+
+    #[test]
+    fn build_html_inlines_kms_and_source() {
+        let questions = normalize_questions(Some(&json!([
+            { "type": "mcq", "stem": "q?", "choices": ["a","b"], "answer": 0 }
+        ])));
+        let html = build_player_html("T", "KMS: bio101", "bio101", &questions).unwrap();
+        // both provenance fields ride into the inlined quiz JSON so the
+        // save-score callback can echo them back to the agent.
+        assert!(html.contains("bio101"));
+        assert!(html.contains("KMS: bio101"));
+    }
+
+    #[test]
+    fn build_html_without_kms_keeps_empty_field() {
+        // absent kms/source -> empty strings, still a valid template (the
+        // player treats empty kms as falsy and shows no save button).
+        let questions = normalize_questions(Some(&json!([
+            { "type": "truefalse", "stem": "q?", "answer": true }
+        ])));
+        let html = build_player_html("T", "", "", &questions).unwrap();
+        assert!(!html.contains(QUIZ_DATA_TOKEN));
+        assert!(html.contains("\\\"kms\\\":\\\"\\\""));
+    }
+
+    #[test]
+    fn kms_and_source_breakouts_are_escaped() {
+        let questions = normalize_questions(Some(&json!([
+            { "type": "mcq", "stem": "q?", "choices": ["a","b"], "answer": 0 }
+        ])));
+        let html = build_player_html("T", "</script>", "</script>", &questions).unwrap();
+        // the new string fields go through the same escaping as the stem, so
+        // the player's closing tag stays the only literal one.
         assert_eq!(html.matches("</script>").count(), 1);
     }
 

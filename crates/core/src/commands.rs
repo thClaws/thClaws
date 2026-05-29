@@ -145,8 +145,13 @@ impl CommandStore {
     /// Seeded AFTER filesystem discovery with `or_insert`, so a project or
     /// user `<name>.md` still overrides the built-in.
     fn seed_builtins(&mut self) {
-        const BUILTINS: &[(&str, &str)] =
-            &[("quiz", include_str!("default_prompts/commands/quiz.md"))];
+        const BUILTINS: &[(&str, &str)] = &[
+            ("quiz", include_str!("default_prompts/commands/quiz.md")),
+            (
+                "quiz-result",
+                include_str!("default_prompts/commands/quiz-result.md"),
+            ),
+        ];
         for (fallback_name, raw) in BUILTINS {
             let def = Self::parse_from_str(
                 fallback_name,
@@ -244,6 +249,24 @@ mod tests {
         assert!(
             q.body.contains("$ARGUMENTS"),
             "quiz body should take $ARGUMENTS"
+        );
+    }
+
+    #[test]
+    fn builtin_quiz_result_is_seeded() {
+        let mut store = CommandStore::default();
+        store.seed_builtins();
+        let q = store
+            .get("quiz-result")
+            .expect("built-in /quiz-result should be seeded");
+        assert_eq!(q.name, "quiz-result");
+        assert!(
+            q.body.contains("_scores"),
+            "quiz-result body should read the _scores log"
+        );
+        assert!(
+            q.body.contains("$ARGUMENTS"),
+            "quiz-result body should take $ARGUMENTS"
         );
     }
 
