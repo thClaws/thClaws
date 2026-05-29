@@ -57,7 +57,11 @@ fn value_to_string(v: &Value) -> String {
 
 fn str_list(v: Option<&Value>) -> Vec<String> {
     v.and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -139,7 +143,9 @@ fn normalize_questions(raw: Option<&Value>) -> Vec<Value> {
                 if pairs.len() < 2 {
                     continue;
                 }
-                out.push(json!({"type":"match","stem":stem,"pairs":pairs,"explanation":explanation}));
+                out.push(
+                    json!({"type":"match","stem":stem,"pairs":pairs,"explanation":explanation}),
+                );
             }
             _ => continue,
         }
@@ -269,8 +275,13 @@ mod tests {
         assert_eq!(types, vec!["mcq", "truefalse", "short", "match"]);
         assert_eq!(out[0]["answer"].as_i64().unwrap(), 0); // clamped
         assert_eq!(out[1]["answer"].as_bool().unwrap(), true); // "true" -> true
-        // short pushes canonical answer into accept
-        let accept: Vec<&str> = out[2]["accept"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+                                                               // short pushes canonical answer into accept
+        let accept: Vec<&str> = out[2]["accept"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
         assert!(accept.contains(&"Paris"));
         assert!(accept.contains(&"paris"));
     }
@@ -303,7 +314,10 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("1 question"));
-        let ui = tool.fetch_ui_resource().await.expect("widget present after call");
+        let ui = tool
+            .fetch_ui_resource()
+            .await
+            .expect("widget present after call");
         assert!(ui.html.contains("closest planet?"));
         assert!(!ui.allow_same_origin);
         assert!(ui.auto_size);

@@ -2117,8 +2117,10 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             );
             // Names already shown as built-ins above (e.g. the seeded `/quiz`)
             // must not be listed a second time as a "Custom" command.
-            let builtin_names: std::collections::HashSet<&str> =
-                crate::repl::built_in_commands().iter().map(|c| c.name).collect();
+            let builtin_names: std::collections::HashSet<&str> = crate::repl::built_in_commands()
+                .iter()
+                .map(|c| c.name)
+                .collect();
             let mut user_names: Vec<&str> = user_cmds.commands.keys().map(String::as_str).collect();
             user_names.sort();
             for name in user_names {
