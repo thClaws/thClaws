@@ -343,6 +343,7 @@ async fn chat_completions_stream(req: ChatRequest) -> Result<Response, Response>
                 }
                 Ok(AgentEvent::IterationStart { .. })
                 | Ok(AgentEvent::Thinking(_))
+                | Ok(AgentEvent::Progress(_))
                 | Ok(AgentEvent::UserMessageInjected { .. }) => {}
                 Err(e) => {
                     // Surface as a content delta so the consumer sees the

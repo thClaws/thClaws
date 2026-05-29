@@ -208,16 +208,24 @@ A normal turn looks like:
 ❯ check if there's a README and show me its first section
 
 [tool: Glob: README*] ✓
-[tool: Read: README.md] ✓
+[tool: Read: README.md] ✓ 0.2s
 The README's first section is "Install" — it walks through…
 [tokens: 2100in/145out · 1.8s]
 ```
 
 - `[tool: Name: detail]` — tool being called with an abbreviated
-  argument preview (first path, command, URL, etc.).
-- Trailing `✓` — tool succeeded.
+  argument preview (first path, command, URL, search query, etc.).
+  Secret-looking values such as tokens, API keys, passwords, and bearer
+  auth headers are redacted before display.
+- Trailing `✓ <duration>` — tool succeeded and shows how long it ran.
 - Trailing `✗ <error>` — tool failed; the model gets the error back
   and may retry with a different approach.
+- Long-running tools emit a low-noise heartbeat after about 10 seconds,
+  then roughly every 30 seconds while still active:
+
+```
+[tool: Bash (cargo test -p thclaws-core)] still running 40s
+```
 
 ## Tool output truncation
 

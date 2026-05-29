@@ -3687,10 +3687,10 @@ async fn drive_turn_stream(
             }
             Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
                 state.last_turn_made_tool_calls = true;
-                let label = format_tool_label(&name, &input);
+                let label = crate::tool_display::tool_label(&name, &input);
                 write_lead_log(
                     &state.lead_log,
-                    &format!("\x1b[0m\n\x1b[90m[tool: {name}]\x1b[0m "),
+                    &format!("\x1b[0m\n\x1b[90m[tool: {label}]\x1b[0m "),
                 );
                 let _ = events_tx.send(ViewEvent::ToolCallStart { name, label, input });
             }
@@ -4089,10 +4089,10 @@ async fn handle_team_messages(
                 let _ = events_tx.send(ViewEvent::UserPrompt(text));
             }
             Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
-                let label = format_tool_label(&name, &input);
+                let label = crate::tool_display::tool_label(&name, &input);
                 write_lead_log(
                     &state.lead_log,
-                    &format!("\x1b[0m\n\x1b[90m[tool: {name}]\x1b[0m "),
+                    &format!("\x1b[0m\n\x1b[90m[tool: {label}]\x1b[0m "),
                 );
                 let _ = events_tx.send(ViewEvent::ToolCallStart { name, label, input });
             }
@@ -4319,14 +4319,6 @@ fn format_provider_model(provider: &str, model: &str) -> String {
     }
 }
 
-fn sanitize_label_field(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Translate the worker's `ViewEvent` into the chat envelope
 /// shape the plan-10 browser SPA expects. Subset of all events —
 /// only the ones that drive the user-visible chat (text deltas,
@@ -4376,72 +4368,6 @@ fn view_event_to_chat_envelope(ev: &ViewEvent) -> Option<serde_json::Value> {
             "text": crate::providers::humanize_provider_error(text),
         })),
         _ => None,
-    }
-}
-
-fn format_tool_label(name: &str, input: &serde_json::Value) -> String {
-    let detail = match name {
-        "Skill" => input
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|n| format!("({n})")),
-        "Task" => input
-            .get("agent")
-            .and_then(|v| v.as_str())
-            .map(|a| format!("(agent={a})")),
-        "Bash" => input.get("command").and_then(|v| v.as_str()).map(|c| {
-            // Same control-char strip as AskUserQuestion — bash
-            // commands often contain heredocs (`<<'PY' ... PY`) whose
-            // newlines break the single-line label.
-            let cleaned = sanitize_label_field(c);
-            let first: String = cleaned.chars().take(40).collect();
-            format!(
-                "({first}{})",
-                if cleaned.chars().count() > 40 {
-                    "…"
-                } else {
-                    ""
-                }
-            )
-        }),
-        "Read" | "Write" | "Edit" => input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|p| format!("({p})")),
-        "Grep" | "Glob" => input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|p| format!("({p})")),
-        "WebFetch" => input
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(|u| format!("({})", u.chars().take(60).collect::<String>())),
-        "WebSearch" => input
-            .get("query")
-            .and_then(|v| v.as_str())
-            .map(|q| format!("({q})")),
-        "AskUserQuestion" => input.get("question").and_then(|v| v.as_str()).map(|q| {
-            // Strip newlines / control chars first — agents often pass
-            // multi-line prompts here, and the raw text breaks the
-            // single-line tool label in xterm.
-            let cleaned = sanitize_label_field(q);
-            let first: String = cleaned.chars().take(60).collect();
-            format!(
-                "({first}{})",
-                if cleaned.chars().count() > 60 {
-                    "..."
-                } else {
-                    ""
-                }
-            )
-        }),
-        _ => None,
-    }
-    .unwrap_or_default();
-    if detail.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} {detail}")
     }
 }
 

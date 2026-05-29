@@ -4599,10 +4599,16 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let _ = mailbox.write_status(agent_name, "working", Some(&msg.id));
                 let mut last_heartbeat = std::time::Instant::now();
                 let turn_start = std::time::Instant::now();
+                let mut team_active_tools: std::collections::HashMap<
+                    String,
+                    crate::tool_display::ActiveToolDisplay,
+                > = std::collections::HashMap::new();
 
                 // Run the agent turn.
                 let mut stream = Box::pin(agent.run_turn(prompt));
                 loop {
+                    let heartbeat_delay =
+                        crate::tool_display::next_heartbeat_delay(&team_active_tools);
                     let ev = tokio::select! {
                         ev = stream.next() => ev,
                         _ = tokio::signal::ctrl_c() => {
@@ -4610,23 +4616,48 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             drop(stream);
                             break;
                         }
+                        _ = tokio::time::sleep(heartbeat_delay) => {
+                            if let Some(id) = crate::tool_display::oldest_due_heartbeat(&team_active_tools).map(|(k, _)| k.clone()) {
+                                if let Some(td) = team_active_tools.get_mut(&id) {
+                                    team_println!("\n{}", crate::tool_display::format_tool_heartbeat(&td.label, td.elapsed()));
+                                    td.last_heartbeat_at = std::time::Instant::now();
+                                }
+                            }
+                            continue;
+                        }
                     };
                     let Some(ev) = ev else { break };
                     match ev {
                         Ok(AgentEvent::Text(s)) => {
                             team_print!("{s}");
-                            // Throttled heartbeat — update every 30s on any output.
                             if last_heartbeat.elapsed().as_secs() >= 30 {
                                 let _ = mailbox.write_status(agent_name, "working", None);
                                 last_heartbeat = std::time::Instant::now();
                             }
                         }
-                        Ok(AgentEvent::ToolCallStart { name, .. }) => {
-                            team_print!("\n[tool: {name}]");
+                        Ok(AgentEvent::ToolCallStart {
+                            id, name, input, ..
+                        }) => {
+                            let label = crate::tool_display::tool_label(&name, &input);
+                            team_active_tools.insert(
+                                id,
+                                crate::tool_display::ActiveToolDisplay::new(label.clone()),
+                            );
+                            team_print!("\n[tool: {label}]");
                         }
-                        Ok(AgentEvent::ToolCallResult { output, .. }) => {
-                            team_println!("{}", if output.is_ok() { " ✓" } else { " ✗" });
-                            // Update heartbeat on tool completion.
+                        Ok(AgentEvent::ToolCallResult { id, output, .. }) => {
+                            let dur = team_active_tools.remove(&id).map(|t| t.elapsed());
+                            let dur_str = dur
+                                .map(|d| format!(" {}", crate::tool_display::format_duration(d)))
+                                .unwrap_or_default();
+                            team_println!(
+                                "{}",
+                                if output.is_ok() {
+                                    format!(" ✓{dur_str}")
+                                } else {
+                                    format!(" ✗{dur_str}")
+                                }
+                            );
                             let _ = mailbox.write_status(agent_name, "working", None);
                             last_heartbeat = std::time::Instant::now();
                         }
@@ -4839,7 +4870,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let _ = std::io::stdout().flush();
                 let mut stream = Box::pin(agent.run_turn(team_prompt));
                 let mut last_was_thinking = false;
+                let mut active_tools: std::collections::HashMap<String, crate::tool_display::ActiveToolDisplay> =
+                    std::collections::HashMap::new();
                 loop {
+                    let heartbeat_delay = crate::tool_display::next_heartbeat_delay(&active_tools);
                     let ev = tokio::select! {
                         ev = stream.next() => ev,
                         _ = tokio::signal::ctrl_c() => {
@@ -4847,6 +4881,18 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled]{COLOR_RESET}\n");
                             drop(stream);
                             break;
+                        }
+                        _ = tokio::time::sleep(heartbeat_delay) => {
+                            if let Some(id) = crate::tool_display::oldest_due_heartbeat(&active_tools).map(|(k, _)| k.clone()) {
+                                if let Some(td) = active_tools.get_mut(&id) {
+                                    let hb = crate::tool_display::format_tool_heartbeat(&td.label, td.elapsed());
+                                    println!("{COLOR_DIM}{hb}{COLOR_RESET}");
+                                    lead_log!("{COLOR_DIM}{hb}{COLOR_RESET}\n");
+                                    let _ = std::io::stdout().flush();
+                                    td.last_heartbeat_at = std::time::Instant::now();
+                                }
+                            }
+                            continue;
                         }
                     };
                     let Some(ev) = ev else { break };
@@ -4861,33 +4907,37 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             let _ = std::io::stdout().flush();
                         }
                         Ok(AgentEvent::Thinking(s)) => {
-                            // Dim-italic so reasoning is visibly distinct from
-                            // the final answer (DeepSeek v4/r1, glm4.7, etc.).
                             print!("\x1b[2;3m{s}\x1b[0m");
                             last_was_thinking = true;
                             let _ = std::io::stdout().flush();
                         }
-                        Ok(AgentEvent::ToolCallStart { name, .. }) => {
-                            // Tool-call line already starts with \n, so any
-                            // prior thinking is naturally separated; clear
-                            // the flag so we don't double-line.
+                        Ok(AgentEvent::ToolCallStart { id, name, input, .. }) => {
                             last_was_thinking = false;
+                            let label = crate::tool_display::tool_label(&name, &input);
+                            active_tools.insert(id, crate::tool_display::ActiveToolDisplay::new(label.clone()));
                             print!(
-                                "{COLOR_RESET}\n{COLOR_DIM}[tool: {name}]{COLOR_RESET}{COLOR_GREEN}"
+                                "{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}{COLOR_GREEN}"
                             );
-                            lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {name}]{COLOR_RESET}");
+                            lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}");
                         }
-                        Ok(AgentEvent::ToolCallResult { output, .. }) => {
+                        Ok(AgentEvent::ToolCallResult { id, output, .. }) => {
+                            let dur = active_tools.remove(&id).map(|t| t.elapsed());
+                            let dur_str = dur
+                                .map(|d| format!(" {}", crate::tool_display::format_duration(d)))
+                                .unwrap_or_default();
                             let mark = if output.is_ok() { "✓" } else { "✗" };
                             let color = if output.is_ok() { COLOR_DIM } else { COLOR_YELLOW };
-                            print!("{color} {mark}{COLOR_RESET}{COLOR_GREEN}");
-                            lead_log!(" {color}{mark}{COLOR_RESET}\n{COLOR_GREEN}");
+                            print!("{color} {mark}{dur_str}{COLOR_RESET}{COLOR_GREEN}");
+                            lead_log!(" {color}{mark}{dur_str}{COLOR_RESET}\n{COLOR_GREEN}");
                         }
-                        Ok(AgentEvent::ToolCallDenied { name, .. }) => {
+                        Ok(AgentEvent::ToolCallDenied { id, name, .. }) => {
+                            let dur_str = active_tools.remove(&id)
+                                .map(|t| format!(" {}", crate::tool_display::format_duration(t.elapsed())))
+                                .unwrap_or_default();
                             print!(
-                                "{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}]{COLOR_RESET}{COLOR_GREEN}"
+                                "{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}{dur_str}]{COLOR_RESET}{COLOR_GREEN}"
                             );
-                            lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}]{COLOR_RESET}\n{COLOR_GREEN}");
+                            lead_log!("{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}{dur_str}]{COLOR_RESET}\n{COLOR_GREEN}");
                         }
                         Ok(AgentEvent::Done { stop_reason, .. }) => {
                             print!("{COLOR_RESET}");
@@ -5035,11 +5085,29 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             continue;
         }
 
+        // Immediate feedback: show spinner right after Enter. Gate on
+        // TTY so piped / headless invocations don't accumulate ANSI
+        // control bytes in their stdout (logs, redirected output, …).
+        use std::io::IsTerminal as _;
+        let early_spinner_shown = if std::io::stdout().is_terminal() {
+            print!(
+                "{}",
+                crate::tool_display::format_thinking_spinner(std::time::Duration::ZERO, 0)
+            );
+            let _ = std::io::stdout().flush();
+            true
+        } else {
+            false
+        };
+
         // `!<cmd>` shell escape — user-initiated shell command, runs
         // through BashTool (sandbox cwd, non-interactive env, etc.)
         // and prints the output. Doesn't touch agent history. Mirrors
         // the GUI handle_line path in shared_session.rs.
         if let Some(cmd) = crate::shell_bang::parse_bang(&line) {
+            if early_spinner_shown {
+                print!("{}", crate::tool_display::clear_thinking_line());
+            }
             println!("{COLOR_DIM}[!] {cmd}{COLOR_RESET}");
             match crate::shell_bang::run_bang_command(cmd).await {
                 Ok(output) => {
@@ -5241,6 +5309,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         }
 
         if let Some(cmd) = parse_slash(&line) {
+            if early_spinner_shown {
+                print!("{}", crate::tool_display::clear_thinking_line());
+                let _ = std::io::stdout().flush();
+            }
             match cmd {
                 SlashCommand::Help => println!("{}", render_help()),
                 SlashCommand::Quit => break,
@@ -8764,23 +8836,73 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         let mut stream = Box::pin(agent.run_turn(line.to_string()));
         let mut _cancelled = false;
         let mut last_was_thinking = false;
+        let mut active_tools: std::collections::HashMap<
+            String,
+            crate::tool_display::ActiveToolDisplay,
+        > = std::collections::HashMap::new();
+        let mut spinner_tick: u32 = 0;
+        let mut is_connecting = true;
+        let mut is_thinking_after_tool = false;
         loop {
+            let anim_delay = if is_connecting || is_thinking_after_tool || !active_tools.is_empty()
+            {
+                crate::tool_display::SPINNER_INTERVAL
+            } else {
+                std::time::Duration::from_secs(300)
+            };
             let ev = tokio::select! {
                 ev = stream.next() => ev,
                 _ = tokio::signal::ctrl_c() => {
+                    print!("{}", crate::tool_display::clear_thinking_line());
                     _cancelled = true;
                     println!("{COLOR_RESET}\n{COLOR_YELLOW}[cancelled by Ctrl-C]{COLOR_RESET}");
                     drop(stream);
                     break;
                 }
+                _ = tokio::time::sleep(anim_delay) => {
+                    spinner_tick += 1;
+                    if is_connecting {
+                        let elapsed = turn_start.elapsed();
+                        print!("{}", crate::tool_display::format_thinking_spinner(elapsed, spinner_tick));
+                        let _ = std::io::stdout().flush();
+                    } else if !active_tools.is_empty() {
+                        if let Some(id) = active_tools.iter().min_by_key(|(_, td)| td.started_at).map(|(k, _)| k.clone()) {
+                            if let Some(td) = active_tools.get_mut(&id) {
+                                print!("{}", crate::tool_display::format_tool_spinner(&td.label, td.elapsed(), spinner_tick));
+                                let _ = std::io::stdout().flush();
+                                td.last_heartbeat_at = std::time::Instant::now();
+                            }
+                        }
+                    } else if is_thinking_after_tool {
+                        let elapsed = turn_start.elapsed();
+                        print!("{}", crate::tool_display::format_thinking_spinner(elapsed, spinner_tick));
+                        let _ = std::io::stdout().flush();
+                    }
+                    continue;
+                }
             };
             let Some(ev) = ev else { break };
+            let is_content_event = matches!(
+                &ev,
+                Ok(AgentEvent::Text(_))
+                    | Ok(AgentEvent::Thinking(_))
+                    | Ok(AgentEvent::ToolCallStart { .. })
+                    | Ok(AgentEvent::ToolCallResult { .. })
+                    | Err(_)
+            );
+            if (is_connecting || is_thinking_after_tool) && is_content_event {
+                if !matches!(&ev, Ok(AgentEvent::ToolCallStart { .. })) {
+                    print!("{}", crate::tool_display::clear_thinking_line());
+                    print!("{COLOR_RESET}");
+                    let _ = std::io::stdout().flush();
+                }
+                is_connecting = false;
+                is_thinking_after_tool = false;
+                spinner_tick = 0;
+            }
             match ev {
                 Ok(AgentEvent::IterationStart { .. }) => {}
                 Ok(AgentEvent::UserMessageInjected { text }) => {
-                    // Mid-turn user message landed at the tool_result
-                    // boundary (issue #106). Surface inline so the
-                    // CLI user sees their steering was applied.
                     println!("\n{COLOR_DIM}[injected mid-turn]{COLOR_RESET} {text}");
                     let _ = std::io::stdout().flush();
                 }
@@ -8790,8 +8912,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         last_was_thinking = false;
                     }
                     print!("{s}");
-                    lead_log!("{s}");
                     let _ = std::io::stdout().flush();
+                    lead_log!("{s}");
                 }
                 Ok(AgentEvent::Thinking(s)) => {
                     // Dim-italic so reasoning is visibly distinct from
@@ -8800,75 +8922,62 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     last_was_thinking = true;
                     let _ = std::io::stdout().flush();
                 }
-                Ok(AgentEvent::ToolCallStart { name, input, .. }) => {
-                    // Tool-call line already starts with \n, so any prior
-                    // thinking is naturally separated; clear the flag.
+                Ok(AgentEvent::ToolCallStart {
+                    id, name, input, ..
+                }) => {
                     last_was_thinking = false;
-                    let detail = match name.as_str() {
-                        "Bash" => input
-                            .get("command")
-                            .and_then(|v| v.as_str())
-                            .map(|c| format!(": {}", c.chars().take(80).collect::<String>())),
-                        "Read" | "Write" | "Edit" => input
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .map(|p| format!(": {p}")),
-                        "Glob" => input
-                            .get("pattern")
-                            .and_then(|v| v.as_str())
-                            .map(|p| format!(": {p}")),
-                        "Grep" => input
-                            .get("pattern")
-                            .and_then(|v| v.as_str())
-                            .map(|p| format!(": {p}")),
-                        "WebFetch" => input
-                            .get("url")
-                            .and_then(|v| v.as_str())
-                            .map(|u| format!(": {}", u.chars().take(60).collect::<String>())),
-                        "WebSearch" => input
-                            .get("query")
-                            .and_then(|v| v.as_str())
-                            .map(|q| format!(": {q}")),
-                        "Skill" => input
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .map(|n| format!(": {n}")),
-                        "Task" => input
-                            .get("agent")
-                            .and_then(|v| v.as_str())
-                            .map(|a| format!(": agent={a}")),
-                        _ => None,
-                    }
-                    .unwrap_or_default();
-                    print!("{COLOR_RESET}\n{COLOR_DIM}[tool: {name}{detail}]{COLOR_RESET}");
-                    lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {name}{detail}]{COLOR_RESET}");
+                    let label = crate::tool_display::tool_label(&name, &input);
+                    active_tools.insert(
+                        id,
+                        crate::tool_display::ActiveToolDisplay::new(label.clone()),
+                    );
+                    print!(
+                        "{}",
+                        crate::tool_display::format_tool_spinner(
+                            &label,
+                            std::time::Duration::ZERO,
+                            0
+                        )
+                    );
+                    lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}");
                     let _ = std::io::stdout().flush();
                 }
-                Ok(AgentEvent::ToolCallResult { name, output, .. }) => {
+                Ok(AgentEvent::ToolCallResult {
+                    id, name, output, ..
+                }) => {
+                    let td = active_tools.remove(&id);
+                    if td.is_none() {
+                        eprintln!("{COLOR_DIM}[tool-display] result for '{name}' (id={id}) has no matching start{COLOR_RESET}");
+                    }
+                    let dur_val = td.as_ref().map(|t| t.elapsed()).unwrap_or_default();
                     match output {
                         Ok(ref body) => {
-                            // M6.38.9: surface the upstream source
-                            // next to the ✓ when the tool emits a
-                            // `Source: <engine>` line. The model can
-                            // drop it from its summary; the indicator
-                            // shows it regardless.
                             let src_suffix = crate::tools::extract_tool_source(body)
+                                .map(|s| crate::tool_display::sanitize_label_field(s))
                                 .map(|s| format!(" {COLOR_DIM}(via {s}){COLOR_RESET}"))
                                 .unwrap_or_default();
-                            print!(" {COLOR_DIM}✓{COLOR_RESET}{src_suffix}");
-                            lead_log!(" {COLOR_DIM}✓{COLOR_RESET}{src_suffix}\n{COLOR_GREEN}");
+                            let label = td.as_ref().map(|t| t.label.as_str()).unwrap_or(&name);
+                            print!(
+                                "{}{src_suffix}",
+                                crate::tool_display::format_tool_done(label, dur_val, false)
+                            );
+                            lead_log!(
+                                " {COLOR_DIM}✓ {}{COLOR_RESET}{src_suffix}\n{COLOR_GREEN}",
+                                crate::tool_display::format_duration(dur_val)
+                            );
                         }
                         Err(ref e) => {
-                            print!(" {COLOR_YELLOW}✗ {e}{COLOR_RESET}");
-                            lead_log!(" {COLOR_YELLOW}✗ {e}{COLOR_RESET}\n{COLOR_GREEN}");
+                            let label = td.as_ref().map(|t| t.label.as_str()).unwrap_or(&name);
+                            print!(
+                                "{}",
+                                crate::tool_display::format_tool_done(label, dur_val, true)
+                            );
+                            lead_log!(
+                                " {COLOR_YELLOW}✗ {} {e}{COLOR_RESET}\n{COLOR_GREEN}",
+                                crate::tool_display::format_duration(dur_val)
+                            );
                         }
                     }
-                    // CLI parity for plan-mode (M5). When a plan tool
-                    // mutates state, render the current plan as a
-                    // coloured ANSI block — analogue of the GUI
-                    // sidebar's live update. Only fires for the four
-                    // plan tools so we don't print a plan block
-                    // after every Read / Bash / Edit.
                     if PLAN_TOOL_NAMES.contains(&name.as_str()) {
                         if let Some(plan) = crate::tools::plan_state::get() {
                             let block = format_plan_for_cli(&plan);
@@ -8876,18 +8985,104 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             lead_log!("{block}");
                         }
                     }
-                    print!("{COLOR_RESET}\n{COLOR_GREEN}");
-                    let _ = std::io::stdout().flush();
-                }
-                Ok(AgentEvent::ToolCallDenied { name, .. }) => {
-                    println!("{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}]{COLOR_RESET}");
-                    lead_log!(
-                        "{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}]{COLOR_RESET}\n{COLOR_GREEN}"
-                    );
+                    if active_tools.is_empty() {
+                        is_thinking_after_tool = true;
+                        spinner_tick = 0;
+                        print!(
+                            "{}",
+                            crate::tool_display::format_thinking_spinner(turn_start.elapsed(), 0)
+                        );
+                    }
                     print!("{COLOR_GREEN}");
                     let _ = std::io::stdout().flush();
                 }
+                Ok(AgentEvent::ToolCallDenied { id, name, .. }) => {
+                    let td = active_tools.remove(&id);
+                    let dur_str = td
+                        .as_ref()
+                        .map(|t| format!(" {}", crate::tool_display::format_duration(t.elapsed())))
+                        .unwrap_or_default();
+                    print!("{}", crate::tool_display::clear_thinking_line());
+                    println!("{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}{dur_str}]{COLOR_RESET}");
+                    lead_log!(
+                        "{COLOR_RESET}\n{COLOR_YELLOW}[denied: {name}{dur_str}]{COLOR_RESET}\n{COLOR_GREEN}"
+                    );
+                    if active_tools.is_empty() {
+                        is_thinking_after_tool = true;
+                        spinner_tick = 0;
+                        print!(
+                            "{}",
+                            crate::tool_display::format_thinking_spinner(turn_start.elapsed(), 0)
+                        );
+                    }
+                    print!("{COLOR_GREEN}");
+                    let _ = std::io::stdout().flush();
+                }
+                Ok(AgentEvent::Progress(kind)) => {
+                    use crate::providers::ProgressKind;
+                    match kind {
+                        ProgressKind::Thinking => {}
+                        ProgressKind::ToolStart { id, label } => {
+                            if is_connecting || is_thinking_after_tool {
+                                is_connecting = false;
+                                is_thinking_after_tool = false;
+                                spinner_tick = 0;
+                            }
+                            active_tools.insert(
+                                id,
+                                crate::tool_display::ActiveToolDisplay::new(label.clone()),
+                            );
+                            print!(
+                                "{}",
+                                crate::tool_display::format_tool_spinner(
+                                    &label,
+                                    std::time::Duration::ZERO,
+                                    0
+                                )
+                            );
+                            lead_log!("{COLOR_RESET}\n{COLOR_DIM}[tool: {label}]{COLOR_RESET}");
+                            let _ = std::io::stdout().flush();
+                        }
+                        ProgressKind::ToolDone {
+                            id,
+                            label,
+                            is_error,
+                        } => {
+                            let td = active_tools.remove(&id);
+                            let dur = td.as_ref().map(|t| t.elapsed()).unwrap_or_default();
+                            print!(
+                                "{}",
+                                crate::tool_display::format_tool_done(&label, dur, is_error)
+                            );
+                            lead_log!(
+                                " {COLOR_DIM}{} {}{COLOR_RESET}\n{COLOR_GREEN}",
+                                if is_error { "✗" } else { "✓" },
+                                crate::tool_display::format_duration(dur)
+                            );
+                            let _ = std::io::stdout().flush();
+                            if active_tools.is_empty() {
+                                is_thinking_after_tool = true;
+                                spinner_tick = 0;
+                                print!(
+                                    "{}",
+                                    crate::tool_display::format_thinking_spinner(
+                                        turn_start.elapsed(),
+                                        0
+                                    )
+                                );
+                                let _ = std::io::stdout().flush();
+                            }
+                            print!("{COLOR_GREEN}");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                }
                 Ok(AgentEvent::Done { stop_reason, usage }) => {
+                    if is_thinking_after_tool || is_connecting {
+                        print!("{}", crate::tool_display::clear_thinking_line());
+                        is_thinking_after_tool = false;
+                        is_connecting = false;
+                    }
                     print!("{COLOR_RESET}");
                     if let Some(reason) = stop_reason {
                         if reason == "max_iterations" {

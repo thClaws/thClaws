@@ -57,7 +57,7 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
             "type": "chat_tool_call",
             "name": strip_ansi(label),
             "tool_name": name,
-            "input": input,
+            "input": crate::tool_display::redact_json_value(input),
         })
         .to_string()],
         ViewEvent::ToolCallResult {
@@ -321,6 +321,7 @@ pub fn strip_ansi(s: &str) -> String {
 #[derive(Default)]
 pub struct TerminalRenderState {
     last_tool_label: Option<String>,
+    last_tool_started_at: Option<std::time::Instant>,
     last_tool_count: u32,
     merging: bool,
     pending_newline_after_tool: bool,
@@ -355,9 +356,11 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
             {
                 state.pending_newline_after_tool = false;
                 state.merging = true;
+                state.last_tool_started_at = Some(std::time::Instant::now());
                 return None;
             }
             state.last_tool_label = Some(label.clone());
+            state.last_tool_started_at = Some(std::time::Instant::now());
             state.last_tool_count = 0;
             state.merging = false;
             state.pending_newline_after_tool = false;
@@ -365,10 +368,16 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
         }
         ViewEvent::ToolCallResult { output, .. } => {
             state.last_was_thinking = false;
+            let duration_suffix = state
+                .last_tool_started_at
+                .take()
+                .map(|t| format!(" {}", crate::tool_display::format_duration(t.elapsed())))
+                .unwrap_or_default();
             // M6.38.9: surface upstream source (e.g. "via Tavily")
             // next to the ✓ when the tool emits a `Source: <engine>`
             // line. Independent of whether the model surfaces it.
             let src_suffix = crate::tools::extract_tool_source(output)
+                .map(|s| crate::tool_display::sanitize_label_field(s))
                 .map(|s| format!(" \x1b[2m(via {s})\x1b[0m"))
                 .unwrap_or_default();
             if state.merging {
@@ -378,12 +387,12 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
                 let label = state.last_tool_label.clone().unwrap_or_default();
                 let count = state.last_tool_count;
                 return Some(format!(
-                    "\r\x1b[2K\x1b[2m[tool: {label}]\x1b[0m \x1b[32m✓\x1b[0m{src_suffix} \x1b[2m×{count}\x1b[0m"
+                    "\r\x1b[2K\x1b[2m[tool: {label}]\x1b[0m \x1b[32m✓{duration_suffix}\x1b[0m{src_suffix} \x1b[2m×{count}\x1b[0m"
                 ));
             }
             state.last_tool_count = 1;
             state.pending_newline_after_tool = true;
-            return Some(format!(" \x1b[32m✓\x1b[0m{src_suffix}"));
+            return Some(format!(" \x1b[32m✓{duration_suffix}\x1b[0m{src_suffix}"));
         }
         _ => {}
     }

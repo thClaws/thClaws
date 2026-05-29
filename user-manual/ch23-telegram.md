@@ -39,8 +39,10 @@ Follow the prompts (pick a name and a username ending in `bot`).
 BotFather replies with a **token** like:
 
 ```
-123456789:AAFmKQk_AbCdEfGhIjKlMnOpQrStUvWxYz
+<your-bot-id>:<token-from-botfather>
 ```
+
+(format: digits, then `:`, then ~35 chars from `[A-Za-z0-9_-]`)
 
 Keep it secret — the token is the bot's full API key.
 

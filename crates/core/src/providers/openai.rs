@@ -429,20 +429,45 @@ impl Provider for OpenAIProvider {
             let mut byte_stream = Box::pin(byte_stream);
             let mut state = ParseState::default();
             let mut raw = raw_dump;
+            let mut last_activity = std::time::Instant::now();
+            let mut idle_total = std::time::Duration::ZERO;
 
             loop {
+                let since = last_activity.elapsed();
+                let threshold = crate::tool_display::THINKING_HEARTBEAT_AFTER;
+                let wait = if since >= threshold {
+                    crate::tool_display::HEARTBEAT_EVERY
+                } else {
+                    threshold - since
+                }
+                .min(chunk_timeout.saturating_sub(idle_total));
+
                 let maybe_chunk = tokio::time::timeout(
-                    chunk_timeout,
+                    wait,
                     byte_stream.next(),
                 )
-                .await
-                .map_err(|_| Error::Provider(format!(
-                    "stream idle for {}s — provider stopped sending; try again",
-                    chunk_timeout.as_secs()
-                )))?;
-                let Some(chunk) = maybe_chunk else { break };
-                let chunk = chunk.map_err(|e| Error::Provider(format!("stream: {e}")))?;
-                buffer.extend_from_slice(&chunk);
+                .await;
+
+                match maybe_chunk {
+                    Err(_) => {
+                        idle_total += wait;
+                        if idle_total >= chunk_timeout {
+                            Err(Error::Provider(format!(
+                                "stream idle for {}s — provider stopped sending; try again",
+                                chunk_timeout.as_secs()
+                            )))?;
+                        }
+                        yield ProviderEvent::Progress(super::ProgressKind::Thinking);
+                        continue;
+                    }
+                    Ok(maybe) => {
+                        let Some(chunk) = maybe else { break };
+                        let chunk = chunk.map_err(|e| Error::Provider(format!("stream: {e}")))?;
+                        buffer.extend_from_slice(&chunk);
+                        last_activity = std::time::Instant::now();
+                        idle_total = std::time::Duration::ZERO;
+                    }
+                }
 
                 while let Some(boundary) = super::find_bytes(&buffer, b"\n\n") {
                     let event_bytes: Vec<u8> = buffer.drain(..boundary + 2).collect();
@@ -1525,6 +1550,7 @@ mod tests {
                 ProviderEvent::ToolUseDelta { .. } => "ToolUseDelta",
                 ProviderEvent::ContentBlockStop => "ContentBlockStop",
                 ProviderEvent::MessageStop { .. } => "MessageStop",
+                ProviderEvent::Progress(_) => "Progress",
             })
             .collect();
         assert_eq!(

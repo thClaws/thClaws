@@ -204,16 +204,24 @@ turn ปกติจะมีหน้าตาแบบนี้:
 ❯ check if there's a README and show me its first section
 
 [tool: Glob: README*] ✓
-[tool: Read: README.md] ✓
+[tool: Read: README.md] ✓ 0.2s
 The README's first section is "Install" — it walks through…
 [tokens: 2100in/145out · 1.8s]
 ```
 
 - `[tool: Name: detail]` — tool ที่ถูกเรียก พร้อมพรีวิว argument
-  แบบย่อ (path แรก, คำสั่ง, URL ฯลฯ)
-- `✓` ต่อท้าย — tool ทำงานสำเร็จ
+  แบบย่อ (path แรก, คำสั่ง, URL, search query ฯลฯ) โดยค่าที่ดูเหมือน
+  secret เช่น token, API key, password และ bearer auth header จะถูก
+  redact ก่อนแสดงผล
+- `✓ <duration>` ต่อท้าย — tool ทำงานสำเร็จ พร้อมเวลาที่ใช้
 - `✗ <error>` ต่อท้าย — tool ล้มเหลว โดยโมเดลจะได้รับ error คืนและอาจ
   ลองใหม่ด้วยวิธีอื่น
+- tool ที่รันนานจะแสดง heartbeat แบบไม่ถี่เกินไป หลังประมาณ 10 วินาที
+  แล้วตามด้วยทุก ๆ ประมาณ 30 วินาทีขณะยังรันอยู่:
+
+```
+[tool: Bash (cargo test -p thclaws-core)] still running 40s
+```
 
 ## การตัด tool output
 

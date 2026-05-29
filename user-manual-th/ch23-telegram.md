@@ -39,8 +39,10 @@ turn ไว้แล้วโพสต์ inline keyboard (**Allow / Always / De
 **token** กลับมาหน้าตาแบบนี้:
 
 ```
-123456789:AAFmKQk_AbCdEfGhIjKlMnOpQrStUvWxYz
+<your-bot-id>:<token-from-botfather>
 ```
+
+(รูปแบบ: ตัวเลข แล้วตามด้วย `:` แล้วตัวอักษรประมาณ 35 ตัวจากชุด `[A-Za-z0-9_-]`)
 
 เก็บเป็นความลับ — token คือ API key เต็มของ bot
 
