@@ -32,8 +32,9 @@ teams.
 | 22 | [Paperclip adapter](ch22-paperclip-adapter.md) |
 | 23 | [Telegram bot](ch23-telegram.md) |
 | 24 | [Facebook Page Messenger bot](ch24-messenger.md) |
+| 25 | [Workflows (`/workflow run`)](ch25-workflows.md) |
 
-> **Part II — Case studies (chapters 25–28)** — applied walkthroughs
+> **Part II — Case studies (chapters 26–29)** — applied walkthroughs
 > for building real projects with thClaws (static sites, Node.js apps,
 > AI agents, deploying to Agentic Press) are in active development and
 > will be added to this manual as each is reviewed and ready.

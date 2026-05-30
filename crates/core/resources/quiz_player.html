@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>StudyQuiz</title>
+<style>
+  :root {
+    --bg: #181826; --card: #262640; --card-hi: #33335a;
+    --text: #f2f2f7; --dim: #a6a6c0; --accent: #7c5cff;
+    --correct: #3ecf8e; --wrong: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Noto Sans Thai", "Sarabun", "Leelawadee UI", "Tahoma", "Segoe UI", sans-serif;
+    font-size: 16px; line-height: 1.5;
+  }
+  #root { max-width: 760px; margin: 0 auto; padding: 20px 18px 28px; }
+  .hdr { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .hdr .label { color: var(--dim); font-size: 0.9em; }
+  .dots { display: flex; gap: 7px; flex-wrap: wrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--card-hi); }
+  .dot.cur { background: var(--accent); }
+  .dot.ok { background: var(--correct); }
+  .dot.bad { background: var(--wrong); }
+  .stem { font-size: 1.15em; font-weight: 600; margin: 6px 0 16px; white-space: pre-wrap; }
+  .choices { display: flex; flex-direction: column; gap: 10px; }
+  .choice {
+    display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+    background: var(--card); color: var(--text); border: 2px solid transparent;
+    border-radius: 12px; padding: 13px 15px; font: inherit; cursor: pointer;
+    transition: background .12s, border-color .12s;
+  }
+  .choice:hover:not(:disabled) { background: var(--card-hi); }
+  .choice:disabled { cursor: default; }
+  .choice .bullet { color: var(--accent); font-weight: 700; flex: 0 0 auto; min-width: 1.2em; }
+  .choice.correct { background: #1f4d3a; border-color: var(--correct); }
+  .choice.wrong { background: #4d2330; border-color: var(--wrong); }
+  .tf-row { display: flex; gap: 12px; }
+  .tf-row .choice { justify-content: center; }
+  input.short {
+    width: 100%; background: #fff; color: #181826; border: 2px solid var(--accent);
+    border-radius: 10px; padding: 12px 14px; font: inherit; outline: none;
+  }
+  .match { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+  .match .col-h { color: var(--dim); font-size: 0.82em; margin-bottom: 2px; }
+  .mitem {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    background: var(--card); color: var(--text); border: 2px solid transparent;
+    border-radius: 10px; padding: 11px 13px; font: inherit; cursor: pointer; min-height: 48px;
+  }
+  .mitem:hover:not(:disabled) { background: var(--card-hi); }
+  .mitem.armed { border-color: var(--accent); background: var(--card-hi); }
+  .mitem.used { background: var(--card-hi); }
+  .mitem.correct { border-color: var(--correct); }
+  .mitem.wrong { border-color: var(--wrong); }
+  .mitem .badge { color: var(--accent); font-weight: 700; min-width: 1.3em; }
+  .hint { color: var(--dim); font-size: 0.82em; margin: 4px 0 10px; }
+  .feedback { margin-top: 16px; padding: 13px 15px; border-radius: 12px; background: var(--card); }
+  .feedback .tag { font-weight: 700; }
+  .feedback .tag.ok { color: var(--correct); }
+  .feedback .tag.bad { color: var(--wrong); }
+  .feedback .exp { color: var(--dim); margin-top: 6px; white-space: pre-wrap; }
+  .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
+  .btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px;
+    padding: 11px 20px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .btn.ghost { background: var(--card-hi); }
+  .btn:disabled { background: #3a3a52; color: var(--dim); cursor: default; }
+  .result { text-align: center; padding: 18px 0; }
+  .result .score { font-size: 2.6em; font-weight: 800; margin: 10px 0 4px; }
+  .result .verdict { font-size: 1.05em; margin-bottom: 18px; }
+  .review-item { background: var(--card); border-radius: 12px; padding: 14px 16px; }
+  .review-item .ra { color: var(--correct); margin-top: 8px; white-space: pre-wrap; }
+  .review-item .exp { color: var(--dim); margin-top: 6px; white-space: pre-wrap; }
+  .title { font-size: 0.9em; color: var(--dim); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+"use strict";
+// Questions are inlined at build time by the QuizRender tool (no network,
+// no MCP). The placeholder below is replaced with a JS string literal of
+// the quiz JSON, so JSON.parse yields the quiz object.
+var QUIZ = JSON.parse(__QUIZ_DATA__);
+
+var root = document.getElementById("root");
+var S = {
+  questions: Array.isArray(QUIZ.questions) ? QUIZ.questions : [],
+  title: QUIZ.title || "StudyQuiz",
+  kms: QUIZ.kms || "",    // when set, offer "save score to KMS"
+  source: QUIZ.source || "",
+  saved: false,           // latch: one save per quiz run
+  i: 0, score: 0, results: [], answered: false, lastOk: false,
+  selected: -1, inputVal: "",
+  match: null,            // {order:[], assign:[], armed:-1}
+  screen: "question",     // question | result | review
+  review: 0,
+};
+
+function normAns(s) {
+  return String(s == null ? "" : s).toLowerCase().trim()
+    .replace(/\s+/g, " ").replace(/[.!?,;:。．、！？]+$/, "");
+}
+function shuffled(n) {
+  var a = []; for (var i = 0; i < n; i++) a.push(i);
+  for (var i = n - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; }
+  return a;
+}
+function curQ() { return S.questions[S.i]; }
+
+function startQuestion() {
+  S.answered = false; S.lastOk = false; S.selected = -1; S.inputVal = "";
+  var q = curQ();
+  if (q && q.type === "match") {
+    var n = q.pairs.length;
+    S.match = { order: shuffled(n), assign: new Array(n).fill(-1), armed: -1 };
+  } else { S.match = null; }
+}
+
+function gradeShort(q, val) {
+  var g = normAns(val); if (!g) return false;
+  var acc = (q.accept || []).slice(); if (q.answer) acc.push(q.answer);
+  if (acc.some(function (a) { return normAns(a) === g; })) return true;
+  var kw = q.keywords || [];
+  if (kw.length && kw.every(function (k) { return g.indexOf(normAns(k)) >= 0; })) return true;
+  return false;
+}
+function evaluate(given) {
+  var q = curQ(), ok = false;
+  if (q.type === "mcq") ok = (given === q.answer);
+  else if (q.type === "truefalse") ok = (given === q.answer);
+  else if (q.type === "short") ok = gradeShort(q, given);
+  else if (q.type === "match") {
+    ok = true;
+    for (var k = 0; k < q.pairs.length; k++) {
+      var pos = S.match.assign[k];
+      if (pos < 0 || S.match.order[pos] !== k) { ok = false; break; }
+    }
+  }
+  S.answered = true; S.lastOk = ok; S.results[S.i] = ok; if (ok) S.score++;
+  render();
+}
+function advance() {
+  if (S.i < S.questions.length - 1) { S.i++; startQuestion(); render(); }
+  else { S.screen = "result"; render(); }
+}
+
+function el(tag, cls, txt) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (txt != null) e.textContent = txt;
+  return e;
+}
+function letter(i) { return String.fromCharCode(65 + i); }
+
+function render() {
+  root.innerHTML = "";
+  if (S.screen === "result") return renderResult();
+  if (S.screen === "review") return renderReview();
+  renderQuestion();
+  postSize();
+}
+
+function header(labelText, reviewMode) {
+  var h = el("div", "hdr");
+  h.appendChild(el("span", "label", labelText));
+  var dots = el("div", "dots");
+  for (var k = 0; k < S.questions.length; k++) {
+    var c = "dot";
+    if (!reviewMode && k === S.i) c += " cur";
+    else if (S.results[k] === true) c += " ok";
+    else if (S.results[k] === false) c += " bad";
+    dots.appendChild(el("span", c));
+  }
+  h.appendChild(dots);
+  return h;
+}
+
+function renderQuestion() {
+  var q = curQ();
+  if (!q) { root.appendChild(el("div", "stem", "ไม่มีคำถาม")); return; }
+  root.appendChild(header("ข้อ " + (S.i + 1) + " / " + S.questions.length, false));
+  root.appendChild(el("div", "stem", q.stem));
+
+  if (q.type === "mcq") renderChoices(q, q.choices, false);
+  else if (q.type === "truefalse") renderChoices(q, ["ถูก (True)", "ผิด (False)"], true);
+  else if (q.type === "short") renderShort(q);
+  else if (q.type === "match") renderMatch(q);
+
+  if (S.answered) renderFeedback(q);
+  renderActions(q);
+}
+
+function renderChoices(q, labels, isTF) {
+  var wrap = el("div", isTF ? "choices" : "choices");
+  if (isTF) wrap.className = "tf-row";
+  var correctIdx = (q.type === "truefalse") ? (q.answer ? 0 : 1) : q.answer;
+  labels.forEach(function (lab, idx) {
+    var b = el("button", "choice");
+    if (S.answered) {
+      b.disabled = true;
+      if (idx === correctIdx) b.className += " correct";
+      else if (idx === S.selected) b.className += " wrong";
+    }
+    if (!isTF) { var bl = el("span", "bullet", letter(idx) + "."); b.appendChild(bl); }
+    b.appendChild(el("span", null, lab));
+    b.onclick = function () {
+      if (S.answered) return;
+      S.selected = idx;
+      evaluate(isTF ? (idx === 0) : idx);
+    };
+    wrap.appendChild(b);
+  });
+  root.appendChild(wrap);
+}
+
+function renderShort(q) {
+  if (S.answered) {
+    var box = el("div", "feedback");
+    box.appendChild(el("div", null, "คำตอบของคุณ: " + (S.inputVal || "—")));
+    box.appendChild(el("div", "ra", "เฉลย: " + q.answer));
+    root.appendChild(box);
+    return;
+  }
+  var inp = el("input", "short");
+  inp.type = "text"; inp.value = S.inputVal;
+  inp.setAttribute("autocomplete", "off");
+  inp.placeholder = "พิมพ์คำตอบแล้วกด Enter";
+  inp.oninput = function () { S.inputVal = inp.value; var btn = document.getElementById("primary"); if (btn) btn.disabled = normAns(inp.value).length === 0; };
+  inp.onkeydown = function (e) { if (e.key === "Enter" && normAns(inp.value).length > 0) { S.inputVal = inp.value; evaluate(inp.value); } };
+  root.appendChild(inp);
+  root.appendChild(el("div", "hint", "พิมพ์คำตอบสั้น ๆ แล้วกด Enter หรือปุ่ม “ส่งคำตอบ”"));
+  setTimeout(function () { try { inp.focus(); } catch (e) {} }, 0);
+}
+
+function renderMatch(q) {
+  root.appendChild(el("div", "hint", "เลือกข้อทางซ้าย → แล้วเลือกตัวอักษรทางขวาเพื่อจับคู่"));
+  var grid = el("div", "match");
+  var lh = el("div", "col-h", "โจทย์"); var rh = el("div", "col-h", "ตัวเลือก");
+  grid.appendChild(lh); grid.appendChild(rh);
+  var n = q.pairs.length;
+  for (var r = 0; r < n; r++) {
+    // left
+    (function (li) {
+      var left = el("button", "mitem");
+      var assignedPos = S.match.assign[li];
+      var badge = el("span", "badge", assignedPos >= 0 ? letter(assignedPos) : "—");
+      left.appendChild(badge);
+      left.appendChild(el("span", null, q.pairs[li][0]));
+      if (S.match.armed === li) left.className += " armed";
+      if (S.answered) {
+        left.disabled = true;
+        var ok = (assignedPos >= 0 && S.match.order[assignedPos] === li);
+        left.className += ok ? " correct" : " wrong";
+      } else {
+        left.onclick = function () { S.match.armed = li; render(); };
+      }
+      grid.appendChild(left);
+    })(r);
+    // right (display position r shows pairs[order[r]][1])
+    (function (ri) {
+      var origin = S.match.order[ri];
+      var right = el("button", "mitem");
+      right.appendChild(el("span", "badge", letter(ri)));
+      right.appendChild(el("span", null, q.pairs[origin][1]));
+      var usedBy = S.match.assign.indexOf(ri);
+      if (usedBy >= 0) right.className += " used";
+      if (S.answered) {
+        right.disabled = true;
+        if (usedBy >= 0) right.className += (origin === usedBy) ? " correct" : " wrong";
+      } else {
+        right.onclick = function () {
+          if (S.match.armed < 0) return;
+          for (var k = 0; k < S.match.assign.length; k++) if (S.match.assign[k] === ri) S.match.assign[k] = -1;
+          S.match.assign[S.match.armed] = ri; S.match.armed = -1; render();
+        };
+      }
+      grid.appendChild(right);
+    })(r);
+  }
+  root.appendChild(grid);
+}
+
+function renderFeedback(q) {
+  var fb = el("div", "feedback");
+  var tag = el("div", "tag " + (S.lastOk ? "ok" : "bad"), S.lastOk ? "✓ ถูกต้อง" : "✗ ยังไม่ถูก");
+  fb.appendChild(tag);
+  if (q.explanation) fb.appendChild(el("div", "exp", q.explanation));
+  root.appendChild(fb);
+}
+
+function renderActions(q) {
+  var bar = el("div", "actions");
+  if (S.answered) {
+    var last = S.i >= S.questions.length - 1;
+    var nxt = el("button", "btn", last ? "ดูผลคะแนน" : "ถัดไป ›");
+    nxt.id = "primary"; nxt.onclick = advance;
+    bar.appendChild(nxt);
+  } else if (q.type === "short") {
+    var sub = el("button", "btn", "ส่งคำตอบ");
+    sub.id = "primary"; sub.disabled = normAns(S.inputVal).length === 0;
+    sub.onclick = function () { if (normAns(S.inputVal).length > 0) evaluate(S.inputVal); };
+    bar.appendChild(sub);
+  } else if (q.type === "match") {
+    var allAssigned = S.match.assign.every(function (p) { return p >= 0; });
+    var chk = el("button", "btn", "ตรวจคำตอบ");
+    chk.id = "primary"; chk.disabled = !allAssigned;
+    chk.onclick = function () { if (S.match.assign.every(function (p) { return p >= 0; })) evaluate(null); };
+    bar.appendChild(chk);
+  }
+  root.appendChild(bar);
+}
+
+function answerText(q) {
+  if (q.type === "mcq") return q.choices[q.answer];
+  if (q.type === "truefalse") return q.answer ? "ถูก (True)" : "ผิด (False)";
+  if (q.type === "short") return q.answer;
+  if (q.type === "match") return q.pairs.map(function (p) { return p[0] + " → " + p[1]; }).join("\n");
+  return "";
+}
+
+// ── save score: report the result back to the agent as a chat turn ───────
+// Emits a line-oriented [QUIZ-RESULT] payload the quiz.md prompt knows how to
+// parse and append to the KMS `_scores` page. Only meaningful when a KMS was
+// the source (S.kms set by QuizRender).
+function missedStems() {
+  var out = [];
+  for (var k = 0; k < S.questions.length; k++) {
+    if (S.results[k] === false) out.push(String(S.questions[k].stem).replace(/\s+/g, " "));
+  }
+  return out;
+}
+function resultSummaryText() {
+  var n = S.questions.length;
+  var pct = n ? Math.round(S.score / n * 100) : 0;
+  var lines = [
+    "[QUIZ-RESULT]",
+    "kms: " + S.kms,
+    "title: " + S.title,
+    "source: " + S.source,
+    "score: " + S.score + "/" + n,
+    "percent: " + pct + "%",
+    "missed:",
+  ];
+  var miss = missedStems();
+  if (miss.length === 0) lines.push("- (none)");
+  else miss.forEach(function (m) { lines.push("- " + m); });
+  return lines.join("\n");
+}
+function saveScore() {
+  if (S.saved || !S.kms) return;
+  S.saved = true;
+  // ui/message is handled as a request by the host (it calls respond(id,…)),
+  // so the message must carry a JSON-RPC id. We don't await the reply — the
+  // latch above is the idempotency guard against a double-save.
+  try {
+    parent.postMessage({
+      jsonrpc: "2.0",
+      id: "quiz-save-" + Date.now(),
+      method: "ui/message",
+      params: { content: [{ type: "text", text: resultSummaryText() }] },
+    }, "*");
+  } catch (e) {}
+  render();
+}
+
+function renderResult() {
+  var n = S.questions.length;
+  var pct = n ? Math.round(S.score / n * 100) : 0;
+  if (S.title) root.appendChild(el("div", "title", S.title));
+  var box = el("div", "result");
+  box.appendChild(el("div", "label", "สรุปผล"));
+  box.appendChild(el("div", "score", S.score + " / " + n));
+  var verdict = pct >= 80 ? "ยอดเยี่ยม! 🎉" : (pct >= 50 ? "ดีแล้ว ลองทบทวนเพิ่ม" : "ลองทบทวนแล้วทำใหม่นะ");
+  var vc = el("div", "verdict", pct + "%  ·  " + verdict);
+  vc.style.color = pct >= 80 ? "var(--correct)" : (pct >= 50 ? "var(--accent)" : "var(--wrong)");
+  box.appendChild(vc);
+  root.appendChild(box);
+  var bar = el("div", "actions"); bar.style.justifyContent = "center";
+  var rev = el("button", "btn ghost", "ทบทวนคำตอบ"); rev.onclick = function () { S.review = 0; S.screen = "review"; render(); };
+  var again = el("button", "btn", "เริ่มใหม่"); again.onclick = function () { S.i = 0; S.score = 0; S.results = []; S.screen = "question"; startQuestion(); render(); };
+  bar.appendChild(rev); bar.appendChild(again);
+  if (S.kms) {
+    var save = el("button", "btn", S.saved ? "บันทึกแล้ว ✓" : "บันทึกคะแนนลงคลังความรู้");
+    save.disabled = S.saved;
+    save.onclick = saveScore;
+    bar.appendChild(save);
+  }
+  root.appendChild(bar);
+  postSize();
+}
+
+function renderReview() {
+  var q = S.questions[S.review];
+  root.appendChild(header("ทบทวน " + (S.review + 1) + " / " + S.questions.length, true));
+  var ok = S.results[S.review];
+  var tag = el("div", "tag " + (ok ? "ok" : "bad"), ok ? "✓ ตอบถูก" : "✗ ตอบผิด");
+  tag.style.fontWeight = "700"; tag.style.color = ok ? "var(--correct)" : "var(--wrong)";
+  root.appendChild(tag);
+  root.appendChild(el("div", "stem", q.stem));
+  var item = el("div", "review-item");
+  item.appendChild(el("div", "ra", "เฉลย: " + answerText(q)));
+  if (q.explanation) item.appendChild(el("div", "exp", q.explanation));
+  root.appendChild(item);
+  var bar = el("div", "actions");
+  var prev = el("button", "btn ghost", "‹ ก่อนหน้า"); prev.disabled = S.review <= 0; prev.onclick = function () { if (S.review > 0) { S.review--; render(); } };
+  var back = el("button", "btn ghost", "กลับ"); back.onclick = function () { S.screen = "result"; render(); };
+  var next = el("button", "btn ghost", "ถัดไป ›"); next.disabled = S.review >= S.questions.length - 1; next.onclick = function () { if (S.review < S.questions.length - 1) { S.review++; render(); } };
+  bar.appendChild(prev); bar.appendChild(back); bar.appendChild(next);
+  root.appendChild(bar);
+  postSize();
+}
+
+// ── auto-size: tell the host iframe how tall we are ────────────────────
+function postSize() {
+  requestAnimationFrame(function () {
+    var h = Math.ceil(document.documentElement.scrollHeight || document.body.scrollHeight || 0);
+    try {
+      parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: h } }, "*");
+    } catch (e) {}
+  });
+}
+if (window.ResizeObserver) {
+  try { new ResizeObserver(function () { postSize(); }).observe(document.body); } catch (e) {}
+}
+window.addEventListener("load", postSize);
+
+// ── boot ───────────────────────────────────────────────────────────────
+if (S.questions.length === 0) {
+  root.appendChild(el("div", "stem", "ไม่พบคำถาม (quiz ว่าง)"));
+  postSize();
+} else {
+  startQuestion();
+  render();
+}
+</script>
+</body>
+</html>

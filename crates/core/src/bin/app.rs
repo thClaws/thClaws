@@ -5,6 +5,7 @@
 //! `--print`: non-interactive single-prompt mode (implies --cli).
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use thclaws_core::config::AppConfig;
 use thclaws_core::dotenv::load_dotenv;
 use thclaws_core::repl::{run_print_mode, run_repl};
@@ -147,6 +148,16 @@ struct Cli {
     /// dev-plan/31.
     #[arg(long)]
     messenger: bool,
+
+    /// Run a pre-authored workflow script headlessly (dev-plan/32
+    /// Stage L). Skips the `/workflow run` author + review phase
+    /// entirely — the file is expected to be vetted by the operator.
+    /// Pair with --resume <id> to continue an interrupted run.
+    /// Writes the workflow id + done-summary to stderr; the script's
+    /// final value goes to stdout. Exit 0 on success, 1 on script
+    /// failure.
+    #[arg(long, value_name = "FILE")]
+    workflow: Option<PathBuf>,
 
     /// Prompt (positional args joined with spaces)
     prompt: Vec<String>,
@@ -355,7 +366,7 @@ fn respawn_detached_for_gui_if_needed(cli: &Cli) {
     // Only respawn when the dispatch is actually GUI: not --cli/--print/
     // --telegram/--messenger, and either plain GUI (no --serve) or the
     // --serve --gui combo.
-    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger;
+    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger || cli.workflow.is_some();
     let is_gui_dispatch = !use_cli && (!cli.serve || cli.gui);
     if !is_gui_dispatch {
         return;
@@ -469,7 +480,7 @@ async fn main() {
         None => {}
     }
 
-    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger;
+    let use_cli = cli.cli || cli.print || cli.telegram || cli.messenger || cli.workflow.is_some();
 
     // Issue #109: on Windows, respawn detached so cmd.exe / PowerShell
     // return the prompt instead of waiting on the GUI window. Runs
@@ -646,7 +657,18 @@ async fn main() {
         std::env::set_var("THCLAWS_TEAM_DIR", team_dir);
     }
 
-    if cli.telegram {
+    if let Some(script_path) = cli.workflow {
+        // Headless workflow — pre-authored JS file, no review phase.
+        // dev-plan/32 Stage L. --resume <id> combines with --workflow
+        // to replay completed workers from state.jsonl.
+        match thclaws_core::workflow::headless::run(config, script_path, cli.resume.clone()).await {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("\n\x1b[31m[workflow] error: {e}\x1b[0m");
+                std::process::exit(1);
+            }
+        }
+    } else if cli.telegram {
         // Headless Telegram bot — its own agent loop (the GUI worker is
         // gui-gated). Runs until Ctrl-C. dev-plan/29 Tier 1.
         if let Err(e) = thclaws_core::telegram::headless::run(config).await {

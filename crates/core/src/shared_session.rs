@@ -269,6 +269,19 @@ pub enum ViewEvent {
         ui_resource: Option<crate::tools::UiResource>,
     },
     SlashOutput(String),
+    /// dev-plan/32 Tier 3 GUI approval. Fired by `/workflow run`
+    /// from the chat surface — the frontend renders a review bubble
+    /// with the script + Approve / Cancel / Re-author buttons. Each
+    /// button click posts back a `workflow_decision` IPC message
+    /// carrying this `id`, which the IPC handler routes to the
+    /// `WorkflowApprover` waiting on the matching oneshot.
+    WorkflowReviewRequest {
+        id: String,
+        prompt: String,
+        script: String,
+        model: String,
+        revision: u32,
+    },
     TurnDone,
     HistoryReplaced(Vec<DisplayMessage>),
     SessionListRefresh(String),
@@ -560,6 +573,11 @@ pub struct SharedSessionHandle {
     /// construction so a queue submission survives a session reload
     /// or cwd change.
     pub injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// dev-plan/32 Tier 3 workflow approver, shared between the
+    /// shared-session worker (`WorkerState.workflow_approver`) and
+    /// the IPC dispatch (`IpcContext.workflow_approver`) so both
+    /// reach the same pending-request map.
+    pub workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
 }
 
 impl SharedSessionHandle {
@@ -592,6 +610,11 @@ pub struct WorkerState {
     /// UI (GUI modal vs REPL prompt) without silently falling back to
     /// AutoApprover.
     pub approver: std::sync::Arc<dyn crate::permissions::ApprovalSink>,
+    /// dev-plan/32 Tier 3: chat-surface `/workflow run` posts a
+    /// review request and awaits the user's button click here. The
+    /// IPC handler resolves pending requests via `resolve()` when the
+    /// frontend posts back a `workflow_decision` message.
+    pub workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
     /// Shared handle into the SkillTool's internal store. `/skill
     /// install` replaces the store contents through this handle so a
     /// fresh skill is callable in the same session without restart.
@@ -1060,12 +1083,14 @@ pub fn spawn_with_approver(
     // layer (push) and the agent inside the worker (drain).
     let injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let workflow_approver = crate::workflow::WorkflowApprover::new();
 
     let events_tx_for_thread = events_tx.clone();
     let cancel_for_thread = cancel.clone();
     let input_tx_for_poller = input_tx.clone();
     let gate_for_thread = ready_gate.clone();
     let injection_queue_for_worker = injection_queue.clone();
+    let workflow_approver_for_worker = workflow_approver.clone();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -1077,6 +1102,7 @@ pub fn spawn_with_approver(
                 approver,
                 gate_for_thread,
                 injection_queue_for_worker,
+                workflow_approver_for_worker,
             ));
         }));
         if let Err(payload) = result {
@@ -1098,6 +1124,7 @@ pub fn spawn_with_approver(
         cancel,
         ready_gate,
         injection_queue,
+        workflow_approver,
     }
 }
 
@@ -1156,6 +1183,7 @@ async fn run_worker(
     approver: std::sync::Arc<dyn crate::permissions::ApprovalSink>,
     ready_gate: Arc<ReadyGate>,
     injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = AppConfig::load().unwrap_or_default();
@@ -1674,6 +1702,7 @@ async fn run_worker(
         system_prompt: system,
         cwd,
         approver,
+        workflow_approver,
         skill_store,
         mcp_clients,
         warned_file_size: false,
@@ -3215,6 +3244,34 @@ async fn handle_line(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return;
+    }
+
+    // dev-plan/32 Tier 3 Terminal-tab text approval. When a workflow
+    // review is open and the user typed an approval response, resolve
+    // it without forwarding to the agent. Non-matching text emits a
+    // hint so users on the Terminal tab don't accidentally lose their
+    // chat input to the void while the review is blocking.
+    {
+        let pending = state.workflow_approver.pending_ids();
+        if !pending.is_empty() {
+            match crate::workflow::parse_chat_decision(trimmed) {
+                Some(decision) => {
+                    // Resolve the most-recently-registered review.
+                    // Typically there's only one open at a time.
+                    let id = pending.into_iter().next_back().unwrap();
+                    state.workflow_approver.resolve(&id, decision);
+                    return;
+                }
+                None => {
+                    let _ = events_tx.send(ViewEvent::SlashOutput(
+                        "workflow review pending — type `approve`, `cancel`, or \
+                         `rework: <note>` (or click in the Chat tab)"
+                            .to_string(),
+                    ));
+                    return;
+                }
+            }
+        }
     }
 
     let _ = events_tx.send(ViewEvent::UserPrompt(trimmed.to_string()));

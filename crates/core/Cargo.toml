@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -147,6 +147,18 @@ image = "0.24"
 # zbus on Linux, WinRT on Windows). Behind a feature flag so headless CI
 # builds and the GUI-only path can opt out without pulling in BLE stacks.
 btleplug = { version = "0.11", optional = true }
+
+# Embedded JS engine for the `/workflow` slash command (dev-plan/32 —
+# code-driven subagent fan-out). Pure-Rust, no V8 dep; we attach only
+# the `thclaws.*` host bindings and strip `eval` / `Function` so scripts
+# can't escape the sandbox. MSRV bumps to 1.88 because of this.
+boa_engine = "0.21"
+
+# JSON Schema validation for workflow worker outputs (dev-plan/32
+# Stage H). Default features pull in TLS for HTTP $ref resolution
+# which workflow schemas don't need — strip them; we only validate
+# in-process against an inline schema object.
+jsonschema = { version = "0.46", default-features = false }
 
 [features]
 # `cost_bridge` is OPT-IN, not default: it starts a BLE scan on launch

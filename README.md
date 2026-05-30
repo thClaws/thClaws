@@ -21,6 +21,38 @@ A native-Rust AI agent workspace that codes, automates, remembers, and coordinat
 
 ---
 
+## ✨ New in v0.23 — dynamic workflows
+
+**LLM writes the code. Boa runs the workers.**
+
+`/workflow run <prompt>` lets the model author a small JavaScript orchestration script that fans your task out across as many parallel subagents as it needs. You review the script before it executes — then thClaws runs it deterministically inside a sandboxed Boa engine. Cancel, resume, set time/token budgets, validate worker output against a JSON schema, all from one line.
+
+<div align="center">
+
+<a href="https://thclaws.ai/#dynamic-workflows"><img src="docs/img/dynamic-workflow-thumb.jpg" alt="thClaws v0.23 — dynamic workflows demo (opens autoplay on thclaws.ai)" width="900" /></a>
+
+*Click to watch on thclaws.ai · 20s demo · `/workflow run summarize each .rs file under thclaws/crates/core/src in one line` → LLM authors JS → you approve → Boa fans out across subagents.*
+
+</div>
+
+```js
+// llm wrote this
+const files = await thclaws.subagent({
+  prompt: "list all .ts files in src/",
+});
+const list = files.split("\n");
+
+const reviews = await Promise.all(
+  list.map(f => thclaws.subagent({
+    prompt: `review ${f}`,
+  }))
+);
+```
+
+Read the chapter → [user-manual/ch25-workflows.md](user-manual/ch25-workflows.md) · or jump straight in with `/workflow run "<your task>"`.
+
+---
+
 ## See it work
 
 Three tabs, one binary — captured from a live thClaws session looking at its own source.

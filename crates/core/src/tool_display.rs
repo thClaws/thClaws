@@ -290,6 +290,31 @@ pub(crate) fn clear_thinking_line() -> String {
     "\r\x1b[2K".to_string()
 }
 
+/// Workflow worker progress (dev-plan/32 Stage E). Printed by the
+/// `thclaws.subagent` host function just before the blocking
+/// `tool.call(input)` so the user sees which worker is currently
+/// running. No newline — the matching `format_worker_done` overwrites
+/// this line on completion.
+pub(crate) fn format_worker_start(worker_id: u32, prompt_preview: &str) -> String {
+    let label = truncate(&sanitize_label_field(prompt_preview), 60);
+    format!("\r\x1b[2K\x1b[2m  ⠋ w{worker_id}  {label}\x1b[0m")
+}
+
+/// Worker completion line. Overwrites the matching start line via
+/// `\r\x1b[2K` and terminates with `\n` so the next worker gets a fresh
+/// line.
+pub(crate) fn format_worker_done(
+    worker_id: u32,
+    prompt_preview: &str,
+    elapsed: Duration,
+    is_error: bool,
+) -> String {
+    let icon = if is_error { '✗' } else { '✓' };
+    let dur = format_duration(elapsed);
+    let label = truncate(&sanitize_label_field(prompt_preview), 60);
+    format!("\r\x1b[2K\x1b[2m  {icon} w{worker_id}  {label}  {dur}\x1b[0m\n")
+}
+
 // ── active tool state ──────────────────────────────────────────────
 
 /// Tracks a tool call in progress for heartbeat and duration reporting.

@@ -8,6 +8,7 @@ import { useTheme } from "../hooks/useTheme";
 import { useVersion } from "../hooks/useVersion";
 import logoDark from "../assets/thClaws-logo-dark.png";
 import logoLight from "../assets/thClaws-logo-light.png";
+import { WorkflowReviewBubble } from "./WorkflowReviewBubble";
 import {
   SlashCommandPopup,
   filterCommands,
@@ -16,8 +17,18 @@ import {
 import { McpAppIframe } from "./McpAppIframe";
 
 type ChatMessage = {
-  role: "user" | "assistant" | "tool" | "system" | "error";
+  role: "user" | "assistant" | "tool" | "system" | "error" | "workflow_review";
   content: string;
+  /// `workflow_review` messages only — dev-plan/32 Tier 3 GUI
+  /// approval. Carries the script + id the WorkflowReviewBubble
+  /// posts back when the user clicks Approve / Cancel / Re-author.
+  workflowReview?: {
+    id: string;
+    script: string;
+    prompt: string;
+    model: string;
+    revision: number;
+  };
   /// `assistant` messages only — accumulated `reasoning_content` from
   /// thinking models (DeepSeek v4/r1, OpenAI o-series, NVIDIA NIM
   /// glm4.7, etc.). Rendered as a collapsible dimmed block above the
@@ -501,6 +512,36 @@ export function ChatView({ active, modalOpen }: Props) {
             { role: "system", content: msg.text as string },
           ]);
           break;
+        case "chat_workflow_review": {
+          // dev-plan/32 Tier 3: spawn a review bubble. We replace any
+          // earlier review bubble for the same id (re-author cycle
+          // emits a fresh `WorkflowReviewRequest` with revision + 1)
+          // so the user sees the latest revision in place rather
+          // than a growing stack.
+          const id = typeof msg.id === "string" ? msg.id : "";
+          const script = typeof msg.script === "string" ? msg.script : "";
+          const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
+          const model = typeof msg.model === "string" ? msg.model : "?";
+          const revision = typeof msg.revision === "number" ? msg.revision : 0;
+          if (!id) break;
+          setMessages((prev) => {
+            const existing = prev.findIndex(
+              (m) => m.role === "workflow_review" && m.workflowReview?.id === id,
+            );
+            const next: ChatMessage = {
+              role: "workflow_review",
+              content: "",
+              workflowReview: { id, script, prompt, model, revision },
+            };
+            if (existing >= 0) {
+              const out = prev.slice();
+              out[existing] = next;
+              return out;
+            }
+            return [...prev, next];
+          });
+          break;
+        }
         case "chat_skill_model_note":
           // Skill-recommended-model swap or fallback. Renders as the
           // same muted system bubble as slash output — terse, in-line
@@ -749,7 +790,17 @@ export function ChatView({ active, modalOpen }: Props) {
     // Don't optimistically add the user bubble — the backend will echo
     // a `chat_user_message` back to us (it does so for both tabs). This
     // keeps a single source of truth about what's in the conversation.
-    if (!text.startsWith("/")) {
+    //
+    // `/workflow run` and `/workflow resume` are the slash commands
+    // that do genuinely long-running work (author + review + execute /
+    // replay + execute), so flip streaming on for them too — otherwise
+    // the Stop button (visible only while `streaming === true`) stays
+    // hidden during the workflow lifecycle. The backend emits TurnDone
+    // at the end of the workflow, which restores `streaming = false`
+    // via the chat_done handler.
+    const isLongRunningSlash =
+      text.startsWith("/workflow run") || text.startsWith("/workflow resume");
+    if (!text.startsWith("/") || isLongRunningSlash) {
       setStreaming(true);
       // Arm the cold-start indicator: if no text/thinking delta has
       // arrived 5s after submit, surface a "Waiting…" hint so the user
@@ -879,6 +930,22 @@ export function ChatView({ active, modalOpen }: Props) {
           // ✓ done) rather than a full bubble — the chat tab is for
           // the user↔assistant conversation; raw tool output lives on
           // the Terminal tab.
+          // dev-plan/32 Tier 3 workflow review bubble. Renders a
+          // dedicated card with Approve / Cancel / Re-author buttons;
+          // each click posts a `workflow_decision` back through IPC.
+          if (msg.role === "workflow_review" && msg.workflowReview) {
+            const wr = msg.workflowReview;
+            return (
+              <WorkflowReviewBubble
+                key={`${i}-${wr.id}-${wr.revision}`}
+                id={wr.id}
+                script={wr.script}
+                prompt={wr.prompt}
+                model={wr.model}
+                revision={wr.revision}
+              />
+            );
+          }
           if (msg.role === "tool") {
             const glyph = msg.toolDone ? "✓" : "▸";
             const copied = copiedMessageIndex === i;

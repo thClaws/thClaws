@@ -449,6 +449,7 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
             // hook needed unless we want to persist the scale across
             // sessions. Defer.
         }),
+        workflow_approver: state.shared.workflow_approver.clone(),
     };
 
     // Ask-user broadcast subscription (issue #82). Each WS connection

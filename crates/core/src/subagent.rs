@@ -321,6 +321,14 @@ impl Tool for SubAgentTool {
         // subagent stream ran to completion regardless of ctrl-C.
         let outcome = collect_agent_turn_with_cancel(stream, self.cancel.clone()).await?;
 
+        // dev-plan/32 Stage I: push this turn's Usage to the workflow
+        // usage sink if one is active on this thread. No-op outside
+        // `/workflow run` — model-driven Task calls and tests stay
+        // unaffected.
+        if let Some(u) = outcome.usage.as_ref() {
+            crate::workflow::push_worker_usage(u.clone());
+        }
+
         if outcome.text.is_empty() {
             Err(Error::Agent("sub-agent returned empty response".into()))
         } else {

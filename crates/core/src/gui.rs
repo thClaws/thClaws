@@ -837,6 +837,7 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                     on_quit,
                     on_send_initial_state,
                     on_zoom,
+                    workflow_approver: shared_for_ipc.workflow_approver.clone(),
                 };
                 if crate::ipc::handle_ipc(msg.clone(), &ipc_ctx) {
                     return;
@@ -1015,6 +1016,36 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
                             images: attachments,
                         });
                     } else if !trimmed.is_empty() {
+                        // dev-plan/32 Tier 3 Terminal-tab approval
+                        // intercept (mirrors crate::ipc::handle_ipc).
+                        // The worker loop is blocked on the workflow
+                        // approver oneshot, so typed approvals queued
+                        // through input_tx wait forever. Resolve at
+                        // the IPC boundary instead.
+                        let pending = shared_for_ipc.workflow_approver.pending_ids();
+                        if !pending.is_empty() {
+                            match crate::workflow::parse_chat_decision(trimmed) {
+                                Some(decision) => {
+                                    if let Some(id) = pending.into_iter().next_back() {
+                                        shared_for_ipc
+                                            .workflow_approver
+                                            .resolve(&id, decision);
+                                    }
+                                    return;
+                                }
+                                None => {
+                                    let _ = shared_for_ipc.events_tx.send(
+                                        crate::shared_session::ViewEvent::SlashOutput(
+                                            "workflow review pending — type \
+                                             `approve`, `cancel`, or `rework: <note>` \
+                                             (or click in the Chat tab)"
+                                                .to_string(),
+                                        ),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
                         let _ = shared_for_ipc
                             .input_tx
                             .send(ShellInput::Line(trimmed.to_string()));

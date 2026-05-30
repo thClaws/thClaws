@@ -86,6 +86,21 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
             "text": strip_ansi(text),
         })
         .to_string()],
+        ViewEvent::WorkflowReviewRequest {
+            id,
+            prompt,
+            script,
+            model,
+            revision,
+        } => vec![serde_json::json!({
+            "type": "chat_workflow_review",
+            "id": id,
+            "prompt": prompt,
+            "script": script,
+            "model": model,
+            "revision": revision,
+        })
+        .to_string()],
         ViewEvent::TurnDone => vec![serde_json::json!({"type": "chat_done"}).to_string()],
         ViewEvent::HistoryReplaced(messages) => {
             let arr: Vec<serde_json::Value> = messages
@@ -427,6 +442,29 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
         ViewEvent::SlashOutput(text) => {
             let body = text.replace('\n', "\r\n");
             Some(format!("\x1b[2m{body}\x1b[0m\r\n"))
+        }
+        ViewEvent::WorkflowReviewRequest {
+            id,
+            script,
+            revision,
+            ..
+        } => {
+            // Terminal-tab review banner. Accepts typed decisions
+            // (`approve` / `cancel` / `rework: <note>`) via the
+            // shared chat input, mirroring `--cli` REPL behaviour, or
+            // a button click in the Chat tab. Both paths resolve the
+            // same WorkflowApprover oneshot.
+            let body = script.replace('\n', "\r\n");
+            let rev_tag = if *revision > 0 {
+                format!(" (revision {})", *revision + 1)
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "\x1b[2m── workflow review {id}{rev_tag} ──\r\n{body}\r\n── \
+                 type [a]pprove · [c]ancel · [r] <note> (re-author)   \
+                 or click in Chat tab ──\x1b[0m\r\n"
+            ))
         }
         ViewEvent::TurnDone => None,
         ViewEvent::HistoryReplaced(messages) => {

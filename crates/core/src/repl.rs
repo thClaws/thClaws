@@ -33,6 +33,21 @@ const COLOR_RED: &str = "\x1b[31m";
 
 const REPL_PROMPT: &str = "❯ ";
 
+/// Compact display of a token count: <1k as raw, 1k–9.9k as `X.Yk`,
+/// 10k+ as `XXk`, 1M+ as `X.YM`. Used in the workflow run summary
+/// (dev-plan/32 Stage I).
+fn format_token_count(n: u64) -> String {
+    if n < 1_000 {
+        format!("{n}")
+    } else if n < 10_000 {
+        format!("{:.1}k", (n as f64) / 1_000.0)
+    } else if n < 1_000_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        format!("{:.1}M", (n as f64) / 1_000_000.0)
+    }
+}
+
 fn readline_config() -> rustyline::Config {
     let builder = rustyline::Config::builder();
     #[cfg(windows)]
@@ -684,6 +699,26 @@ pub enum SlashCommand {
         allow_stdio_mcp: bool,
         restart: bool,
     },
+    /// dev-plan/32 Stage B: author + run a deterministic workflow
+    /// script for the given goal. The model writes a JS file using the
+    /// `thclaws.*` API; the REPL shows it for review; on approve, Boa
+    /// executes it and prints the script's final value. The arg is the
+    /// raw user goal — everything after `/workflow run`.
+    WorkflowRun(String),
+    /// dev-plan/32 Stage F: list every workflow under
+    /// `.thclaws/workflows/`, newest first, with worker counts +
+    /// terminal status.
+    WorkflowList,
+    /// dev-plan/32 Stage F: dump one workflow's state.jsonl event
+    /// stream in human form. The arg is an id or a unique prefix.
+    WorkflowInspect(String),
+    /// dev-plan/32 Stage F: delete a workflow's directory after a
+    /// y/N confirm. The arg is an id or a unique prefix.
+    WorkflowRm(String),
+    /// dev-plan/32 Stage K: re-run an interrupted workflow against
+    /// its persisted script. Completed workers come from state.jsonl;
+    /// only the calls past the resume point spawn fresh.
+    WorkflowResume(String),
     Unknown(String),
 }
 
@@ -818,6 +853,55 @@ fn parse_plugin_subcommand(cmd: &str, args: &str) -> SlashCommand {
 /// Bare `/schedule` lists. `add` is intentionally not supported as a
 /// slash command — multi-line prompt + cron + flags doesn't fit a
 /// REPL line cleanly; users go to `thclaws schedule add` for that.
+/// dev-plan/32 Stages B + F. `run` authors + executes; `list` /
+/// `inspect <id>` / `rm <id>` read or remove on-disk state.
+fn parse_workflow_subcommand(args: &str) -> SlashCommand {
+    let args = args.trim();
+    let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let rest = rest.trim();
+    match sub {
+        "run" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown(
+                    "usage: /workflow run <goal> — describe what the workflow should accomplish"
+                        .to_string(),
+                )
+            } else {
+                SlashCommand::WorkflowRun(rest.to_string())
+            }
+        }
+        "list" | "ls" => SlashCommand::WorkflowList,
+        "inspect" | "show" | "cat" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /workflow inspect <id-or-prefix>".to_string())
+            } else {
+                SlashCommand::WorkflowInspect(rest.to_string())
+            }
+        }
+        "rm" | "delete" | "del" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /workflow rm <id-or-prefix>".to_string())
+            } else {
+                SlashCommand::WorkflowRm(rest.to_string())
+            }
+        }
+        "resume" => {
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /workflow resume <id-or-prefix>".to_string())
+            } else {
+                SlashCommand::WorkflowResume(rest.to_string())
+            }
+        }
+        "" => SlashCommand::Unknown(
+            "usage: /workflow run <goal> · /workflow list · /workflow inspect <id> · /workflow resume <id> · /workflow rm <id>"
+                .to_string(),
+        ),
+        _ => SlashCommand::Unknown(format!(
+            "unknown workflow subcommand: '{sub}' (try: run | list | inspect | resume | rm)"
+        )),
+    }
+}
+
 fn parse_schedule_subcommand(args: &str) -> SlashCommand {
     let args = args.trim();
     if args.is_empty() || args == "list" || args == "ls" {
@@ -1530,6 +1614,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "loop" => parse_loop_subcommand(args),
         "goal" => parse_goal_subcommand(args),
         "schedule" | "sched" => parse_schedule_subcommand(args),
+        "workflow" | "wf" => parse_workflow_subcommand(args),
         "agent" => parse_agent_subcommand(args),
         "agents" => SlashCommand::AgentsList,
         "deploy" => parse_deploy_subcommand(args),
@@ -3025,6 +3110,9 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
 
         // Deploy
         BuiltInCommand { name: "deploy",   description: "Ship .thclaws/ to a remote pod (dev-plan/28)", category: "Deploy", usage: "[--pod URL] [--token T] [--dry-run] [--full] [--no-restart]" },
+
+        // Learn
+        BuiltInCommand { name: "quiz",     description: "Generate & play a study quiz from a URL, file, or topic", category: "Learn", usage: "<topic|url|file>" },
 
         // System
         BuiltInCommand { name: "help",     description: "Show this help",                             category: "System", usage: "" },
@@ -8793,6 +8881,549 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                     };
                     let _ = crate::deploy_client::run(args).await;
                 }
+                SlashCommand::WorkflowRun(prompt) => {
+                    let prompt = prompt.trim();
+                    if prompt.is_empty() {
+                        println!("{COLOR_YELLOW}/workflow run: missing goal{COLOR_RESET}");
+                        continue;
+                    }
+                    let provider = match crate::repl::build_provider(&config) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow run: can't build provider: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let mut revision_note: Option<String> = None;
+                    let approved_script: Option<String> = loop {
+                        println!(
+                            "{COLOR_DIM}/workflow run: authoring script (model={})…{COLOR_RESET}",
+                            config.model
+                        );
+                        let script = match crate::workflow::author(
+                            provider.as_ref(),
+                            &config.model,
+                            prompt,
+                            revision_note.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                println!(
+                                    "{COLOR_YELLOW}/workflow run: author failed: {e}{COLOR_RESET}"
+                                );
+                                break None;
+                            }
+                        };
+                        println!("{COLOR_DIM}────────── script ──────────{COLOR_RESET}");
+                        for (i, src_line) in script.lines().enumerate() {
+                            println!(
+                                "{COLOR_DIM}{:>3}{COLOR_RESET}  {src_line}",
+                                i + 1
+                            );
+                        }
+                        println!("{COLOR_DIM}────────────────────────────{COLOR_RESET}");
+                        print!(
+                            "{COLOR_DIM}[a]pprove · [c]ancel · [r]e-author: {COLOR_RESET}"
+                        );
+                        use std::io::{BufRead as _, Write as _};
+                        let _ = std::io::stdout().flush();
+                        let mut input = String::new();
+                        if std::io::stdin().lock().read_line(&mut input).is_err() {
+                            break None;
+                        }
+                        match input.trim().chars().next() {
+                            Some('c') | Some('C') => {
+                                println!("{COLOR_DIM}/workflow run: cancelled{COLOR_RESET}");
+                                break None;
+                            }
+                            Some('r') | Some('R') => {
+                                print!(
+                                    "{COLOR_DIM}revision note (one line): {COLOR_RESET}"
+                                );
+                                let _ = std::io::stdout().flush();
+                                let mut note = String::new();
+                                if std::io::stdin().lock().read_line(&mut note).is_err() {
+                                    break None;
+                                }
+                                revision_note = Some(note.trim().to_string());
+                                continue;
+                            }
+                            _ => break Some(script),
+                        }
+                    };
+
+                    if let Some(script) = approved_script {
+                        // Stage D: open a state.jsonl logger for this
+                        // run. Failure to create one is non-fatal — we
+                        // print a warning and proceed without
+                        // checkpointing, so a read-only / undeployable
+                        // .thclaws/ dir doesn't block /workflow run.
+                        let workflow_id = crate::workflow::generate_workflow_id();
+                        let cwd_for_persist = std::env::current_dir().ok();
+                        let logger_handle: Option<crate::workflow::LoggerHandle> = match cwd_for_persist
+                            .as_ref()
+                            .and_then(|cwd| {
+                                crate::workflow::WorkflowLogger::new(workflow_id.clone(), cwd).ok()
+                            }) {
+                            Some(mut l) => {
+                                let _ = l.start(prompt, &script);
+                                // Stage K: persist the approved script
+                                // next to state.jsonl so /workflow
+                                // resume can replay against the same
+                                // source on restart.
+                                if let Some(cwd) = cwd_for_persist.as_ref() {
+                                    let _ = crate::workflow::write_workflow_script(
+                                        cwd,
+                                        &workflow_id,
+                                        &script,
+                                    );
+                                }
+                                Some(std::sync::Arc::new(std::sync::Mutex::new(l)))
+                            }
+                            None => {
+                                println!(
+                                    "{COLOR_DIM}/workflow run: state.jsonl unavailable — proceeding without checkpoint{COLOR_RESET}"
+                                );
+                                None
+                            }
+                        };
+                        println!("{COLOR_DIM}/workflow run: id={workflow_id}{COLOR_RESET}");
+
+                        let wf_started = std::time::Instant::now();
+                        // Route thclaws.subagent through the parent's
+                        // Task tool. `None` is acceptable — the sandbox
+                        // falls back to a stub that echoes prompts,
+                        // useful if the registry doesn't have the tool
+                        // (e.g. a minimal config). spawn_blocking lets
+                        // the JS host functions use
+                        // `Handle::block_on` without nesting runtimes.
+                        let task_tool = tool_registry.get(crate::subagent::TOOL_NAME);
+                        let logger_for_thread = logger_handle.clone();
+                        // Boa's JsError contains Rc<> types and isn't
+                        // Send — stringify before crossing the
+                        // spawn_blocking boundary. Stage I: also drain
+                        // the usage sink so the closing summary can
+                        // roll up tokens + cost from the same thread.
+                        type WfBlockingOut = (
+                            std::result::Result<String, String>,
+                            Vec<crate::providers::Usage>,
+                        );
+                        let outcome: std::result::Result<
+                            WfBlockingOut,
+                            tokio::task::JoinError,
+                        > = tokio::task::spawn_blocking(move || {
+                            crate::workflow::set_task_tool(task_tool);
+                            crate::workflow::set_logger(logger_for_thread);
+                            crate::workflow::set_usage_sink(true);
+                            let res = (|| -> std::result::Result<String, String> {
+                                let mut sandbox = crate::workflow::WorkflowSandbox::new()
+                                    .map_err(|e| e.to_string())?;
+                                sandbox.run(&script).map_err(|e| e.to_string())
+                            })();
+                            let usages = crate::workflow::take_all_usages();
+                            crate::workflow::set_task_tool(None);
+                            crate::workflow::set_logger(None);
+                            crate::workflow::set_usage_sink(false);
+                            (res, usages)
+                        })
+                        .await;
+
+                        // Unwrap join + split usages from the inner
+                        // Result so the existing match arms below see
+                        // the same shape as before.
+                        let (result, all_usages): (
+                            std::result::Result<
+                                std::result::Result<String, String>,
+                                tokio::task::JoinError,
+                            >,
+                            Vec<crate::providers::Usage>,
+                        ) = match outcome {
+                            Ok((res, usages)) => (Ok(res), usages),
+                            Err(e) => (Err(e), Vec::new()),
+                        };
+
+                        let mut workers_count: u32 = 0;
+                        if let Some(handle) = &logger_handle {
+                            if let Ok(mut l) = handle.lock() {
+                                let _ = match &result {
+                                    Ok(Ok(text)) => l.done(text),
+                                    Ok(Err(e)) => l.error(e),
+                                    Err(e) => l.error(&e.to_string()),
+                                };
+                                workers_count = l.worker_count();
+                            }
+                        }
+                        let total = crate::tool_display::format_duration(wf_started.elapsed());
+
+                        // Stage I: roll up per-worker usage into the
+                        // closing summary. Cost via the model_catalogue
+                        // pricing path; tier-billed / unknown models
+                        // show "cost unknown" instead of a number.
+                        let total_in: u64 = all_usages
+                            .iter()
+                            .map(|u| u.input_tokens as u64)
+                            .sum();
+                        let total_out: u64 = all_usages
+                            .iter()
+                            .map(|u| u.output_tokens as u64)
+                            .sum();
+                        let cost_suffix = if all_usages.is_empty() {
+                            String::new()
+                        } else {
+                            let token_usage = crate::model_catalogue::TokenUsage {
+                                prompt_tokens: total_in.min(u32::MAX as u64) as u32,
+                                completion_tokens: total_out.min(u32::MAX as u64) as u32,
+                                cached_input_tokens: 0,
+                                cache_creation_tokens: 0,
+                                reasoning_tokens: 0,
+                            };
+                            let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
+                            let cost = catalogue.compute_cost_usd(&config.model, &token_usage);
+                            let token_str = format!(
+                                "{} in / {} out",
+                                format_token_count(total_in),
+                                format_token_count(total_out),
+                            );
+                            match cost {
+                                Some(c) if c > 0.0 => {
+                                    format!(", {token_str} (≈${c:.4})")
+                                }
+                                Some(_) => format!(", {token_str} (free)"),
+                                None => format!(", {token_str} (cost unknown)"),
+                            }
+                        };
+                        println!(
+                            "{COLOR_DIM}workflow done — {workers_count} workers, total {total}{cost_suffix}{COLOR_RESET}"
+                        );
+
+                        match result {
+                            Ok(Ok(text)) => println!("{COLOR_GREEN}{text}{COLOR_RESET}"),
+                            Ok(Err(e)) => println!(
+                                "{COLOR_YELLOW}/workflow run: script failed: {e}{COLOR_RESET}"
+                            ),
+                            Err(e) => println!(
+                                "{COLOR_YELLOW}/workflow run: worker thread panicked: {e}{COLOR_RESET}"
+                            ),
+                        }
+                    }
+                }
+                SlashCommand::WorkflowList => match std::env::current_dir() {
+                    Ok(cwd) => match crate::workflow::list_workflows(&cwd) {
+                        Ok(workflows) if workflows.is_empty() => {
+                            println!(
+                                "{COLOR_DIM}no workflows under .thclaws/workflows/{COLOR_RESET}"
+                            );
+                        }
+                        Ok(workflows) => {
+                            for wf in &workflows {
+                                let preview = if wf.prompt.chars().count() > 50 {
+                                    let head: String = wf.prompt.chars().take(50).collect();
+                                    format!("{head}…")
+                                } else {
+                                    wf.prompt.clone()
+                                };
+                                let id_short: String = wf.id.chars().take(20).collect();
+                                let err_suffix = if wf.workers_error > 0 {
+                                    format!(" ({} err)", wf.workers_error)
+                                } else {
+                                    String::new()
+                                };
+                                println!(
+                                    "  {id_short}  {icon} {done}/{started}w{err_suffix}  {preview}",
+                                    icon = wf.status.icon(),
+                                    done = wf.workers_done,
+                                    started = wf.workers_started,
+                                );
+                            }
+                        }
+                        Err(e) => println!(
+                            "{COLOR_YELLOW}/workflow list: {e}{COLOR_RESET}"
+                        ),
+                    },
+                    Err(e) => println!(
+                        "{COLOR_YELLOW}/workflow list: can't read cwd: {e}{COLOR_RESET}"
+                    ),
+                },
+                SlashCommand::WorkflowInspect(prefix) => {
+                    let cwd = match std::env::current_dir() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow inspect: can't read cwd: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let id = match crate::workflow::resolve_id_prefix(&cwd, &prefix) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow inspect: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    let events = match crate::workflow::read_events(&cwd, &id) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow inspect: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    println!("{COLOR_DIM}workflow {id}{COLOR_RESET}");
+                    for ev in &events {
+                        let kind = ev.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
+                        let ts = ev.get("ts").and_then(|t| t.as_str()).unwrap_or("?");
+                        let take_preview = |s: &str, cap: usize| -> String {
+                            if s.chars().count() > cap {
+                                let head: String = s.chars().take(cap).collect();
+                                format!("{head}…")
+                            } else {
+                                s.to_string()
+                            }
+                        };
+                        match kind {
+                            "start" => {
+                                let prompt = ev
+                                    .get("prompt")
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or("");
+                                println!("  {ts}  start    {prompt}");
+                            }
+                            "worker_start" => {
+                                let worker =
+                                    ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                                let prompt = ev
+                                    .get("prompt")
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or("");
+                                println!(
+                                    "  {ts}  {worker} →   {}",
+                                    take_preview(prompt, 80)
+                                );
+                            }
+                            "worker_done" => {
+                                let worker =
+                                    ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                                let output = ev
+                                    .get("output")
+                                    .and_then(|o| o.as_str())
+                                    .unwrap_or("");
+                                println!(
+                                    "  {ts}  {worker} ✓   {}",
+                                    take_preview(output, 80)
+                                );
+                            }
+                            "worker_error" => {
+                                let worker =
+                                    ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                                let err =
+                                    ev.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                                println!(
+                                    "  {ts}  {worker} ✗   {}",
+                                    take_preview(err, 80)
+                                );
+                            }
+                            "done" => {
+                                let result = ev
+                                    .get("result")
+                                    .and_then(|r| r.as_str())
+                                    .unwrap_or("");
+                                println!(
+                                    "  {ts}  done     {}",
+                                    take_preview(result, 80)
+                                );
+                            }
+                            "error" => {
+                                let err =
+                                    ev.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                                println!("  {ts}  error    {err}");
+                            }
+                            other => {
+                                println!("  {ts}  {other}");
+                            }
+                        }
+                    }
+                }
+                SlashCommand::WorkflowRm(prefix) => {
+                    let cwd = match std::env::current_dir() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow rm: can't read cwd: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let id = match crate::workflow::resolve_id_prefix(&cwd, &prefix) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow rm: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    use std::io::{BufRead as _, Write as _};
+                    print!("{COLOR_DIM}remove workflow {id}? [y/N]: {COLOR_RESET}");
+                    let _ = std::io::stdout().flush();
+                    let mut answer = String::new();
+                    if std::io::stdin().lock().read_line(&mut answer).is_err() {
+                        continue;
+                    }
+                    let answer = answer.trim().to_lowercase();
+                    if answer != "y" && answer != "yes" {
+                        println!("{COLOR_DIM}/workflow rm: cancelled{COLOR_RESET}");
+                        continue;
+                    }
+                    match crate::workflow::delete_workflow(&cwd, &id) {
+                        Ok(()) => {
+                            println!("{COLOR_DIM}removed {id}{COLOR_RESET}")
+                        }
+                        Err(e) => println!(
+                            "{COLOR_YELLOW}/workflow rm: {e}{COLOR_RESET}"
+                        ),
+                    }
+                }
+                SlashCommand::WorkflowResume(prefix) => {
+                    let cwd = match std::env::current_dir() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow resume: can't read cwd: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let id = match crate::workflow::resolve_id_prefix(&cwd, &prefix) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/workflow resume: {e}{COLOR_RESET}");
+                            continue;
+                        }
+                    };
+                    let script = match crate::workflow::read_workflow_script(&cwd, &id) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow resume: can't read script.js for {id}: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let cache = match crate::workflow::read_completed_workers(&cwd, &id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!(
+                                "{COLOR_YELLOW}/workflow resume: can't read state.jsonl for {id}: {e}{COLOR_RESET}"
+                            );
+                            continue;
+                        }
+                    };
+                    let cache_len = cache.len();
+                    println!(
+                        "{COLOR_DIM}/workflow resume: id={id} — {cache_len} cached worker(s){COLOR_RESET}"
+                    );
+
+                    // Open the logger in append mode and seed the
+                    // worker counter so newly-spawned workers
+                    // continue numbering past the cache.
+                    let logger_handle: Option<crate::workflow::LoggerHandle> =
+                        match crate::workflow::WorkflowLogger::new(id.clone(), &cwd) {
+                            Ok(mut l) => {
+                                l.set_next_worker_id(cache_len as u32);
+                                Some(std::sync::Arc::new(std::sync::Mutex::new(l)))
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{COLOR_YELLOW}/workflow resume: can't open state.jsonl: {e}{COLOR_RESET}"
+                                );
+                                continue;
+                            }
+                        };
+
+                    let wf_started = std::time::Instant::now();
+                    let task_tool = tool_registry.get(crate::subagent::TOOL_NAME);
+                    let logger_for_thread = logger_handle.clone();
+                    let cache_for_thread = Some(cache);
+                    let script_for_thread = script.clone();
+
+                    type WfBlockingOut = (
+                        std::result::Result<String, String>,
+                        Vec<crate::providers::Usage>,
+                        usize,
+                    );
+                    let outcome: std::result::Result<
+                        WfBlockingOut,
+                        tokio::task::JoinError,
+                    > = tokio::task::spawn_blocking(move || {
+                        crate::workflow::set_task_tool(task_tool);
+                        crate::workflow::set_logger(logger_for_thread);
+                        crate::workflow::set_usage_sink(true);
+                        crate::workflow::set_replay_cache(cache_for_thread);
+                        let res = (|| -> std::result::Result<String, String> {
+                            let mut sandbox = crate::workflow::WorkflowSandbox::new()
+                                .map_err(|e| e.to_string())?;
+                            sandbox.run(&script_for_thread).map_err(|e| e.to_string())
+                        })();
+                        let usages = crate::workflow::take_all_usages();
+                        let remaining = crate::workflow::replay_remaining();
+                        crate::workflow::set_task_tool(None);
+                        crate::workflow::set_logger(None);
+                        crate::workflow::set_usage_sink(false);
+                        crate::workflow::set_replay_cache(None);
+                        (res, usages, remaining)
+                    })
+                    .await;
+
+                    let (result, all_usages, remaining) = match outcome {
+                        Ok((res, usages, rem)) => (Ok(res), usages, rem),
+                        Err(e) => (Err(e), Vec::new(), 0),
+                    };
+
+                    if remaining > 0 {
+                        println!(
+                            "{COLOR_YELLOW}/workflow resume: {remaining} cached worker(s) left unused — script may have diverged{COLOR_RESET}"
+                        );
+                    }
+
+                    if let Some(handle) = &logger_handle {
+                        if let Ok(mut l) = handle.lock() {
+                            let _ = match &result {
+                                Ok(Ok(text)) => l.done(text),
+                                Ok(Err(e)) => l.error(e),
+                                Err(e) => l.error(&e.to_string()),
+                            };
+                        }
+                    }
+
+                    let total =
+                        crate::tool_display::format_duration(wf_started.elapsed());
+                    let total_in: u64 = all_usages
+                        .iter()
+                        .map(|u| u.input_tokens as u64)
+                        .sum();
+                    let total_out: u64 = all_usages
+                        .iter()
+                        .map(|u| u.output_tokens as u64)
+                        .sum();
+                    println!(
+                        "{COLOR_DIM}workflow resume done — {cache_len} replayed + {fresh} fresh, total {total}, {} in / {} out{COLOR_RESET}",
+                        format_token_count(total_in),
+                        format_token_count(total_out),
+                        fresh = all_usages.len(),
+                    );
+
+                    match result {
+                        Ok(Ok(text)) => println!("{COLOR_GREEN}{text}{COLOR_RESET}"),
+                        Ok(Err(e)) => println!(
+                            "{COLOR_YELLOW}/workflow resume: script failed: {e}{COLOR_RESET}"
+                        ),
+                        Err(e) => println!(
+                            "{COLOR_YELLOW}/workflow resume: worker thread panicked: {e}{COLOR_RESET}"
+                        ),
+                    }
+                }
                 SlashCommand::Unknown(what) => {
                     println!("{COLOR_YELLOW}unknown command: {what}{COLOR_RESET}");
                 }
@@ -9202,6 +9833,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_token_count_thresholds() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1_000), "1.0k");
+        assert_eq!(format_token_count(1_234), "1.2k");
+        assert_eq!(format_token_count(9_950), "9.9k");
+        assert_eq!(format_token_count(10_000), "10k");
+        assert_eq!(format_token_count(312_500), "312k");
+        assert_eq!(format_token_count(1_000_000), "1.0M");
+        assert_eq!(format_token_count(2_300_000), "2.3M");
+    }
 
     #[test]
     fn readline_config_matches_platform() {

@@ -71,6 +71,9 @@ impl CommandStore {
                 store.load_dir(&dir);
             }
         }
+        // Built-ins fill any names the filesystem didn't define, so a
+        // project/user command of the same name still wins.
+        store.seed_builtins();
         store
     }
 
@@ -108,14 +111,23 @@ impl CommandStore {
 
     fn parse(path: &Path) -> Option<CommandDef> {
         let raw = std::fs::read_to_string(path).ok()?;
-        let (frontmatter, body) = parse_frontmatter(&raw);
-        let name = frontmatter.get("name").cloned().unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
-        Some(CommandDef {
+        let fallback = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        Some(Self::parse_from_str(fallback, &raw, path.to_path_buf()))
+    }
+
+    /// Parse a command from a raw markdown string (shared by filesystem
+    /// discovery and built-in seeding). `fallback_name` is used as the
+    /// command name when the frontmatter omits `name`.
+    fn parse_from_str(fallback_name: &str, raw: &str, source: PathBuf) -> CommandDef {
+        let (frontmatter, body) = parse_frontmatter(raw);
+        let name = frontmatter
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| fallback_name.to_string());
+        CommandDef {
             name,
             description: frontmatter.get("description").cloned().unwrap_or_default(),
             when_to_use: frontmatter
@@ -124,8 +136,30 @@ impl CommandStore {
                 .cloned()
                 .unwrap_or_default(),
             body: body.trim_start().to_string(),
-            source: path.to_path_buf(),
-        })
+            source,
+        }
+    }
+
+    /// Commands compiled into the binary so they work in any working
+    /// directory (not just repos that ship a `.claude/commands/` file).
+    /// Seeded AFTER filesystem discovery with `or_insert`, so a project or
+    /// user `<name>.md` still overrides the built-in.
+    fn seed_builtins(&mut self) {
+        const BUILTINS: &[(&str, &str)] = &[
+            ("quiz", include_str!("default_prompts/commands/quiz.md")),
+            (
+                "quiz-result",
+                include_str!("default_prompts/commands/quiz-result.md"),
+            ),
+        ];
+        for (fallback_name, raw) in BUILTINS {
+            let def = Self::parse_from_str(
+                fallback_name,
+                raw,
+                PathBuf::from(format!("<builtin>/{fallback_name}")),
+            );
+            self.commands.entry(def.name.clone()).or_insert(def);
+        }
     }
 
     pub fn names(&self) -> Vec<&str> {
@@ -200,5 +234,56 @@ mod tests {
             store.get("hello").unwrap().body,
             "Project version of hello."
         );
+    }
+
+    #[test]
+    fn builtin_quiz_is_seeded() {
+        let mut store = CommandStore::default();
+        store.seed_builtins();
+        let q = store.get("quiz").expect("built-in /quiz should be seeded");
+        assert_eq!(q.name, "quiz");
+        assert!(
+            q.body.contains("QuizRender"),
+            "quiz body should call QuizRender"
+        );
+        assert!(
+            q.body.contains("$ARGUMENTS"),
+            "quiz body should take $ARGUMENTS"
+        );
+    }
+
+    #[test]
+    fn builtin_quiz_result_is_seeded() {
+        let mut store = CommandStore::default();
+        store.seed_builtins();
+        let q = store
+            .get("quiz-result")
+            .expect("built-in /quiz-result should be seeded");
+        assert_eq!(q.name, "quiz-result");
+        assert!(
+            q.body.contains("_scores"),
+            "quiz-result body should read the _scores log"
+        );
+        assert!(
+            q.body.contains("$ARGUMENTS"),
+            "quiz-result body should take $ARGUMENTS"
+        );
+    }
+
+    #[test]
+    fn filesystem_command_overrides_builtin() {
+        let mut store = CommandStore::default();
+        store.commands.insert(
+            "quiz".into(),
+            CommandDef {
+                name: "quiz".into(),
+                description: "proj".into(),
+                when_to_use: String::new(),
+                body: "OVERRIDDEN".into(),
+                source: PathBuf::from("proj/quiz.md"),
+            },
+        );
+        store.seed_builtins();
+        assert_eq!(store.get("quiz").unwrap().body, "OVERRIDDEN");
     }
 }

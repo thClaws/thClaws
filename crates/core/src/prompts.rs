@@ -37,6 +37,11 @@ pub mod defaults {
     /// {{ time_used_seconds }}, {{ tokens_used }}, {{ token_budget }},
     /// {{ iterations_done }}.
     pub const GOAL_BUDGET_LIMIT: &str = include_str!("default_prompts/goal_budget_limit.md");
+    /// dev-plan/32 Stage B: system prompt that teaches the model the
+    /// `thclaws.*` API and sandbox limits before it authors a workflow
+    /// script. Loaded by `crate::workflow::script::author`. No template
+    /// variables — the user goal is passed as the user message.
+    pub const WORKFLOW_AUTHOR: &str = include_str!("default_prompts/workflow_author.md");
 }
 
 fn project_path(name: &str) -> PathBuf {

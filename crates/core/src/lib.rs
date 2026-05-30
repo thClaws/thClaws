@@ -101,5 +101,6 @@ pub mod uploads;
 pub mod usage;
 pub mod util;
 pub mod version;
+pub mod workflow;
 
 pub use error::{Error, Result};

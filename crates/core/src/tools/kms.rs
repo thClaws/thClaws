@@ -279,6 +279,10 @@ impl Tool for KmsWriteTool {
         let kms_name = req_str(&input, "kms")?;
         let page = req_str(&input, "page")?;
         let content = req_str(&input, "content")?;
+        // dev-plan/32 Stage M: gate KMS writes inside workflow
+        // subagent calls. Outside `/workflow run` this is a no-op
+        // and the call proceeds as before.
+        crate::workflow::check_kms_write_capability(kms_name)?;
         let Some(kref) = crate::kms::resolve(kms_name) else {
             return Err(Error::Tool(format!(
                 "no KMS named '{kms_name}' (check /kms list)"
@@ -367,6 +371,9 @@ impl Tool for KmsAppendTool {
         let kms_name = req_str(&input, "kms")?;
         let page = req_str(&input, "page")?;
         let content = req_str(&input, "content")?;
+        // dev-plan/32 Stage M: gate KMS appends inside workflow
+        // subagent calls.
+        crate::workflow::check_kms_write_capability(kms_name)?;
         let Some(kref) = crate::kms::resolve(kms_name) else {
             return Err(Error::Tool(format!(
                 "no KMS named '{kms_name}' (check /kms list)"
@@ -418,6 +425,9 @@ impl Tool for KmsDeleteTool {
     async fn call(&self, input: Value) -> Result<String> {
         let kms_name = req_str(&input, "kms")?;
         let page = req_str(&input, "page")?;
+        // dev-plan/32 Stage M: gate KMS deletes inside workflow
+        // subagent calls.
+        crate::workflow::check_kms_write_capability(kms_name)?;
         let Some(kref) = crate::kms::resolve(kms_name) else {
             return Err(Error::Tool(format!(
                 "no KMS named '{kms_name}' (check /kms list)"
@@ -485,6 +495,10 @@ impl Tool for KmsCreateTool {
 
     async fn call(&self, input: Value) -> Result<String> {
         let name = req_str(&input, "name")?;
+        // dev-plan/32 Stage M: creating a fresh KMS inside a workflow
+        // subagent call requires the new name to be in the granted
+        // write list — same gate as Write/Append/Delete.
+        crate::workflow::check_kms_write_capability(name)?;
         let scope_str = req_str(&input, "scope")?;
         let scope = match scope_str {
             "project" => crate::kms::KmsScope::Project,

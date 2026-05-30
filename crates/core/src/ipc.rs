@@ -74,6 +74,11 @@ pub struct IpcContext {
     pub on_quit: QuitFn,
     pub on_send_initial_state: SendInitialStateFn,
     pub on_zoom: ZoomFn,
+    /// dev-plan/32 Tier 3 workflow review approver. The
+    /// `workflow_decision` IPC message looks up pending requests by
+    /// `id` and resolves the matching oneshot, the same way the
+    /// tool-call approver resolves `approval_response`.
+    pub workflow_approver: Arc<crate::workflow::WorkflowApprover>,
 }
 
 /// Dispatch a single inbound IPC message. Routes by `msg.type` to one
@@ -122,9 +127,40 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
-            if !trimmed.is_empty() {
-                let _ = ctx.shared.input_tx.send(ShellInput::Line(trimmed));
+            if trimmed.is_empty() {
+                return true;
             }
+            // dev-plan/32 Tier 3 Terminal-tab approval intercept. The
+            // worker loop is blocked inside `dispatch_workflow_run`'s
+            // `.await` on the WorkflowApprover's oneshot — any text
+            // queued through `input_tx` waits forever until the
+            // review resolves. Catch typed decisions here at the IPC
+            // boundary so they reach the approver directly. The same
+            // parser also runs at the top of `handle_line` as a
+            // safety net for non-IPC input paths (e.g. /loop body
+            // re-fires).
+            let pending = ctx.workflow_approver.pending_ids();
+            if !pending.is_empty() {
+                match crate::workflow::parse_chat_decision(&trimmed) {
+                    Some(decision) => {
+                        if let Some(id) = pending.into_iter().next_back() {
+                            ctx.workflow_approver.resolve(&id, decision);
+                        }
+                        return true;
+                    }
+                    None => {
+                        let _ = ctx.shared.events_tx.send(
+                            crate::shared_session::ViewEvent::SlashOutput(
+                                "workflow review pending — type `approve`, `cancel`, or \
+                                 `rework: <note>` (or click in the Chat tab)"
+                                    .to_string(),
+                            ),
+                        );
+                        return true;
+                    }
+                }
+            }
+            let _ = ctx.shared.input_tx.send(ShellInput::Line(trimmed));
         }
 
         "frontend_ready" => {
@@ -148,6 +184,36 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 _ => crate::permissions::ApprovalDecision::Deny,
             };
             ctx.approver.resolve(id, decision);
+        }
+
+        // dev-plan/32 Tier 3 workflow approval response. Frontend posts
+        // `{type: "workflow_decision", id, decision: "approve" |
+        // "cancel" | "rework", note?}` when the user clicks a button
+        // on the review bubble; we route it to the matching pending
+        // oneshot inside WorkflowApprover.
+        "workflow_decision" => {
+            let id = msg
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let decision_str = msg
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .unwrap_or("cancel");
+            let decision = match decision_str {
+                "approve" => crate::workflow::WorkflowDecision::Approve,
+                "rework" => {
+                    let note = msg
+                        .get("note")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    crate::workflow::WorkflowDecision::Rework(note)
+                }
+                _ => crate::workflow::WorkflowDecision::Cancel,
+            };
+            ctx.workflow_approver.resolve(&id, decision);
         }
 
         "shell_cancel" => {
@@ -2115,9 +2181,18 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let user_cmds = crate::commands::CommandStore::discover_with_extra(
                 &crate::plugins::plugin_command_dirs(),
             );
+            // Names already shown as built-ins above (e.g. the seeded `/quiz`)
+            // must not be listed a second time as a "Custom" command.
+            let builtin_names: std::collections::HashSet<&str> = crate::repl::built_in_commands()
+                .iter()
+                .map(|c| c.name)
+                .collect();
             let mut user_names: Vec<&str> = user_cmds.commands.keys().map(String::as_str).collect();
             user_names.sort();
             for name in user_names {
+                if builtin_names.contains(name) {
+                    continue;
+                }
                 if let Some(cmd) = user_cmds.get(name) {
                     entries.push(serde_json::json!({
                         "name": cmd.name,
@@ -2708,6 +2783,7 @@ mod tests {
             on_quit,
             on_send_initial_state,
             on_zoom,
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
 
         // Exercise the only currently-wired arm.
@@ -2744,6 +2820,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         let handled = handle_ipc(
             serde_json::json!({
@@ -2779,6 +2856,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         handle_ipc(
             serde_json::json!({
@@ -2811,6 +2889,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         handle_ipc(
             serde_json::json!({
@@ -2851,6 +2930,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         let handled = handle_ipc(
             serde_json::json!({
@@ -2903,6 +2983,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         handle_ipc(
             serde_json::json!({
@@ -2935,6 +3016,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
 
         // Empty form → must error before any save.
@@ -2969,6 +3051,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
 
         // Use a tempdir so the cwd-exists check passes; cron is bad.
@@ -3008,6 +3091,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
 
         let handled = handle_ipc(
@@ -3041,6 +3125,7 @@ mod tests {
             on_quit: Arc::new(|| {}),
             on_send_initial_state: Arc::new(|| {}),
             on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
         };
         // Unmigrated / unknown types must return false so the wry
         // closure falls through to its own match.

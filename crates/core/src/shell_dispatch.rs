@@ -3216,6 +3216,26 @@ pub async fn dispatch(
                 )));
             });
         }
+        SlashCommand::WorkflowRun(prompt) => {
+            dispatch_workflow_run(prompt, state, events_tx).await;
+        }
+        SlashCommand::WorkflowList => {
+            dispatch_workflow_list(events_tx);
+        }
+        SlashCommand::WorkflowInspect(prefix) => {
+            dispatch_workflow_inspect(prefix, events_tx);
+        }
+        SlashCommand::WorkflowResume(prefix) => {
+            dispatch_workflow_resume(prefix, state, events_tx).await;
+        }
+        SlashCommand::WorkflowRm(_) => {
+            emit(
+                events_tx,
+                "/workflow rm needs a stdin y/N confirm that the chat tab doesn't expose. \
+                 Run `thclaws --cli` to delete workflows, or use `rm -rf .thclaws/workflows/<id>/` directly."
+                    .to_string(),
+            );
+        }
         SlashCommand::Unknown(detail) => {
             emit(events_tx, format!("unknown command: {detail}"));
         }
@@ -3509,6 +3529,409 @@ fn doctor_report(state: &WorkerState) -> String {
 
 fn emit(events_tx: &broadcast::Sender<ViewEvent>, text: String) {
     let _ = events_tx.send(ViewEvent::SlashOutput(text));
+}
+
+/// dev-plan/32 Tier 3 `/workflow run` for the GUI / chat surface.
+/// Author phase calls the model; review phase emits
+/// `ViewEvent::WorkflowReviewRequest` and awaits the
+/// `WorkflowApprover`'s oneshot for an Approve / Cancel / Rework
+/// decision. Rework loops back into the author phase carrying the
+/// user's revision note + a bumped revision counter so the bubble
+/// can show "Revision 2" / "Revision 3" labels.
+async fn dispatch_workflow_run(
+    prompt: String,
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+) {
+    let goal = prompt.trim();
+    if goal.is_empty() {
+        emit(events_tx, "/workflow run: missing goal".to_string());
+        let _ = events_tx.send(ViewEvent::TurnDone);
+        return;
+    }
+    let provider = match crate::repl::build_provider(&state.config) {
+        Ok(p) => p,
+        Err(e) => {
+            emit(
+                events_tx,
+                format!("/workflow run: can't build provider: {e}"),
+            );
+            let _ = events_tx.send(ViewEvent::TurnDone);
+            return;
+        }
+    };
+
+    let workflow_id = crate::workflow::generate_workflow_id();
+    let mut revision_note: Option<String> = None;
+    let mut revision: u32 = 0;
+
+    loop {
+        emit(
+            events_tx,
+            format!(
+                "/workflow run: authoring script (model={}, revision {})…",
+                state.config.model,
+                revision + 1
+            ),
+        );
+        let script = match crate::workflow::author(
+            provider.as_ref(),
+            &state.config.model,
+            goal,
+            revision_note.as_deref(),
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                emit(events_tx, format!("/workflow run: author failed: {e}"));
+                let _ = events_tx.send(ViewEvent::TurnDone);
+                return;
+            }
+        };
+
+        let _ = events_tx.send(ViewEvent::WorkflowReviewRequest {
+            id: workflow_id.clone(),
+            prompt: goal.to_string(),
+            script: script.clone(),
+            model: state.config.model.clone(),
+            revision,
+        });
+
+        let decision = state.workflow_approver.request(workflow_id.clone()).await;
+        match decision {
+            crate::workflow::WorkflowDecision::Approve => {
+                run_workflow_inline(state, events_tx, goal, script, None).await;
+                // TurnDone clears the chat-tab `streaming` flag so the
+                // Stop button stops showing and Send re-enables.
+                let _ = events_tx.send(ViewEvent::TurnDone);
+                return;
+            }
+            crate::workflow::WorkflowDecision::Cancel => {
+                emit(events_tx, "/workflow run: cancelled".to_string());
+                let _ = events_tx.send(ViewEvent::TurnDone);
+                return;
+            }
+            crate::workflow::WorkflowDecision::Rework(note) => {
+                revision_note = Some(note);
+                revision += 1;
+                // Loop and re-author with the revision note.
+            }
+        }
+    }
+}
+
+async fn dispatch_workflow_resume(
+    prefix: String,
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+) {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            emit(events_tx, format!("/workflow resume: can't read cwd: {e}"));
+            return;
+        }
+    };
+    let id = match crate::workflow::resolve_id_prefix(&cwd, &prefix) {
+        Ok(id) => id,
+        Err(e) => {
+            emit(events_tx, format!("/workflow resume: {e}"));
+            return;
+        }
+    };
+    let script = match crate::workflow::read_workflow_script(&cwd, &id) {
+        Ok(s) => s,
+        Err(e) => {
+            emit(
+                events_tx,
+                format!("/workflow resume: can't read script.js for {id}: {e}"),
+            );
+            return;
+        }
+    };
+    let cache = match crate::workflow::read_completed_workers(&cwd, &id) {
+        Ok(v) => v,
+        Err(e) => {
+            emit(events_tx, format!("/workflow resume: {e}"));
+            return;
+        }
+    };
+    emit(
+        events_tx,
+        format!(
+            "/workflow resume: id={id} — {} cached worker(s)",
+            cache.len()
+        ),
+    );
+    run_workflow_inline(state, events_tx, "(resume)", script, Some((id, cache))).await;
+    // Mirror dispatch_workflow_run: clear chat-tab streaming flag so
+    // the Stop button hides after a resumed workflow ends (or is
+    // cancelled mid-run by the user).
+    let _ = events_tx.send(ViewEvent::TurnDone);
+}
+
+/// Shared spawn_blocking + thread-locals wiring used by
+/// `dispatch_workflow_run` (fresh) and `dispatch_workflow_resume`
+/// (with cache). Streams the final result + cost summary back through
+/// `emit`. Stage F/G/H/I/K behaviours all participate (logger, usage
+/// sink, replay cache); only the per-worker progress lines (Stage E)
+/// don't reach the chat surface since they print to stdout.
+async fn run_workflow_inline(
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+    goal: &str,
+    script: String,
+    resume: Option<(String, Vec<(String, String)>)>,
+) {
+    let cwd_for_persist = std::env::current_dir().ok();
+    let (workflow_id, cache, is_resume) = match resume {
+        Some((id, c)) => (id, c, true),
+        None => (crate::workflow::generate_workflow_id(), Vec::new(), false),
+    };
+
+    let logger_handle: Option<crate::workflow::LoggerHandle> = match cwd_for_persist
+        .as_ref()
+        .and_then(|cwd| crate::workflow::WorkflowLogger::new(workflow_id.clone(), cwd).ok())
+    {
+        Some(mut l) => {
+            if is_resume {
+                l.set_next_worker_id(cache.len() as u32);
+            } else {
+                let _ = l.start(goal, &script);
+                if let Some(cwd) = cwd_for_persist.as_ref() {
+                    let _ = crate::workflow::write_workflow_script(cwd, &workflow_id, &script);
+                }
+            }
+            Some(std::sync::Arc::new(std::sync::Mutex::new(l)))
+        }
+        None => {
+            emit(
+                events_tx,
+                "/workflow run: state.jsonl unavailable — proceeding without checkpoint"
+                    .to_string(),
+            );
+            None
+        }
+    };
+    if !is_resume {
+        emit(events_tx, format!("/workflow run: id={workflow_id}"));
+    }
+
+    let task_tool = state.tool_registry.get(crate::subagent::TOOL_NAME);
+    let logger_for_thread = logger_handle.clone();
+    let cache_for_thread = if cache.is_empty() { None } else { Some(cache) };
+    // Tier 3 polish: pass the chat broadcast sender into the
+    // spawn_blocking thread so each thclaws.subagent host call can emit
+    // ToolCallStart/Result events, rendering worker progression in the
+    // chat tab as one-line `▸ … ✓` bubbles.
+    let events_tx_for_thread = events_tx.clone();
+    // Stop-button: clone the worker cancel token so the workflow runtime
+    // can observe `shared.cancel.cancel()` (fired by `shell_cancel` IPC)
+    // mid-worker via `tokio::select!`. Reset after the run so the next
+    // turn isn't pre-cancelled.
+    let cancel_for_thread = state.cancel.clone();
+
+    type WfBlockingOut = (
+        std::result::Result<String, String>,
+        Vec<crate::providers::Usage>,
+        usize,
+    );
+    let started = std::time::Instant::now();
+    let outcome: std::result::Result<WfBlockingOut, tokio::task::JoinError> =
+        tokio::task::spawn_blocking(move || {
+            crate::workflow::set_task_tool(task_tool);
+            crate::workflow::set_logger(logger_for_thread);
+            crate::workflow::set_usage_sink(true);
+            crate::workflow::set_replay_cache(cache_for_thread);
+            crate::workflow::set_events_tx(Some(events_tx_for_thread));
+            crate::workflow::set_cancel(Some(cancel_for_thread));
+            let res = (|| -> std::result::Result<String, String> {
+                let mut sandbox =
+                    crate::workflow::WorkflowSandbox::new().map_err(|e| e.to_string())?;
+                sandbox.run(&script).map_err(|e| e.to_string())
+            })();
+            let usages = crate::workflow::take_all_usages();
+            let remaining = crate::workflow::replay_remaining();
+            crate::workflow::set_task_tool(None);
+            crate::workflow::set_logger(None);
+            crate::workflow::set_usage_sink(false);
+            crate::workflow::set_replay_cache(None);
+            crate::workflow::set_events_tx(None);
+            crate::workflow::set_cancel(None);
+            (res, usages, remaining)
+        })
+        .await;
+
+    let (result, usages, remaining) = match outcome {
+        Ok(t) => t,
+        Err(e) => {
+            emit(
+                events_tx,
+                format!("/workflow run: worker thread panicked: {e}"),
+            );
+            return;
+        }
+    };
+
+    // Stop-button: detect a cancel triggered mid-run. Either the JS
+    // script unwound cleanly with the sentinel error, or it caught the
+    // throw and ran to completion — in the latter case the token is
+    // still set, so we treat it as cancelled regardless. Reset the
+    // shared token afterwards so the next user turn starts clean.
+    let was_cancelled = state.cancel.is_cancelled()
+        || matches!(&result, Err(e) if e.contains(crate::workflow::WORKFLOW_CANCELLED_MSG));
+    if was_cancelled {
+        state.cancel.reset();
+    }
+
+    if let Some(handle) = &logger_handle {
+        if let Ok(mut l) = handle.lock() {
+            let _ = match (&result, was_cancelled) {
+                (_, true) => l.error(crate::workflow::WORKFLOW_CANCELLED_MSG),
+                (Ok(text), _) => l.done(text),
+                (Err(e), _) => l.error(e),
+            };
+        }
+    }
+
+    let elapsed = crate::tool_display::format_duration(started.elapsed());
+    let total_in: u64 = usages.iter().map(|u| u.input_tokens as u64).sum();
+    let total_out: u64 = usages.iter().map(|u| u.output_tokens as u64).sum();
+    let diverged = if remaining > 0 {
+        format!(" — {remaining} cache unused (diverged)")
+    } else {
+        String::new()
+    };
+    let status_word = if was_cancelled { "stopped" } else { "done" };
+    emit(
+        events_tx,
+        format!(
+            "workflow {status_word} — {} workers, {elapsed}, {total_in}in / {total_out}out{diverged}",
+            usages.len()
+        ),
+    );
+
+    match (result, was_cancelled) {
+        (_, true) => emit(events_tx, "/workflow run: stopped by user".to_string()),
+        (Ok(text), _) => emit(events_tx, text),
+        (Err(e), _) => emit(events_tx, format!("/workflow run: script failed: {e}")),
+    }
+}
+
+fn dispatch_workflow_list(events_tx: &broadcast::Sender<ViewEvent>) {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            emit(events_tx, format!("/workflow list: can't read cwd: {e}"));
+            return;
+        }
+    };
+    match crate::workflow::list_workflows(&cwd) {
+        Ok(workflows) if workflows.is_empty() => {
+            emit(
+                events_tx,
+                "no workflows under .thclaws/workflows/".to_string(),
+            );
+        }
+        Ok(workflows) => {
+            let mut lines = Vec::new();
+            for wf in &workflows {
+                let preview = if wf.prompt.chars().count() > 60 {
+                    let head: String = wf.prompt.chars().take(60).collect();
+                    format!("{head}…")
+                } else {
+                    wf.prompt.clone()
+                };
+                let id_short: String = wf.id.chars().take(20).collect();
+                let err_suffix = if wf.workers_error > 0 {
+                    format!(" ({} err)", wf.workers_error)
+                } else {
+                    String::new()
+                };
+                lines.push(format!(
+                    "  {id_short}  {icon} {done}/{started}w{err_suffix}  {preview}",
+                    icon = wf.status.icon(),
+                    done = wf.workers_done,
+                    started = wf.workers_started,
+                ));
+            }
+            emit(events_tx, lines.join("\n"));
+        }
+        Err(e) => {
+            emit(events_tx, format!("/workflow list: {e}"));
+        }
+    }
+}
+
+fn dispatch_workflow_inspect(prefix: String, events_tx: &broadcast::Sender<ViewEvent>) {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            emit(events_tx, format!("/workflow inspect: can't read cwd: {e}"));
+            return;
+        }
+    };
+    let id = match crate::workflow::resolve_id_prefix(&cwd, &prefix) {
+        Ok(id) => id,
+        Err(e) => {
+            emit(events_tx, format!("/workflow inspect: {e}"));
+            return;
+        }
+    };
+    let events = match crate::workflow::read_events(&cwd, &id) {
+        Ok(e) => e,
+        Err(e) => {
+            emit(events_tx, format!("/workflow inspect: {e}"));
+            return;
+        }
+    };
+    let take_preview = |s: &str, cap: usize| -> String {
+        if s.chars().count() > cap {
+            let head: String = s.chars().take(cap).collect();
+            format!("{head}…")
+        } else {
+            s.to_string()
+        }
+    };
+    let mut lines = vec![format!("workflow {id}")];
+    for ev in &events {
+        let kind = ev.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
+        let ts = ev.get("ts").and_then(|t| t.as_str()).unwrap_or("?");
+        match kind {
+            "start" => {
+                let prompt = ev.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
+                lines.push(format!("  {ts}  start    {prompt}"));
+            }
+            "worker_start" => {
+                let worker = ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                let prompt = ev.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
+                lines.push(format!("  {ts}  {worker} →   {}", take_preview(prompt, 80)));
+            }
+            "worker_done" => {
+                let worker = ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                let output = ev.get("output").and_then(|o| o.as_str()).unwrap_or("");
+                lines.push(format!("  {ts}  {worker} ✓   {}", take_preview(output, 80)));
+            }
+            "worker_error" => {
+                let worker = ev.get("worker").and_then(|w| w.as_str()).unwrap_or("?");
+                let err = ev.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                lines.push(format!("  {ts}  {worker} ✗   {}", take_preview(err, 80)));
+            }
+            "done" => {
+                let result = ev.get("result").and_then(|r| r.as_str()).unwrap_or("");
+                lines.push(format!("  {ts}  done     {}", take_preview(result, 80)));
+            }
+            "error" => {
+                let err = ev.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                lines.push(format!("  {ts}  error    {err}"));
+            }
+            other => {
+                lines.push(format!("  {ts}  {other}"));
+            }
+        }
+    }
+    emit(events_tx, lines.join("\n"));
 }
 
 /// When LINE is currently bridged and the user just chose `auto` or
