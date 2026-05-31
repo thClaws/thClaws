@@ -646,9 +646,9 @@ The agent calls this after spotting a relevant entry in `index.md`:
 [result] (page content)
 ```
 
-### `KmsSearch(kms: "name", pattern: "regex")`
+### `KmsSearch(kms: "name", pattern: "regex")` — line grep (default)
 
-Grep-style scan across `<kms_root>/pages/*.md`. Returns matching lines as `page:line:text`, one per line.
+Grep-style scan across `<kms_root>/pages/*.md`. Returns matching lines as `page:line:text`, one per line. Use for exact-shape lookups (find a specific TODO marker, function name, error code).
 
 ```
 [assistant] Let me search for "bearer" across my notes…
@@ -656,6 +656,76 @@ Grep-style scan across `<kms_root>/pages/*.md`. Returns matching lines as `page:
 [result]
 auth-flow:12:Bearer tokens expire after 15 minutes
 api-conventions:34:Always include "Authorization: Bearer <token>"
+```
+
+### `KmsSearch(kms: "name", query: "...")` — BM25-ranked search
+
+Native-language search across page title (×4 boost), topic (×2), and body. Returns ranked hits with snippet previews. Use when you don't know the exact phrasing and want the most relevant pages, not every line that matches.
+
+```
+[assistant] Let me find pages about refresh tokens…
+[tool: KmsSearch(kms: "notes", query: "token refresh flow")]
+[result]
+[score 6.12] page: auth-flow
+  title: Refresh-token rotation
+  topic: auth
+  preview: The token refresh rotates on every login. Refresh tokens are stored…
+
+[score 4.88] page: bug-2023-03
+  preview: Rotation logic in __refresh_token__ misfired when the session…
+```
+
+Optional filters narrow the candidate set without affecting score ranking:
+
+- `tags: ["auth", "security"]` — match pages tagged with ANY of these (OR semantics; uses frontmatter `tags:`).
+- `category: "runbook"` — exact match on the page's frontmatter `category:`.
+- `limit: 20` — max hits (default 10, capped at 50).
+
+**Build prerequisite.** `query:` mode requires the `kms_search_index` Cargo feature, which adds ~4-5 MB to the binary (tantivy + a Thai-aware dictionary). The official release binaries on github.com/thClaws/thClaws/releases ship with it ON; users who `cargo install` need `cargo install thclaws-core --features kms_search_index`. Without the feature, `query:` returns a clear error directing you to `pattern:`. The regex `pattern:` path always works.
+
+**First-touch indexing.** The first `query:` call against a KMS that doesn't have an index yet builds one synchronously from `pages/` on disk and emits a one-line `[index rebuilt — N page(s) indexed]` advisory. Subsequent queries hit the warm index (sub-50 ms on a 1000-page KMS). Bulk operations that don't fire per-page index hooks — `/kms merge`, `/kms link --apply` — trigger the same rebuild on the next query, or you can force one with `/kms reindex <name>`.
+
+**Thai-aware tokenization.** The BM25 path uses a native Rust port of PyThaiNLP's `newmm` segmenter so Thai content indexes word-by-word, not as one paragraph-sized token. Search works equally well on `query: "token refresh"` and `query: "การรีเฟรช token"`. Per-project supplements via `<kms_root>/extra_words_th.txt` let you add domain-specific terms the base dict misses.
+
+### `/kms search <name|*> <query>` — one-shot operator search
+
+Same surface as the `KmsSearch` tool, exposed as a slash command so you can search without a model round-trip (saves tokens + latency for exploratory lookups, and confirms the index works after `/kms reindex`).
+
+```
+> /kms search notes token refresh
+[score 6.12] page: auth-flow
+  title: Refresh-token rotation
+  preview: The token refresh rotates on every login…
+```
+
+Use `*` for `<name>` to fan out across every visible KMS — results are grouped under a per-KMS header so attribution stays clear:
+
+```
+> /kms search * bearer
+── KMS: notes ──
+[score 5.41] page: auth-flow
+  preview: Bearer tokens expire after 15 minutes…
+
+── KMS: project ──
+(no hits)
+```
+
+Default mode is BM25 `query:`. Switch to the regex line-grep with `--pattern`:
+
+```
+> /kms search notes --pattern ^TODO
+todos:3:TODO: rotate the staging cert
+api:18:TODO: deprecate /v1
+```
+
+### `/kms reindex <name>` — manual rebuild
+
+Drops `<kms_root>/.index/` and rebuilds from `pages/` on disk. Operator-only (no `KmsReindex` tool — the model doesn't decide to rebuild mid-turn). Useful after bulk operations the index didn't see, or if the index file ever corrupts.
+
+```
+> /kms reindex notes
+/kms reindex notes — rebuilding…
+/kms reindex notes — indexed 247 page(s)
 ```
 
 ### `KmsWrite`, `KmsAppend`, `KmsDelete`, `KmsCreate`

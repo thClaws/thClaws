@@ -580,6 +580,28 @@ pub enum SlashCommand {
     /// M6.25 BUG #3: lint a KMS for orphans / broken links / index drift /
     /// missing frontmatter. Pure-read; no mutation.
     KmsLint(String),
+    /// dev-plan/36 Tier 3.B: drop `<kms_root>/.index/` and rebuild
+    /// from `pages/` on disk. Used after a `merge_into` /
+    /// `auto_link` (which mutate many pages without firing per-page
+    /// index hooks) or after a manual `pages/` edit outside the
+    /// thClaws tools. Operator-only; the model does NOT have a
+    /// reindex tool — auto-build-on-stale-manifest handles the
+    /// self-healing case. No-op when the `kms_search_index` Cargo
+    /// feature is off (the slash command prints a clear message).
+    KmsReindex(String),
+    /// dev-plan/36 follow-up: operator-facing one-shot search
+    /// without a model round-trip. `name` accepts `*` to fan out
+    /// across every visible KMS (project + user scope per
+    /// `kms::list_all`); results are grouped under a per-KMS
+    /// `── KMS: <name> ──` header so attribution stays clear.
+    /// `is_pattern: true` routes through the regex line-grep path
+    /// (same surface as the model-callable tool's `pattern:`);
+    /// false uses BM25 `query:`.
+    KmsSearch {
+        name: String,
+        query: String,
+        is_pattern: bool,
+    },
     /// Session-end review: lint + stale-marker scan rolled into one
     /// summary so the user closes the loop before quitting. Pure-read
     /// by default; `--fix` dispatches the built-in `kms-linker`
@@ -2584,6 +2606,66 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 SlashCommand::Unknown("usage: /kms lint <name>".into())
             } else {
                 SlashCommand::KmsLint(rest.to_string())
+            }
+        }
+        "reindex" => {
+            // dev-plan/36 Tier 3.B: rebuild the BM25 index from
+            // pages/ on disk. Useful after a merge_into / auto_link
+            // (which bypass per-page index hooks) or after hand-
+            // editing pages/<x>.md outside the thClaws tools.
+            if rest.is_empty() {
+                SlashCommand::Unknown("usage: /kms reindex <name>".into())
+            } else {
+                SlashCommand::KmsReindex(rest.to_string())
+            }
+        }
+        "search" => {
+            // dev-plan/36 follow-up: `/kms search <name> <query>`
+            // — operator-facing one-shot search. `<name>` accepts
+            // `*` to fan out across every visible KMS. Default mode
+            // is BM25 `query:`; `--pattern <regex>` switches to the
+            // regex line-grep surface.
+            //
+            // Examples:
+            //   /kms search notes token refresh
+            //   /kms search * token refresh
+            //   /kms search notes --pattern bearer
+            //   /kms search * --pattern ^TODO
+            let mut tokens = rest.split_whitespace();
+            let name = match tokens.next() {
+                Some(n) => n.to_string(),
+                None => {
+                    return SlashCommand::Unknown(
+                        "usage: /kms search <name|*> <query> | --pattern <regex>".into(),
+                    );
+                }
+            };
+            // The rest of the line is the query body. Manually
+            // re-slice to preserve internal whitespace ("token
+            // refresh" stays two words separated by one space, not
+            // re-joined arbitrarily).
+            let after_name = rest
+                .strip_prefix(&name)
+                .map(|s| s.trim_start())
+                .unwrap_or("");
+            let (is_pattern, query_body) =
+                if let Some(rest_after_flag) = after_name.strip_prefix("--pattern ") {
+                    (true, rest_after_flag.trim().to_string())
+                } else if after_name == "--pattern" {
+                    (true, String::new())
+                } else {
+                    (false, after_name.trim().to_string())
+                };
+            if query_body.is_empty() {
+                SlashCommand::Unknown(format!(
+                    "usage: /kms search {name} <query> | --pattern <regex>"
+                ))
+            } else {
+                SlashCommand::KmsSearch {
+                    name,
+                    query: query_body,
+                    is_pattern,
+                }
             }
         }
         "wrap-up" | "wrapup" | "wrap" => {
@@ -7886,6 +7968,51 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                          (thclaws or thclaws --serve). It dispatches the built-in \
                          kms-reconcile agent as a side channel.{COLOR_RESET}"
                     );
+                }
+                // dev-plan/36 follow-up: `/kms search <name|*> <query>`
+                // — operator-facing one-shot search. Routes through
+                // the shared `run_slash_search` helper so format +
+                // fallback behaviour matches what the model sees.
+                SlashCommand::KmsSearch {
+                    name,
+                    query,
+                    is_pattern,
+                } => {
+                    let out = crate::tools::kms::run_slash_search(&name, &query, is_pattern);
+                    println!("{out}");
+                }
+                // dev-plan/36 Tier 3.B: rebuild the BM25 index from
+                // pages/ on disk. No-op stub when the feature is off
+                // (clear message; user can `cargo install --features
+                // kms_search_index` or use the release binary).
+                SlashCommand::KmsReindex(name) => {
+                    let Some(k) = crate::kms::resolve(&name) else {
+                        println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
+                        continue;
+                    };
+                    #[cfg(feature = "kms_search_index")]
+                    {
+                        println!("{COLOR_DIM}/kms reindex {name} — rebuilding…{COLOR_RESET}");
+                        match crate::kms_search_index::full_rebuild(&k.root) {
+                            Ok(n) => println!(
+                                "{COLOR_GREEN}/kms reindex {name} — indexed {n} page(s){COLOR_RESET}"
+                            ),
+                            Err(e) => println!(
+                                "{COLOR_YELLOW}/kms reindex {name} failed: {e}{COLOR_RESET}"
+                            ),
+                        }
+                    }
+                    #[cfg(not(feature = "kms_search_index"))]
+                    {
+                        let _ = k;
+                        println!(
+                            "{COLOR_YELLOW}/kms reindex requires the kms_search_index \
+                             feature; this binary was built without it. The released \
+                             thClaws binaries include it — `cargo install thclaws-core \
+                             --features kms_search_index` or use the official \
+                             release.{COLOR_RESET}"
+                        );
+                    }
                 }
                 // M6.25 BUG #3: lint (CLI).
                 SlashCommand::KmsLint(name) => {

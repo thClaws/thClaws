@@ -2310,6 +2310,47 @@ pub async fn dispatch(
             }
             Err(e) => emit(events_tx, format!("/kms merge failed: {e}")),
         },
+        SlashCommand::KmsSearch {
+            name,
+            query,
+            is_pattern,
+        } => {
+            // dev-plan/36 follow-up: `/kms search <name|*> <query>`.
+            // Same shared helper the CLI uses so GUI + CLI behave
+            // identically.
+            let out = crate::tools::kms::run_slash_search(&name, &query, is_pattern);
+            emit(events_tx, out);
+        }
+        SlashCommand::KmsReindex(name) => {
+            // dev-plan/36 Tier 3.B: rebuild the BM25 index from
+            // pages/ on disk. Mirrors the CLI handler in repl.rs.
+            let Some(k) = crate::kms::resolve(&name) else {
+                emit(events_tx, format!("no KMS named '{name}'"));
+                return;
+            };
+            #[cfg(feature = "kms_search_index")]
+            {
+                emit(events_tx, format!("/kms reindex {name} — rebuilding…"));
+                match crate::kms_search_index::full_rebuild(&k.root) {
+                    Ok(n) => emit(
+                        events_tx,
+                        format!("/kms reindex {name} — indexed {n} page(s)"),
+                    ),
+                    Err(e) => emit(events_tx, format!("/kms reindex {name} failed: {e}")),
+                }
+            }
+            #[cfg(not(feature = "kms_search_index"))]
+            {
+                let _ = k;
+                emit(
+                    events_tx,
+                    "/kms reindex requires the kms_search_index feature; \
+                     this binary was built without it. Use the official \
+                     thClaws release (which ships with the feature on)."
+                        .to_string(),
+                );
+            }
+        }
         SlashCommand::KmsLint(name) => {
             // M6.25 BUG #3: pure-read health check.
             let Some(k) = crate::kms::resolve(&name) else {

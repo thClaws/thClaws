@@ -1251,6 +1251,35 @@ pub fn writable_page_path(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
 /// today, preserves existing other frontmatter when the body itself
 /// includes a `---` block. Updates the index.md bullet under the
 /// page's category. Appends a log entry.
+/// dev-plan/36 Tier 1.D: notify the BM25 index that a page changed.
+/// No-op when the `kms_search_index` Cargo feature is off; called
+/// from every successful page mutation in this module
+/// (write_page / append_to_page / delete_page / rename_page /
+/// merge_into / auto_link). Errors inside the indexer are logged
+/// + swallowed there — the underlying KMS write has already
+/// succeeded and shouldn't roll back due to index drift.
+fn fire_index_upsert(kref: &KmsRef, page_stem: &str) {
+    #[cfg(feature = "kms_search_index")]
+    crate::kms_search_index::on_page_mutated(
+        &kref.root,
+        page_stem,
+        crate::kms_search_index::Op::Upsert,
+    );
+    #[cfg(not(feature = "kms_search_index"))]
+    let _ = (kref, page_stem);
+}
+
+fn fire_index_delete(kref: &KmsRef, page_stem: &str) {
+    #[cfg(feature = "kms_search_index")]
+    crate::kms_search_index::on_page_mutated(
+        &kref.root,
+        page_stem,
+        crate::kms_search_index::Op::Delete,
+    );
+    #[cfg(not(feature = "kms_search_index"))]
+    let _ = (kref, page_stem);
+}
+
 pub fn write_page(kref: &KmsRef, page_name: &str, content: &str) -> Result<PathBuf> {
     let path = writable_page_path(kref, page_name)?;
     let stem = path
@@ -1292,6 +1321,7 @@ pub fn write_page(kref: &KmsRef, page_name: &str, content: &str) -> Result<PathB
     let category = fm.get("category").cloned();
     update_index_for_write(kref, &stem, &summary, category.as_deref(), existed)?;
     append_log_header(kref, if existed { "edited" } else { "wrote" }, &stem)?;
+    fire_index_upsert(kref, &stem);
     Ok(path)
 }
 
@@ -1404,6 +1434,7 @@ pub fn append_to_page(kref: &KmsRef, page_name: &str, chunk: &str) -> Result<Pat
         update_index_for_write(kref, &stem, &summary, None, false)?;
     }
     append_log_header(kref, "appended", &stem)?;
+    fire_index_upsert(kref, &stem);
     Ok(path)
 }
 
@@ -1425,6 +1456,7 @@ pub fn delete_page(kref: &KmsRef, page_name: &str) -> Result<PathBuf> {
         .map_err(|e| Error::Tool(format!("remove {}: {e}", path.display())))?;
     remove_index_bullet(kref, &stem)?;
     append_log_header(kref, "deleted", &stem)?;
+    fire_index_delete(kref, &stem);
     Ok(path)
 }
 
@@ -1512,6 +1544,8 @@ pub fn rename_page(kref: &KmsRef, old_name: &str, new_name: &str) -> Result<Path
     }
 
     append_log_header(kref, "renamed", &format!("{old_stem} → {new_slug}"))?;
+    fire_index_delete(kref, &old_stem);
+    fire_index_upsert(kref, &new_slug);
     Ok(new_path)
 }
 
@@ -2015,6 +2049,16 @@ fn combine_aggregator_bodies(dst_full: &str, src_body_only: &str, src_kms: &str)
 /// `src` is read-only during the merge — its pages, sources, index,
 /// and log are left exactly as found. The caller can `/kms drop`
 /// afterwards once they've verified the merged result.
+///
+/// **dev-plan/36 Tier 1.D note:** `merge_into` mutates many pages
+/// in one call (rename-on-collision + body rewrites + cascade);
+/// firing per-page index hooks inline here would require threading
+/// the rename map through every helper. Deferred to Tier 3, which
+/// adds auto-rebuild-on-stale-manifest — after a merge, the next
+/// `KmsSearch(query: …)` against the destination KMS will detect
+/// the manifest staleness and rebuild before serving. Operators can
+/// also run `/kms reindex <dst>` immediately after a merge to
+/// force a fresh build (~1 s per 100 pages).
 pub fn merge_into(src_name: &str, dst_name: &str) -> Result<MergeReport> {
     if src_name == dst_name {
         return Err(Error::Config("cannot merge a KMS into itself".into()));
@@ -2266,6 +2310,13 @@ pub struct AutoLinkReport {
 /// keep the rewrite quiet — heavy auto-linking turns prose into a
 /// thicket. `opts.apply == false` (the default) returns the report
 /// without writing anything.
+///
+/// **dev-plan/36 Tier 1.D note:** `auto_link` rewrites N pages in
+/// one call. Per-page index hooks here would require threading the
+/// affected-page set through. Deferred to Tier 3's auto-rebuild-on-
+/// stale-manifest path (same rationale as `merge_into` above); or
+/// the operator can run `/kms reindex <name>` after a bulk
+/// auto-link to force a fresh build.
 pub fn auto_link(kref: &KmsRef, opts: AutoLinkOptions) -> Result<AutoLinkReport> {
     use regex::Regex;
     use std::collections::HashMap;

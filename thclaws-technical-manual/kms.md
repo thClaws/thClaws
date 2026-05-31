@@ -617,7 +617,7 @@ When at least one KMS is in `kms_active`, **five tools** register into the `Tool
 | Tool | Approval | Purpose |
 |---|---|---|
 | `KmsRead` | No | Read a single page |
-| `KmsSearch` | No | Regex grep across all pages in one KMS |
+| `KmsSearch` | No | Two modes: `pattern:` (regex line grep, byte-identical pre-Tier-2 output) OR `query:` (BM25 ranked, requires `kms_search_index` feature). Optional `tags:` / `category:` / `limit:` filter the `query:` path. Mutually exclusive — `pattern` and `query` together return a clear error. See §"dev-plan/36 BM25 search architecture" below. |
 | `KmsWrite` | **Yes** | Create or replace a page |
 | `KmsAppend` | **Yes** | Append to a page |
 | `KmsDelete` | **Yes** | Remove a page (last resort; framed as "prefer KmsWrite to merge or supersede" in the system-prompt Tools block) |
@@ -1000,3 +1000,152 @@ CLI emits the same `"GUI-only — dispatches the built-in kms-reconcile agent as
 | Produces "Conflict" pages | No | Yes (for genuinely-ambiguous findings) |
 
 The split is deliberate. `kms-linker` is *deterministic* — the lint report is generated mechanically and the agent acts on each entry. `kms-reconcile` is *judgment-driven* — every contradiction needs LLM evaluation (which side is more authoritative? is this evolution or contradiction?). Different jobs; same architectural seam.
+
+---
+
+## dev-plan/36 BM25 search architecture
+
+Tier 1–3 of dev-plan/36 add a tantivy-backed BM25 index sibling
+to the existing regex line-grep, exposed via `KmsSearch`'s new
+`query:` argument. Layout, write-path wiring, tokenizer, and
+manifest are documented here.
+
+### On-disk layout
+
+```text
+<kms_root>/
+├── pages/              ← source of truth (markdown)
+├── .index/             ← tantivy index dir (`kms_search_index` owns)
+│   ├── meta.json       ← tantivy's own metadata
+│   ├── *.fast / *.idx  ← tantivy segments
+│   └── manifest.json   ← thClaws metadata: {index_version,
+│                          last_full_rebuild_at}
+└── .index/vectors/     ← reserved for a future semantic-search
+                          dev-plan; never touched in Tier 1–3
+```
+
+Reserving `.index/vectors/` as a sibling means a future semantic-
+search PR can land without disk-schema migration.
+
+### Schema + field boosts
+
+| Field    | Type | Stored | Indexed   | Boost (query-time) |
+|----------|------|--------|-----------|--------------------|
+| page     | text | yes    | raw       | — (identity)       |
+| title    | text | yes    | tokenized | 4.0                |
+| topic    | text | yes    | tokenized | 2.0                |
+| body     | text | no     | tokenized | 1.0                |
+| tags     | text | yes    | raw, multi| — (filter)         |
+| category | text | yes    | raw       | — (filter)         |
+| sources  | text | no     | raw, multi| — (filter)         |
+| updated  | i64  | yes    | INDEXED + FAST | — (Tier 4 recency boost) |
+
+Body is **indexed but NOT stored** — page content lives on disk;
+duplicating it into the index would double disk usage. Snippet
+generation in `tools/kms.rs::format_hits` re-reads page bodies from
+disk for the top-K hits only.
+
+Field boosts are applied **at query time** via `QueryParser::
+set_field_boost`, not baked into the schema. This lets us revisit
+the boost values (or make them config-driven) without rebuilding
+existing indexes.
+
+### Tokenizer
+
+Custom `ThaiOrEnglishTokenizer` (in `kms_search_index.rs`) splits
+input by script:
+
+- ASCII whitespace + punct → separators
+- ASCII alphanumeric run → one token (English identifiers + numbers)
+- Non-ASCII run → segmented via `crate::thai::Segmenter`
+  (newmm-style maximum matching over an `fst::Set` Thai dict)
+
+Token filter chain: `LowerCaser` only. English stemming is
+intentionally NOT in the pipeline — applying en-stemmer to Thai
+tokens mangles them, and per-token language detection costs more
+than it's worth for BM25 indexing.
+
+The Thai segmenter is documented in `crates/core/src/thai/` —
+see the module's `//!` docs for the algorithm + the
+`scripts/build_thai_dict/README.md` for the Wiktionary dictionary
+pipeline.
+
+### Write-path wiring
+
+`crates/core/src/kms.rs` fires `kms_search_index::on_page_mutated`
+after every successful page mutation:
+
+| KMS fn          | Op                              |
+|-----------------|---------------------------------|
+| `write_page`    | `Upsert`                        |
+| `append_to_page`| `Upsert` (re-reads whole page) |
+| `delete_page`   | `Delete`                        |
+| `rename_page`   | `Delete(old)` + `Upsert(new)`   |
+| `merge_into`    | NOT wired (per-page) — relies on auto-rebuild-on-stale or `/kms reindex` |
+| `auto_link`     | NOT wired (per-page) — same     |
+
+`merge_into` + `auto_link` mutate many pages in one call; wiring
+per-page hooks there would require threading the affected-page set
+through their internals. The auto-rebuild-on-stale path catches
+them; operators can also `/kms reindex <name>` after a bulk op.
+
+### Concurrency: per-kms-root SearchIndex registry
+
+Tantivy's `IndexWriter` holds a directory-level lock. Naive
+"open a fresh index per mutation" collides on `LockBusy`.
+`kms_search_index::registry()` is a process-wide
+`OnceLock<Mutex<HashMap<PathBuf, Arc<SearchIndex>>>>` that hands
+out one cached `Arc<SearchIndex>` per `kms_root` for the process
+lifetime. The `SearchIndex`'s internal writer `Mutex` serialises
+concurrent upsert/delete cleanly. `drop_cached(kms_root)` is the
+explicit eviction handle used by `full_rebuild` (which deletes
+`.index/` and needs to reopen).
+
+### Auto-build-on-stale manifest
+
+`<kms_root>/.index/manifest.json`:
+
+```json
+{
+  "index_version": 1,
+  "last_full_rebuild_at": 1717200000
+}
+```
+
+On every `KmsSearch(query: …)`, `tools/kms.rs::kms_search_query_path`
+reads the manifest. If absent OR `index_version` doesn't match the
+current binary's `kms_search_index::INDEX_VERSION` const, calls
+`full_rebuild` before serving the query + emits an
+`[index rebuilt — N page(s) indexed]` advisory. Bump
+`INDEX_VERSION` whenever a non-backward-compatible schema or
+tokenizer change ships; users get a one-time rebuild on first
+search after the upgrade.
+
+### Feature gating: `kms_search_index`
+
+Per dev-plan/36 D3 the feature is **opt-in forever** at the Cargo
+level (`default = []`; `kms_search_index = ["dep:tantivy",
+"dep:fst"]`). Adds ~4-5 MB to the binary.
+
+Build wiring:
+
+- `Makefile` `build-cli` / `build-app` add `--features
+  kms_search_index` so day-to-day local builds match released
+  binaries.
+- `.github/workflows/release.yml` adds the feature to the matrix
+  that produces shipped binaries.
+- `.github/workflows/ci.yml` runs a second job with
+  `--features kms_search_index` (build + test) to prevent
+  bitrot in the BM25 path; the default `--features gui` job
+  catches the regex-only path.
+- `cargo install thclaws-core` defaults to OFF; users opt in via
+  `--features kms_search_index`.
+- `KmsSearch(query: …)` from a feature-off binary returns a clear
+  "feature not enabled, use `pattern:` instead" error.
+
+### `/kms reindex <name>` slash command
+
+`SlashCommand::KmsReindex(name)`; handlers in `repl.rs` (CLI) +
+`shell_dispatch.rs` (GUI / `--serve`). Drops `.index/` and calls
+`full_rebuild`. Operator-only (no `KmsReindex` model-callable
+tool — the auto-build-on-stale path covers self-healing).

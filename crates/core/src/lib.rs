@@ -55,6 +55,12 @@ pub mod instructions;
 #[cfg(feature = "gui")]
 pub mod ipc;
 pub mod kms;
+// dev-plan/36 Tier 1: BM25-ranked KMS search + native Thai segmenter.
+// Both gated behind the `kms_search_index` Cargo feature (opt-in
+// forever per D3) so users / operators without KMSes don't pay the
+// tantivy + dict binary-size cost.
+#[cfg(feature = "kms_search_index")]
+pub mod kms_search_index;
 pub mod line;
 /// ChatGPT OAuth device-code flow for the `chatgpt-codex` provider.
 pub mod login_codex;
@@ -95,6 +101,8 @@ pub mod sso;
 pub mod subagent;
 pub mod team;
 pub mod telegram;
+#[cfg(feature = "kms_search_index")]
+pub mod thai;
 pub mod theme;
 pub mod tokens;
 pub mod tool_display;

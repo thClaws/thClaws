@@ -138,74 +138,334 @@ impl Tool for KmsSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Grep across all pages in one knowledge base. Returns matching \
-         lines as `page:line:text`. Use to locate a fact before reading \
-         a whole page."
+        "Search one knowledge base. Two modes, exactly one of which \
+         must be provided:\n\
+         - `query`: natural-language BM25 search across page title \
+         (×4 boost), topic (×2), and body. Returns ranked hits with \
+         snippet previews. Optional `tags` / `category` filters narrow \
+         the candidate set. Requires the `kms_search_index` feature \
+         build; falls back to regex with an advisory when unavailable.\n\
+         - `pattern`: regex grep across page bodies, returns matching \
+         lines as `page:line:text`. Use for exact-shape lookups (find \
+         a specific TODO marker, function name, error code)."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "kms":     {"type": "string", "description": "KMS name"},
-                "pattern": {"type": "string", "description": "Regex pattern"}
+                "kms":      {"type": "string", "description": "KMS name (see /kms list)"},
+                "query":    {"type": "string", "description": "Natural-language search query (BM25). Mutually exclusive with `pattern`."},
+                "pattern":  {"type": "string", "description": "Regex pattern (line grep). Mutually exclusive with `query`."},
+                "tags":     {"type": "array", "items": {"type": "string"}, "description": "Optional: limit `query` results to pages tagged with ANY of these. Ignored for `pattern`."},
+                "category": {"type": "string", "description": "Optional: limit `query` results to pages whose frontmatter `category:` matches exactly."},
+                "limit":    {"type": "integer", "description": "Max hits for `query` (default 10, capped at 50)."}
             },
-            "required": ["kms", "pattern"]
+            "required": ["kms"]
         })
     }
 
     async fn call(&self, input: Value) -> Result<String> {
         let kms_name = req_str(&input, "kms")?;
-        let pattern = req_str(&input, "pattern")?;
         let Some(kref) = crate::kms::resolve(kms_name) else {
             return Err(Error::Tool(format!(
                 "no KMS named '{kms_name}' (check /kms list)"
             )));
         };
-        let re = Regex::new(pattern).map_err(|e| Error::Tool(format!("regex: {e}")))?;
 
-        let pages_dir = kref.pages_dir();
-        // Refuse to walk if `pages/` itself is a symlink. Entry-level
-        // symlink filtering below can't save us from a `pages -> /etc`
-        // symlink because /etc's contents aren't themselves symlinks.
-        if let Ok(md) = std::fs::symlink_metadata(&pages_dir) {
-            if md.file_type().is_symlink() {
+        let query = input.get("query").and_then(|v| v.as_str()).map(str::trim);
+        let pattern = input.get("pattern").and_then(|v| v.as_str()).map(str::trim);
+        match (
+            query.filter(|s| !s.is_empty()),
+            pattern.filter(|s| !s.is_empty()),
+        ) {
+            (Some(_), Some(_)) => Err(Error::Tool(
+                "KmsSearch: `query` and `pattern` are mutually exclusive — \
+                 pick one (or read both arg descriptions to decide which)"
+                    .into(),
+            )),
+            (None, None) => Err(Error::Tool(
+                "KmsSearch: provide either `query` (BM25 ranked) or `pattern` (regex line grep)"
+                    .into(),
+            )),
+            (Some(q), None) => kms_search_query_path(&kref, kms_name, q, &input),
+            (None, Some(p)) => kms_search_pattern_path(&kref, kms_name, p),
+        }
+    }
+}
+
+/// Existing regex line-grep path — byte-identical to pre-Tier-2
+/// behaviour for scripts memoising the `page:line:text` format.
+fn kms_search_pattern_path(
+    kref: &crate::kms::KmsRef,
+    kms_name: &str,
+    pattern: &str,
+) -> Result<String> {
+    let re = Regex::new(pattern).map_err(|e| Error::Tool(format!("regex: {e}")))?;
+    let pages_dir = kref.pages_dir();
+    // Refuse to walk if `pages/` itself is a symlink. Entry-level
+    // symlink filtering below can't save us from a `pages -> /etc`
+    // symlink because /etc's contents aren't themselves symlinks.
+    if let Ok(md) = std::fs::symlink_metadata(&pages_dir) {
+        if md.file_type().is_symlink() {
+            return Err(Error::Tool(format!(
+                "kms '{kms_name}' has a symlinked pages/ directory — refusing to read"
+            )));
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(&pages_dir) else {
+        return Ok(String::new());
+    };
+    let mut results: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        // Skip symlinks to prevent `ln -s ~/.ssh/id_rsa pages/leak.md`
+        // style exfiltration via grep.
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if !path.extension().map(|e| e == "md").unwrap_or(false) {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let page_name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for (i, line) in contents.lines().enumerate() {
+            if re.is_match(line) {
+                results.push(format!("{}:{}:{}", page_name, i + 1, line));
+            }
+        }
+    }
+    results.sort();
+    Ok(results.join("\n"))
+}
+
+/// BM25 path — only available when the `kms_search_index` Cargo
+/// feature is on. Without the feature, returns a clear error so the
+/// model knows to fall back to `pattern:`. With the feature, opens
+/// the index (auto-builds on first call if missing per Tier 3),
+/// runs the query, formats ranked hits.
+#[cfg(feature = "kms_search_index")]
+fn kms_search_query_path(
+    kref: &crate::kms::KmsRef,
+    _kms_name: &str,
+    query: &str,
+    input: &Value,
+) -> Result<String> {
+    // Parse optional filters.
+    let tags: Vec<String> = input
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let category = input
+        .get("category")
+        .and_then(|v| v.as_str())
+        .map(str::trim);
+    let limit = input
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(10);
+
+    // Auto-build-on-stale (Tier 3.A): if the manifest is missing or
+    // its index_version doesn't match the current binary, do a full
+    // rebuild from disk before serving. Cheap on first-touch
+    // (single rebuild per KMS per binary version); transparent on
+    // steady state (manifest hit → no rebuild).
+    let index_dir = kref.root.join(".index");
+    let needs_build = match read_manifest(&index_dir) {
+        Some(m) => m.index_version != crate::kms_search_index::INDEX_VERSION,
+        None => !index_dir.join("meta.json").exists(),
+    };
+    let mut advisory = String::new();
+    if needs_build {
+        match crate::kms_search_index::full_rebuild(&kref.root) {
+            Ok(n) => {
+                write_manifest(&index_dir);
+                advisory = format!("[index rebuilt — {n} page(s) indexed]\n\n");
+            }
+            Err(e) => {
                 return Err(Error::Tool(format!(
-                    "kms '{kms_name}' has a symlinked pages/ directory — refusing to read"
+                    "KmsSearch: index rebuild failed: {e}\nFall back to `pattern:` or run /kms reindex"
                 )));
             }
         }
-        let Ok(entries) = std::fs::read_dir(&pages_dir) else {
-            return Ok(String::new());
-        };
+    }
 
-        let mut results: Vec<String> = Vec::new();
-        for entry in entries.flatten() {
-            // Skip symlinks to prevent `ln -s ~/.ssh/id_rsa pages/leak.md`
-            // style exfiltration via grep.
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_symlink() {
-                continue;
-            }
-            let path = entry.path();
-            if !path.extension().map(|e| e == "md").unwrap_or(false) {
-                continue;
-            }
-            let Ok(contents) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let page_name = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            for (i, line) in contents.lines().enumerate() {
-                if re.is_match(line) {
-                    results.push(format!("{}:{}:{}", page_name, i + 1, line));
-                }
+    let idx = crate::kms_search_index::get_or_open(&kref.root)
+        .map_err(|e| Error::Tool(format!("KmsSearch: open index: {e}")))?;
+    let cat_ref = category.filter(|s| !s.is_empty());
+    let hits = idx
+        .search(query, &tags, cat_ref, limit)
+        .map_err(|e| Error::Tool(format!("KmsSearch: query: {e}")))?;
+
+    Ok(format_hits(&advisory, &hits))
+}
+
+#[cfg(not(feature = "kms_search_index"))]
+fn kms_search_query_path(
+    _kref: &crate::kms::KmsRef,
+    _kms_name: &str,
+    _query: &str,
+    _input: &Value,
+) -> Result<String> {
+    Err(Error::Tool(
+        "KmsSearch `query:` requires the kms_search_index feature; \
+         this binary was built without it. Use `pattern:` for regex \
+         search instead. (Operators: build with `--features \
+         kms_search_index` to enable BM25 search.)"
+            .into(),
+    ))
+}
+
+/// Operator-facing `/kms search` entry point — invoked by both the
+/// CLI REPL handler and the GUI / `--serve` slash dispatcher.
+/// `name` is a single KMS name OR the wildcard `*` (fan out across
+/// every visible KMS per `kms::list_all`). Results from each KMS
+/// are grouped under a `── KMS: <name> ──` header so attribution
+/// stays unambiguous when `*` is used.
+///
+/// `is_pattern: true` routes through the regex line-grep path
+/// (same surface as the model-callable tool's `pattern:`);
+/// `false` uses BM25 `query:`. The format mirrors the tool output
+/// the model sees — no separate "operator format" to maintain.
+pub fn run_slash_search(name: &str, query: &str, is_pattern: bool) -> String {
+    // Wildcard expansion: project + user scope visible KMSes, in
+    // discovery order (project first so on-name-collision the
+    // project entry runs first). `list_all` may return duplicates
+    // when the same name exists in both scopes; dedupe by
+    // (scope-tagged) root path so we don't search the same
+    // directory twice.
+    let kmses: Vec<crate::kms::KmsRef> = if name == "*" {
+        let mut seen = std::collections::HashSet::new();
+        crate::kms::list_all()
+            .into_iter()
+            .filter(|k| seen.insert(k.root.clone()))
+            .collect()
+    } else {
+        match crate::kms::resolve(name) {
+            Some(k) => vec![k],
+            None => {
+                return format!(
+                    "no KMS named '{name}' (use `/kms list` to see what's visible, \
+                     or `*` to search every KMS)"
+                );
             }
         }
-        results.sort();
-        Ok(results.join("\n"))
+    };
+
+    if kmses.is_empty() {
+        return "no KMSes visible — create one with `/kms new <name>` first".to_string();
+    }
+
+    let mut out = String::new();
+    let multi = kmses.len() > 1;
+    for (idx, kref) in kmses.iter().enumerate() {
+        if multi {
+            if idx > 0 {
+                out.push_str("\n");
+            }
+            out.push_str(&format!("── KMS: {} ──\n", kref.name));
+        }
+        let result = if is_pattern {
+            // The pattern path takes a kms_name arg only for its
+            // error message text; pass the resolved name.
+            match kms_search_pattern_path(kref, &kref.name, query) {
+                Ok(s) if s.is_empty() => "(no matches)".to_string(),
+                Ok(s) => s,
+                Err(e) => format!("(error: {e})"),
+            }
+        } else {
+            // Re-use the model-callable query path. Construct the
+            // same JSON shape the tool sees so format + fallback
+            // semantics stay aligned.
+            let input = serde_json::json!({
+                "kms": kref.name,
+                "query": query,
+            });
+            match kms_search_query_path(kref, &kref.name, query, &input) {
+                Ok(s) => s,
+                Err(e) => format!("(error: {e})"),
+            }
+        };
+        out.push_str(&result);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[cfg(feature = "kms_search_index")]
+fn format_hits(advisory: &str, hits: &[crate::kms_search_index::SearchHit]) -> String {
+    if hits.is_empty() {
+        return format!(
+            "{advisory}(no hits — try `pattern:` for exact-shape lookups, or broaden the query)"
+        );
+    }
+    let mut out = String::new();
+    out.push_str(advisory);
+    for (i, h) in hits.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("[score {:.2}] page: {}\n", h.score, h.page));
+        if let Some(title) = &h.title {
+            out.push_str(&format!("  title: {title}\n"));
+        }
+        if let Some(topic) = &h.topic {
+            out.push_str(&format!("  topic: {topic}\n"));
+        }
+        if !h.snippet_preview.is_empty() {
+            out.push_str(&format!("  preview: {}\n", h.snippet_preview));
+        }
+    }
+    out
+}
+
+/// Tier 3.A: on-disk manifest distinguishing a current vs stale
+/// index. Lives at `<kms_root>/.index/manifest.json`. Read on every
+/// query to decide whether to auto-rebuild; written after every
+/// full_rebuild.
+#[cfg(feature = "kms_search_index")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IndexManifest {
+    index_version: u32,
+    /// Unix seconds (i64 for serde compat; never negative in practice).
+    last_full_rebuild_at: i64,
+}
+
+#[cfg(feature = "kms_search_index")]
+fn read_manifest(index_dir: &std::path::Path) -> Option<IndexManifest> {
+    let path = index_dir.join("manifest.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+#[cfg(feature = "kms_search_index")]
+fn write_manifest(index_dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(index_dir);
+    let manifest = IndexManifest {
+        index_version: crate::kms_search_index::INDEX_VERSION,
+        last_full_rebuild_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+        let _ = std::fs::write(index_dir.join("manifest.json"), json);
     }
 }
 
@@ -624,6 +884,140 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, "");
+    }
+
+    // ─── dev-plan/36 Tier 2: BM25 `query:` path ────────────────────────────
+
+    #[tokio::test]
+    async fn search_rejects_both_query_and_pattern() {
+        let _home = scoped_home();
+        create("nb", KmsScope::User).unwrap();
+        let err = KmsSearchTool
+            .call(json!({"kms": "nb", "query": "x", "pattern": "y"}))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("mutually exclusive"),
+            "got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn search_rejects_neither_query_nor_pattern() {
+        let _home = scoped_home();
+        create("nb", KmsScope::User).unwrap();
+        let err = KmsSearchTool.call(json!({"kms": "nb"})).await.unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("provide either"), "got: {s}");
+    }
+
+    /// dev-plan/36 Tier 2 + Tier 3.A: feature-on BM25 round-trip
+    /// through the tool surface. Validates the auto-build-on-stale
+    /// path (no manifest → full_rebuild before serving), the query
+    /// path itself (page indexed via write_page hook lights up),
+    /// and the human-readable result format.
+    #[cfg(feature = "kms_search_index")]
+    #[tokio::test]
+    async fn search_query_path_returns_ranked_hits() {
+        let _home = scoped_home();
+        let _k = create("nb", KmsScope::User).unwrap();
+        // Use the write tool to populate (exercises the
+        // on_page_mutated index hook from Tier 1.D).
+        KmsWriteTool
+            .call(json!({
+                "kms": "nb",
+                "page": "auth-flow",
+                "content": "---\ntitle: Refresh token rotation\ntopic: auth\n---\n\nThe token refresh rotates on every login.\n"
+            }))
+            .await
+            .unwrap();
+        KmsWriteTool
+            .call(json!({
+                "kms": "nb",
+                "page": "unrelated",
+                "content": "---\ntitle: Theming\n---\n\nDark mode colour tokens.\n"
+            }))
+            .await
+            .unwrap();
+        let out = KmsSearchTool
+            .call(json!({"kms": "nb", "query": "token refresh"}))
+            .await
+            .unwrap();
+        // auth-flow should rank above unrelated; the human-readable
+        // format must include "page: auth-flow" + a score.
+        assert!(
+            out.contains("page: auth-flow"),
+            "missing auth-flow hit: {out}"
+        );
+        assert!(out.contains("[score "), "missing score format: {out}");
+    }
+
+    /// dev-plan/36 follow-up: `/kms search * pattern` fans out
+    /// across every visible KMS. Each KMS gets a `── KMS: <name> ──`
+    /// header in the output so attribution stays clear.
+    #[tokio::test]
+    async fn slash_search_wildcard_fans_out_across_kmses() {
+        let _home = scoped_home();
+        let a = create("alpha", KmsScope::User).unwrap();
+        let b = create("beta", KmsScope::User).unwrap();
+        std::fs::write(a.pages_dir().join("p1.md"), "needle in alpha").unwrap();
+        std::fs::write(b.pages_dir().join("p1.md"), "haystack").unwrap();
+        std::fs::write(b.pages_dir().join("p2.md"), "needle in beta").unwrap();
+
+        let out = run_slash_search("*", "needle", /* is_pattern */ true);
+        assert!(
+            out.contains("── KMS: alpha ──"),
+            "missing alpha header: {out}"
+        );
+        assert!(
+            out.contains("── KMS: beta ──"),
+            "missing beta header: {out}"
+        );
+        assert!(
+            out.contains("p1:1:needle in alpha"),
+            "missing alpha hit: {out}"
+        );
+        assert!(
+            out.contains("p2:1:needle in beta"),
+            "missing beta hit: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_search_single_kms_omits_header() {
+        let _home = scoped_home();
+        let k = create("notes", KmsScope::User).unwrap();
+        std::fs::write(k.pages_dir().join("p.md"), "find-me here").unwrap();
+        let out = run_slash_search("notes", "find-me", /* is_pattern */ true);
+        assert!(
+            !out.contains("── KMS:"),
+            "single-KMS search should not print the multi-KMS header: {out}",
+        );
+        assert!(out.contains("p:1:find-me here"), "missing hit: {out}");
+    }
+
+    #[tokio::test]
+    async fn slash_search_unknown_kms_returns_clear_message() {
+        let _home = scoped_home();
+        let out = run_slash_search("nope", "x", true);
+        assert!(out.contains("no KMS named 'nope'"), "got: {out}");
+    }
+
+    /// `pattern:` output stays byte-identical to pre-Tier-2 for
+    /// scripts that memoised the format. (The same fixture as
+    /// `search_returns_page_line_matches` above; re-asserted here
+    /// alongside `query:` to make the back-compat contract obvious
+    /// in one place.)
+    #[tokio::test]
+    async fn pattern_path_output_unchanged() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        std::fs::write(k.pages_dir().join("p.md"), "one\ntwo\nfind-me\n").unwrap();
+        let out = KmsSearchTool
+            .call(json!({"kms": "nb", "pattern": "find-me"}))
+            .await
+            .unwrap();
+        assert_eq!(out, "p:3:find-me");
     }
 
     // ─── M6.25 BUG #1: write/append tools ─────────────────────────────────

@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -160,6 +160,14 @@ boa_engine = "0.21"
 # in-process against an inline schema object.
 jsonschema = { version = "0.46", default-features = false }
 
+# dev-plan/36 Tier 1: BM25-ranked KmsSearch + native Thai segmenter.
+# `tantivy` is the full-text index; `fst` is the DAFSA-backed dict
+# for the Thai segmenter (Burntsushi, battle-tested via ripgrep).
+# Both gated behind the `kms_search_index` feature so users who
+# don't want the ~4-5 MB binary cost can build without them.
+tantivy = { version = "0.22", optional = true }
+fst = { version = "0.4", optional = true }
+
 [features]
 # `cost_bridge` is OPT-IN, not default: it starts a BLE scan on launch
 # (cost_bridge::spawn → adapter.start_scan), which on macOS triggers a
@@ -174,6 +182,12 @@ gui = ["dep:tao", "dep:wry", "dep:comrak", "dep:rfd", "dep:native-dialog"]
 # thClaws-Cost peripheral over BLE NUS; device sends reset notifications
 # back when the user hits Backspace. Opt-in (see note on `default`).
 cost_bridge = ["dep:btleplug"]
+# dev-plan/36: BM25-ranked KmsSearch + Thai segmenter.
+# Opt-in forever (per D3) — the regex path stays default. The
+# released binaries built via `make release` include this; cargo-
+# install users must opt in explicitly. Adds ~4-5 MB (tantivy ~3 MB
+# + Thai dict + auxiliary).
+kms_search_index = ["dep:tantivy", "dep:fst"]
 
 [[bin]]
 name = "thclaws-cli"
