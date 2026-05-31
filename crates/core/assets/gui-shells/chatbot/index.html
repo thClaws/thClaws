@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Chatbot</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="bar">
+      <h1>Chatbot</h1>
+      <p class="session-meta">
+        Sends your messages to the agent loop. Replies stream back via
+        <code>thclaws.run()</code>. Replace
+        <code>AGENTS.md</code> at the project root to tailor the
+        bot's behaviour.
+      </p>
+      <button id="clear-btn" class="clear-btn" title="Clear conversation history">Clear</button>
+    </header>
+
+    <main class="transcript" id="transcript">
+      <div class="empty" id="empty">No messages yet — type below and hit Send.</div>
+    </main>
+
+    <p class="status" id="status"></p>
+
+    <div class="composer">
+      <textarea
+        id="prompt-input"
+        rows="2"
+        placeholder="Type a message… (Cmd/Ctrl-Enter to send)"
+      ></textarea>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+
+  <div class="transport-badge" id="transport-badge"></div>
+  <script src="main.js"></script>
+</body>
+</html>

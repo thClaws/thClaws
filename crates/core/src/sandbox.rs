@@ -42,6 +42,21 @@ impl Sandbox {
         SANDBOX_ROOT.read().ok()?.clone()
     }
 
+    /// Clear the global sandbox root back to its initial unset state.
+    /// Tests that swap cwd via a `with_temp_cwd`-style helper must
+    /// call this to drop the tempdir-scoped sandbox they set with
+    /// `init()` — otherwise SANDBOX_ROOT keeps pointing at the
+    /// restored saved_cwd and breaks every later tool test that
+    /// expects the default unset state (no `init()` called in unit
+    /// tests = allow-all branch). Regression caught 2026-05-30 from
+    /// dev-plan/33 Task 16 image_gen tests cascading into ~38
+    /// tool-test failures.
+    pub fn reset() {
+        if let Ok(mut w) = SANDBOX_ROOT.write() {
+            *w = None;
+        }
+    }
+
     /// Validate a path for a write/mutate operation. In addition to the
     /// standard sandbox rules, this denies any path inside the `.thclaws/`
     /// directory at the sandbox root — that directory holds team state,
@@ -91,6 +106,56 @@ impl Sandbox {
         let cwd =
             std::env::current_dir().map_err(|e| Error::Tool(format!("cannot read cwd: {e}")))?;
         Self::validate_against(&root, &cwd, path)
+    }
+
+    /// Same algorithm as `check`, but rooted at an arbitrary directory
+    /// instead of the global workspace `SANDBOX_ROOT`. Used by GUI Shell
+    /// asset serving where the shell's folder is outside the workspace
+    /// (e.g. `~/.config/thclaws/gui-shell/<id>/`) so the global check would
+    /// reject it. Relative paths in `path` are resolved against `root`.
+    ///
+    /// Canonicalises `root` before validating so callers can pass
+    /// non-canonical paths (e.g. tempdir paths on macOS where `/tmp`
+    /// symlinks to `/private/tmp` — without this, the path's canonical
+    /// form has `/private/` prefix while the un-canonical root doesn't,
+    /// and the `starts_with` check spuriously fails).
+    pub fn check_in(root: &Path, path: &str) -> Result<PathBuf> {
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|e| Error::Tool(format!("cannot canonicalize shell root: {e}")))?;
+        Self::validate_against(&canonical_root, &canonical_root, path)
+    }
+
+    /// dev-plan/35 multi-tenant: validate that `path` lives inside
+    /// the user's writable subtree(s) under `project_root`. Two-stage
+    /// check: (a) `check_in(project_root, path)` to confirm it's at
+    /// least inside the project, (b)
+    /// [`crate::multi_tenant::user_state::is_in_user_writable`] to
+    /// confirm it's also in one of `<project>/output/users/<id>/` or
+    /// `<project>/.thclaws/users/<id>/`. Rejects shared assets
+    /// (AGENTS.md, kms/, settings.json) and other users' subtrees.
+    ///
+    /// `paths` is the resolved [`UserStatePaths`] for the
+    /// authenticated user — same instance the IPC dispatch builds
+    /// once per request.
+    pub fn check_write_for_user(
+        project_root: &Path,
+        paths: &crate::multi_tenant::user_state::UserStatePaths,
+        path: &str,
+    ) -> Result<PathBuf> {
+        let resolved = Self::check_in(project_root, path)?;
+        if !crate::multi_tenant::user_state::is_in_user_writable(paths, &resolved) {
+            return Err(Error::Tool(format!(
+                "access denied: '{}' is outside the per-user writable subtree \
+                 (allowed: '{}/' and '{}/' for this user). In multi-tenant \
+                 mode, shared project assets (AGENTS.md, kms/, settings.json) \
+                 and other users' subtrees are read-only.",
+                resolved.display(),
+                paths.output_root.display(),
+                paths.thclaws_user_root.display(),
+            )));
+        }
+        Ok(resolved)
     }
 
     fn validate_against(root: &Path, cwd: &Path, path: &str) -> Result<PathBuf> {
@@ -440,6 +505,81 @@ mod tests {
                     "got: {msg}"
                 );
             }
+        });
+    }
+
+    /// `check_in` works for roots completely unrelated to the global
+    /// `SANDBOX_ROOT` — the GUI Shell case where the shell folder lives
+    /// outside the workspace (e.g. `~/.config/thclaws/gui-shell/<id>/`).
+    #[test]
+    fn check_in_resolves_inside_arbitrary_root() {
+        with_sandbox(|root| {
+            std::fs::write(root.join("index.html"), "<!doctype html>").unwrap();
+            let result = Sandbox::check_in(root, "index.html").unwrap();
+            assert!(result.starts_with(root));
+            assert!(result.ends_with("index.html"));
+        });
+    }
+
+    #[test]
+    fn check_in_denies_dotdot_escape() {
+        with_sandbox(|root| {
+            let err = Sandbox::check_in(root, "../../etc/passwd").unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("access denied") || msg.contains("not accessible"),
+                "got: {msg}"
+            );
+        });
+    }
+
+    /// dev-plan/35 multi-tenant: a per-user write check accepts paths
+    /// in the user's own `output/users/<id>/` and
+    /// `.thclaws/users/<id>/` subtrees, and rejects shared assets +
+    /// other users' subtrees.
+    #[test]
+    fn check_write_for_user_isolates_per_user_subtrees() {
+        use crate::multi_tenant::{user_state::UserStatePaths, UserId};
+        with_sandbox(|root| {
+            // Real on-disk per-user subtrees so canonicalize() works
+            // and the starts_with check meets the canonical root.
+            std::fs::create_dir_all(root.join("output/users/alice")).unwrap();
+            std::fs::create_dir_all(root.join(".thclaws/users/alice")).unwrap();
+            std::fs::create_dir_all(root.join("output/users/bob")).unwrap();
+            std::fs::create_dir_all(root.join(".thclaws/users/bob")).unwrap();
+
+            let alice = UserStatePaths::new(root, &UserId::new_for_test("alice"));
+
+            // OK: alice writes into her output subtree.
+            let ok = Sandbox::check_write_for_user(root, &alice, "output/users/alice/img.png");
+            assert!(ok.is_ok(), "alice → her output: {ok:?}");
+
+            // OK: alice writes into her .thclaws subtree.
+            let ok = Sandbox::check_write_for_user(
+                root,
+                &alice,
+                ".thclaws/users/alice/storage/sess.json",
+            );
+            assert!(ok.is_ok(), "alice → her storage: {ok:?}");
+
+            // REJECT: alice writes to shared AGENTS.md (read-only).
+            let err = Sandbox::check_write_for_user(root, &alice, "AGENTS.md").unwrap_err();
+            assert!(format!("{err}").contains("outside the per-user writable subtree"));
+
+            // REJECT: alice writes to bob's output.
+            let err = Sandbox::check_write_for_user(root, &alice, "output/users/bob/img.png")
+                .unwrap_err();
+            assert!(format!("{err}").contains("outside the per-user writable subtree"));
+
+            // REJECT: alice writes to bob's storage.
+            let err =
+                Sandbox::check_write_for_user(root, &alice, ".thclaws/users/bob/storage/leak.json")
+                    .unwrap_err();
+            assert!(format!("{err}").contains("outside the per-user writable subtree"));
+
+            // REJECT: alice writes to shared output.
+            let err = Sandbox::check_write_for_user(root, &alice, "output/shared.png").unwrap_err();
+            assert!(format!("{err}").contains("outside the per-user writable subtree"));
         });
     }
 }

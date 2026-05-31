@@ -33,8 +33,9 @@ teams.
 | 23 | [Telegram bot](ch23-telegram.md) |
 | 24 | [Facebook Page Messenger bot](ch24-messenger.md) |
 | 25 | [Workflows (`/workflow run`)](ch25-workflows.md) |
+| 26 | [GUI Shells](ch26-gui-shells.md) |
 
-> **Part II — Case studies (chapters 26–29)** — applied walkthroughs
+> **Part II — Case studies (chapters 27–30)** — applied walkthroughs
 > for building real projects with thClaws (static sites, Node.js apps,
 > AI agents, deploying to Agentic Press) are in active development and
 > will be added to this manual as each is reviewed and ready.

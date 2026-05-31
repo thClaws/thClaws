@@ -221,6 +221,225 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             ctx.shared.request_cancel();
         }
 
+        // GUI Shell (dev-plan/33 Tier 1) — same input/cancel plumbing as
+        // shell_input / shell_cancel above, but framed as a separate IPC
+        // type so the bridge runtime's request/response correlator can
+        // round-trip a `runId` back to the shell's JS through the
+        // gui_shell_event dispatch. Per-shell session isolation is Tier 2;
+        // Tier 1 routes through the shared session, which means the Chat
+        // tab will also see the shell's conversation. Documented limit.
+        "gui_shell_run" => {
+            let prompt = msg
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if !prompt.is_empty() {
+                let _ = ctx.shared.input_tx.send(ShellInput::Line(prompt));
+            }
+            // Reply so the bridge's Promise resolves. Tier 1 echoes the
+            // request id as a placeholder runId — multi-run correlation
+            // (cancelling a specific in-flight run) lands in Tier 2.
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "result": { "runId": format!("run-{request_id}") },
+                })
+                .to_string(),
+            );
+        }
+
+        "gui_shell_cancel" => {
+            ctx.shared.request_cancel();
+        }
+
+        // GUI Shell (dev-plan/33 Tier 2) — direct tool invocation
+        // bypassing the agent loop. The shell's domain UI uses this
+        // for deterministic actions ("Generate" button calls image_gen
+        // directly; no model round-trip needed).
+        //
+        // Tier 2 rules:
+        //   - Read-only tools (ls/read/glob/grep/web_fetch/...) → run.
+        //   - Tools whose `requires_approval(&input)` returns true →
+        //     rejected with a clear error. Tier 3 wires the approval
+        //     flow so a shell can request approval through the same
+        //     GuiApprover the agent uses.
+        //   - MCP-contributed tools are NOT visible here — the fresh
+        //     ToolRegistry::with_builtins() doesn't include them.
+        //     Tier 3 routes through the worker's registry for parity.
+        //
+        // The IPC dispatch is sync but Tool::call is async + the wry
+        // IPC thread has no tokio runtime context. Build a per-call
+        // single-threaded runtime in a fresh OS thread; cheap enough
+        // for the read-only call sites Tier 2 allows.
+        "gui_shell_tool_invoke" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tool_name = msg
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = msg.get("args").cloned().unwrap_or(serde_json::Value::Null);
+            let dispatch = ctx.dispatch.clone();
+            std::thread::spawn(move || {
+                let outcome: std::result::Result<String, String> = (|| {
+                    if tool_name.is_empty() {
+                        return Err("gui_shell_tool_invoke: missing 'name' field".into());
+                    }
+                    let registry = crate::tools::ToolRegistry::with_builtins();
+                    let tool = registry
+                        .get(&tool_name)
+                        .ok_or_else(|| format!("unknown tool: {tool_name}"))?;
+                    if tool.requires_approval(&args) {
+                        return Err(format!(
+                            "tool '{tool_name}' requires approval; thclaws.tools.invoke is read-only in Tier 2 (Tier 3 wires the approval flow)"
+                        ));
+                    }
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| format!("tokio runtime build: {e}"))?;
+                    rt.block_on(tool.call(args)).map_err(|e| e.to_string())
+                })();
+                let reply = match outcome {
+                    Ok(output) => serde_json::json!({
+                        "type": "gui_shell_event",
+                        "sessionId": session_id,
+                        "replyTo": request_id,
+                        "result": output,
+                    }),
+                    Err(err) => serde_json::json!({
+                        "type": "gui_shell_event",
+                        "sessionId": session_id,
+                        "replyTo": request_id,
+                        "error": err,
+                    }),
+                };
+                dispatch(reply.to_string());
+            });
+        }
+
+        // GUI Shell (dev-plan/33 Tier 2) — per-shell, per-session
+        // key-value storage. State lives at
+        // ~/.config/thclaws/gui-shell/<shellId>/state/<sessionId>.json
+        // — user-level regardless of how the shell was installed (state
+        // is the user's, not the repo's, so uninstall doesn't lose it).
+        "gui_shell_storage_get" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let key = msg.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let result = match ctx.shared.session_roots.as_ref() {
+                Some(roots) => {
+                    crate::gui_shell::storage::get_in(&roots.storage_dir, shell_id, session_id, key)
+                }
+                None => crate::gui_shell::storage::get(shell_id, session_id, key),
+            };
+            let reply = match result {
+                Ok(v) => serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "result": { "value": v },
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "error": e.to_string(),
+                }),
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
+        // GUI Shell (dev-plan/33 Tier 2) — picker list. Returns the
+        // merged registry (builtin + user + project) so the picker can
+        // render its grid. Reply is fired through ctx.dispatch as a
+        // gui_shell_list_result envelope — the frontend correlates by
+        // the request id it sent. Includes the `tabDefault` resolved
+        // from settings.json::guiShell so the picker can auto-open
+        // the user's preferred shell without showing the grid.
+        "gui_shell_list" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let registry = crate::gui_shell::ShellRegistry::new();
+            let listed: Vec<serde_json::Value> = registry
+                .list()
+                .into_iter()
+                .map(|(source, m)| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "name": m.name,
+                        "version": m.version,
+                        "description": m.description,
+                        "icon": m.icon,
+                        "source": source.as_str(),
+                        "permissions": m.permissions,
+                    })
+                })
+                .collect();
+            // Resolve tabDefault from layered config. None when unset
+            // (picker shows grid as usual).
+            let tab_default = crate::config::AppConfig::load().ok().and_then(|c| {
+                c.gui_shell
+                    .and_then(|s| s.tab_default().map(str::to_string))
+            });
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "gui_shell_list_result",
+                    "id": request_id,
+                    "shells": listed,
+                    "tabDefault": tab_default,
+                })
+                .to_string(),
+            );
+        }
+
+        "gui_shell_storage_set" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            let key = msg.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let value = msg.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            let result = match ctx.shared.session_roots.as_ref() {
+                Some(roots) => crate::gui_shell::storage::set_in(
+                    &roots.storage_dir,
+                    shell_id,
+                    session_id,
+                    key,
+                    value,
+                ),
+                None => crate::gui_shell::storage::set(shell_id, session_id, key, value),
+            };
+            let reply = match result {
+                Ok(()) => serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "result": null,
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "gui_shell_event",
+                    "sessionId": session_id,
+                    "replyTo": request_id,
+                    "error": e.to_string(),
+                }),
+            };
+            (ctx.dispatch)(reply.to_string());
+        }
+
         // Schedule-add modal cron preview. Frontend debounces field
         // changes and asks the backend to validate + project the
         // next N fires so users see exactly when their schedule will

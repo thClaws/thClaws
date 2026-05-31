@@ -82,6 +82,22 @@ struct SessionHeader {
     model: String,
     cwd: String,
     created_at: u64,
+    /// GUI Shell binding. Present only when this session was created by a
+    /// shell tab; absent on Chat/Terminal sessions so JSONL stays
+    /// byte-identical for non-shell flows. `cat sess-xxx.jsonl` must
+    /// remain readable — only opt-in shell sessions get this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shell: Option<ShellMeta>,
+}
+
+/// Per-session shell binding written into the session header.
+/// `id` matches a GUI Shell manifest id; `version` is captured at
+/// session-creation time so a shell upgrade doesn't silently change
+/// the rendering of an older session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellMeta {
+    pub id: String,
+    pub version: String,
 }
 
 /// A single message event line in the JSONL file.
@@ -224,6 +240,13 @@ pub struct Session {
     /// load). Other providers leave it `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
+    /// GUI Shell binding. `Some(ShellMeta { id, version })` for sessions
+    /// created by a shell tab; `None` for Chat/Terminal sessions. Drives
+    /// the per-shell session metadata stamp in the JSONL header and the
+    /// event-translator's routing decision (shell sessions emit
+    /// `gui_shell_event` dispatches instead of `chat_*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellMeta>,
 }
 
 impl PartialEq for Session {
@@ -261,7 +284,21 @@ impl Session {
             plan: None,
             goal: None,
             provider_session_id: None,
+            shell: None,
         }
+    }
+
+    /// Constructor for sessions bound to a GUI Shell. Identical to `new`
+    /// except the resulting session is stamped with `shell` metadata —
+    /// drives the JSONL header field and the event-translator routing.
+    pub fn new_for_shell(
+        model: impl Into<String>,
+        cwd: impl Into<String>,
+        shell: ShellMeta,
+    ) -> Self {
+        let mut s = Self::new(model, cwd);
+        s.shell = Some(shell);
+        s
     }
 
     /// Sync the session with the latest agent history + bump `updated_at`.
@@ -305,6 +342,7 @@ impl Session {
             model: self.model.clone(),
             cwd: self.cwd.clone(),
             created_at: self.created_at,
+            shell: self.shell.clone(),
         };
         let line = serde_json::to_string(&header)?;
         append_locked(path, |file| {
@@ -336,6 +374,7 @@ impl Session {
                 model: self.model.clone(),
                 cwd: self.cwd.clone(),
                 created_at: self.created_at,
+                shell: self.shell.clone(),
             };
             Some(serde_json::to_string(&header)?)
         } else {
@@ -579,6 +618,7 @@ impl Session {
                 model: "unknown".into(),
                 cwd: String::new(),
                 created_at,
+                shell: None,
             }
         });
 
@@ -876,6 +916,7 @@ impl Session {
                     model: "unknown".into(),
                     cwd: String::new(),
                     created_at,
+                    shell: None,
                 }
             }
         };
@@ -897,6 +938,7 @@ impl Session {
             plan,
             goal,
             provider_session_id,
+            shell: h.shell,
         })
     }
 

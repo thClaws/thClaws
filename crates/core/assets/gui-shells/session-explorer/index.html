@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Session Explorer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <aside>
+      <header>Sessions <span id="session-count"></span></header>
+      <div id="session-list" class="empty">loading…</div>
+    </aside>
+    <main>
+      <div id="welcome">
+        <h1>Session Explorer</h1>
+        <p class="session-meta">
+          Tier 1 demo — ask anything about your thClaws sessions. The shell
+          calls <code>thclaws.run()</code> for each query; replies stream in
+          via <code>thclaws.on("text")</code>.
+        </p>
+        <div style="margin: 16px 0;">
+          <textarea id="ask-input" rows="2" placeholder="e.g. summarise today's sessions, or which session called bq_query?" style="width:100%;padding:8px;font:inherit;background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:3px;"></textarea>
+          <div style="margin-top: 6px;">
+            <button id="ask-btn">Ask</button>
+            <button id="cancel-btn" disabled>Cancel</button>
+            <span id="status" class="session-meta" style="margin-left: 8px;"></span>
+          </div>
+        </div>
+        <div id="answer"></div>
+      </div>
+      <div id="detail" hidden></div>
+    </main>
+  </div>
+  <div class="transport-badge" id="transport-badge"></div>
+  <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "id": "session-explorer",
+  "name": "Session Explorer",
+  "version": "0.1.0",
+  "description": "Tree-view past sessions, summarise tool calls on demand.",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "minBridgeVersion": "1",
+  "permissions": ["agent.run", "session.read"]
+}

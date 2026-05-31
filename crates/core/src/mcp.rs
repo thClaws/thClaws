@@ -314,6 +314,14 @@ pub struct McpClient {
     /// timeout to fire (M6.15 BUG 4). Shared `Arc` so the reader
     /// task can flip the same instance the McpClient reads.
     closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Optional "instructions" string from the MCP `InitializeResult`
+    /// (per spec — servers MAY return this to brief the model on
+    /// when/how to use their tools). Captured in [`Self::initialize`]
+    /// and surfaced into the system prompt's "# MCP server
+    /// instructions" section by `prompts::build_full_system_prompt`.
+    /// `Some("")` is treated as no-op; the renderer trims + skips
+    /// empty strings.
+    instructions: Mutex<Option<String>>,
 }
 
 impl Drop for McpClient {
@@ -397,6 +405,7 @@ impl McpClient {
             _child: Mutex::new(None),
             trusted,
             closed,
+            instructions: Mutex::new(None),
         })
     }
 
@@ -803,7 +812,27 @@ impl McpClient {
     pub fn name(&self) -> &str {
         &self.name
     }
+}
 
+/// Collect `(server_name, instructions)` pairs from a slice of live
+/// MCP clients, filtering out servers that didn't ship instructions.
+/// Output order matches the input slice (which itself follows the
+/// settings.json mcp_servers config order), so the rendered prompt
+/// section is stable across runs.
+///
+/// Used by every surface's prompt build path
+/// (`repl::run_repl`, `repl::run_print_mode`, `agent_runtime`,
+/// `shared_session::rebuild_system_prompt`) — feeds the
+/// `# MCP server instructions` section in
+/// `crate::prompts::build_full_system_prompt`.
+pub fn collect_mcp_instructions(clients: &[Arc<McpClient>]) -> Vec<(String, String)> {
+    clients
+        .iter()
+        .filter_map(|c| c.instructions().map(|i| (c.name().to_string(), i)))
+        .collect()
+}
+
+impl McpClient {
     /// Send a JSON-RPC request and wait for the matching response.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
         // M6.15 BUG 4: fast-fail when the transport is already known
@@ -859,17 +888,40 @@ impl McpClient {
     }
 
     pub async fn initialize(&self) -> Result<()> {
-        self.request(
-            "initialize",
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION}
-            }),
-        )
-        .await?;
+        let result = self
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION}
+                }),
+            )
+            .await?;
+        // Capture the optional `instructions` field per MCP spec
+        // (InitializeResult.instructions). Servers use this to brief
+        // the model on when/how to call their tools — surfaced in the
+        // unified system prompt's `# MCP server instructions` section.
+        // Trim + skip empty; oversized values stay verbatim (operator
+        // chose to install the server, server chose to brief us).
+        if let Some(s) = result.get("instructions").and_then(Value::as_str) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                if let Ok(mut guard) = self.instructions.lock() {
+                    *guard = Some(trimmed.to_string());
+                }
+            }
+        }
         self.notify("notifications/initialized", json!({})).await?;
         Ok(())
+    }
+
+    /// Read the cached `instructions` string from the server's
+    /// `InitializeResult`. `None` when the server didn't send one
+    /// (most don't yet). Cheap to call per turn — short mutex grab,
+    /// no I/O.
+    pub fn instructions(&self) -> Option<String> {
+        self.instructions.lock().ok().and_then(|g| g.clone())
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpToolInfo>> {
@@ -1755,6 +1807,80 @@ mod tests {
 
         assert!(*saw_initialize.lock().unwrap());
         assert!(*saw_initialized.lock().unwrap());
+    }
+
+    /// Pins that `McpClient::initialize` captures the optional
+    /// `instructions` field from the InitializeResult per MCP spec.
+    /// Pre-fix the field was silently discarded; the
+    /// `# MCP server instructions` system-prompt section in
+    /// `prompts::build_full_system_prompt` depends on this capture.
+    #[tokio::test]
+    async fn initialize_captures_server_instructions() {
+        let (client, (s_read, s_write)) = paired_streams();
+        let server_task = tokio::spawn(async move {
+            run_mock_server(s_read, s_write, move |msg| {
+                let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+                if method == "initialize" {
+                    let id = msg.get("id").and_then(Value::as_u64).unwrap();
+                    return Some(jsonrpc_response(
+                        id,
+                        json!({
+                            "protocolVersion": PROTOCOL_VERSION,
+                            "capabilities": {},
+                            "serverInfo": {"name": "mock", "version": "0.0.1"},
+                            "instructions": "  Call list_tasks before todo_add — duplicate detection lives there.  "
+                        }),
+                    ));
+                }
+                None
+            })
+            .await;
+        });
+        client.initialize().await.expect("initialize");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let captured = client.instructions();
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
+        assert_eq!(
+            captured.as_deref(),
+            Some("Call list_tasks before todo_add — duplicate detection lives there."),
+            "instructions should be captured + trimmed; got {captured:?}",
+        );
+    }
+
+    /// Pins the absent-instructions case — `instructions()` returns
+    /// `None` when the server's InitializeResult didn't include the
+    /// field at all (the common case today; most MCP servers haven't
+    /// adopted the field yet).
+    #[tokio::test]
+    async fn initialize_without_instructions_returns_none() {
+        let (client, (s_read, s_write)) = paired_streams();
+        let server_task = tokio::spawn(async move {
+            run_mock_server(s_read, s_write, move |msg| {
+                let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+                if method == "initialize" {
+                    let id = msg.get("id").and_then(Value::as_u64).unwrap();
+                    return Some(jsonrpc_response(
+                        id,
+                        json!({
+                            "protocolVersion": PROTOCOL_VERSION,
+                            "capabilities": {},
+                            "serverInfo": {"name": "mock", "version": "0.0.1"}
+                        }),
+                    ));
+                }
+                None
+            })
+            .await;
+        });
+        client.initialize().await.expect("initialize");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            client.instructions().is_none(),
+            "no `instructions` field → None",
+        );
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
     }
 
     #[tokio::test]

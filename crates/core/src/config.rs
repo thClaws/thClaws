@@ -248,6 +248,57 @@ pub struct AppConfig {
     /// sensitive (URL only) — token sits in the keychain.
     #[serde(default, alias = "remoteAgentUrl")]
     pub remote_agent_url: Option<String>,
+
+    /// GUI Shell defaults (dev-plan/33 Tier 2). Two forms accepted:
+    ///
+    /// - **Shorthand** — `"guiShell": "session-explorer"` applies to
+    ///   both the GUI Shell tab default and the `--serve --gui-shell`
+    ///   fallback.
+    /// - **Long form** — `"guiShell": { "tabDefault": "session-explorer",
+    ///   "serveDefault": "image-generator" }` lets the two differ.
+    ///
+    /// `tabDefault` (when set) causes the Shell tab to auto-open that
+    /// shell instead of showing the picker. `serveDefault` is read by
+    /// `--serve` when no `--gui-shell` CLI flag is passed (Tier 2
+    /// Task 14 wiring).
+    #[serde(default, alias = "guiShell")]
+    pub gui_shell: Option<GuiShellSetting>,
+}
+
+/// Accepts both the string shorthand and the structured long form so
+/// `settings.json` stays terse for users who don't need to split tab
+/// vs serve defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum GuiShellSetting {
+    /// `"guiShell": "session-explorer"` — same id used for both modes.
+    Shorthand(String),
+    /// Long form with separate per-mode defaults.
+    Long {
+        #[serde(default, alias = "tabDefault")]
+        tab_default: Option<String>,
+        #[serde(default, alias = "serveDefault")]
+        serve_default: Option<String>,
+    },
+}
+
+impl GuiShellSetting {
+    /// Shell id to auto-open in the GUI Shell tab (`None` → show picker).
+    pub fn tab_default(&self) -> Option<&str> {
+        match self {
+            GuiShellSetting::Shorthand(s) => Some(s.as_str()),
+            GuiShellSetting::Long { tab_default, .. } => tab_default.as_deref(),
+        }
+    }
+
+    /// Shell id to fall back to when `--serve` is launched without
+    /// `--gui-shell` (Task 14 consumer).
+    pub fn serve_default(&self) -> Option<&str> {
+        match self {
+            GuiShellSetting::Shorthand(s) => Some(s.as_str()),
+            GuiShellSetting::Long { serve_default, .. } => serve_default.as_deref(),
+        }
+    }
 }
 
 /// Default stream-chunk idle timeout. Used by `serde(default = ...)`
@@ -305,6 +356,7 @@ impl Default for AppConfig {
             extract_save_skill_models: None,
             translator_subagent_model: None,
             remote_agent_url: None,
+            gui_shell: None,
         }
     }
 }
@@ -1271,6 +1323,45 @@ mod tests {
         let c = AppConfig::default();
         assert_eq!(c.model, "claude-sonnet-4-6");
         assert_eq!(c.detect_provider().unwrap(), "anthropic");
+    }
+
+    // dev-plan/33 Tier 2 — guiShell config parses both shapes.
+    #[test]
+    fn gui_shell_setting_parses_string_shorthand() {
+        let json = r#"{ "guiShell": "session-explorer" }"#;
+        let c: AppConfig = serde_json::from_str(json).unwrap();
+        let s = c.gui_shell.unwrap();
+        assert_eq!(s.tab_default(), Some("session-explorer"));
+        assert_eq!(s.serve_default(), Some("session-explorer"));
+    }
+
+    #[test]
+    fn gui_shell_setting_parses_long_form() {
+        let json = r#"{
+            "guiShell": {
+                "tabDefault": "session-explorer",
+                "serveDefault": "image-generator"
+            }
+        }"#;
+        let c: AppConfig = serde_json::from_str(json).unwrap();
+        let s = c.gui_shell.unwrap();
+        assert_eq!(s.tab_default(), Some("session-explorer"));
+        assert_eq!(s.serve_default(), Some("image-generator"));
+    }
+
+    #[test]
+    fn gui_shell_setting_long_form_partial_is_ok() {
+        let json = r#"{ "guiShell": { "tabDefault": "session-explorer" } }"#;
+        let c: AppConfig = serde_json::from_str(json).unwrap();
+        let s = c.gui_shell.unwrap();
+        assert_eq!(s.tab_default(), Some("session-explorer"));
+        assert_eq!(s.serve_default(), None);
+    }
+
+    #[test]
+    fn gui_shell_setting_absent_by_default() {
+        let c = AppConfig::default();
+        assert!(c.gui_shell.is_none());
     }
 
     #[test]

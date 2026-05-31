@@ -118,6 +118,72 @@ struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     bind: String,
 
+    /// dev-plan/33 Tier 2 Mode B: bind a GUI Shell as the served
+    /// frontend. When set, `--serve` mounts the shell at `/t/<token>/`
+    /// instead of the React app at `/`. Without this flag, `--serve`
+    /// keeps its existing behaviour (React frontend). Falls back to
+    /// `settings.json::guiShell.serveDefault` (or shorthand) when
+    /// omitted; if neither is set, serves React.
+    #[arg(long, value_name = "SHELL_ID")]
+    gui_shell: Option<String>,
+
+    /// Pin the per-shell auth token (16+ chars). Without this flag,
+    /// `--serve --gui-shell <id>` generates and persists a token in
+    /// ~/.config/thclaws/gui-shell-tokens.json so the URL is stable
+    /// across restarts. Use this for reproducible deployments
+    /// (k8s manifests, systemd units) where the URL must not change.
+    #[arg(long, value_name = "TOKEN", requires = "gui_shell")]
+    gui_shell_token: Option<String>,
+
+    /// Override the persisted token TTL (e.g. "30d", "12h", "never").
+    /// Default 30 days. Tokens past their TTL get regenerated on next
+    /// launch — the old URL stops working.
+    #[arg(long, value_name = "DURATION", requires = "gui_shell")]
+    gui_shell_token_ttl: Option<String>,
+
+    /// Serve the shell without the /t/<token>/ token prefix — routes
+    /// mount at /. Refuses non-loopback binds unless
+    /// --gui-shell-no-auth-allow-public is also passed. Loud stdout
+    /// warning. Same guardrail pattern as
+    /// --dangerously-skip-permissions.
+    #[arg(long, requires = "gui_shell")]
+    gui_shell_no_auth: bool,
+
+    /// Permit --gui-shell-no-auth on non-loopback addresses. Required
+    /// in addition to --gui-shell-no-auth to override the safety
+    /// check. Use behind your own auth proxy (Cloudflare Access,
+    /// OAuth2 proxy, mTLS, etc.).
+    #[arg(long, requires = "gui_shell_no_auth")]
+    gui_shell_no_auth_allow_public: bool,
+
+    /// dev-plan/35 Tier 1: enable multi-tenant `--serve` mode. The
+    /// pod accepts HMAC-signed X-Thclaws-User headers from a trusted
+    /// routing layer (typically dev-plan/34 thClaws.cloud) and routes
+    /// each request to a per-user SharedSessionHandle. Without this
+    /// flag, `--serve` is single-tenant (today's behaviour).
+    #[arg(long, requires = "serve")]
+    multi_tenant: bool,
+
+    /// HMAC-SHA256 secret for verifying X-Thclaws-User-Proof. Must
+    /// match the secret the cloud routing layer signs with. Falls
+    /// back to env `THCLAWS_CLOUD_HMAC_SECRET`. Required when
+    /// --multi-tenant is set (or panic at startup — fail loud, not
+    /// silently allow forged identities).
+    #[arg(long, value_name = "SECRET", requires = "multi_tenant")]
+    multi_tenant_secret: Option<String>,
+
+    /// Cap on concurrent resident user sessions per pod. LRU evicts
+    /// past this. Default 1000 — at ~2-5MB per session that's 2-5GB
+    /// pod RAM in the worst case, which matches typical HPA targets.
+    #[arg(long, default_value_t = 1000, requires = "multi_tenant")]
+    multi_tenant_max_users: usize,
+
+    /// Idle timeout per user — sessions checkpoint + evict after no
+    /// activity for this duration. Parsed via parse_ttl_secs ("30m",
+    /// "2h", "never"). Default 30 minutes.
+    #[arg(long, value_name = "DURATION", requires = "multi_tenant")]
+    multi_tenant_idle_timeout: Option<String>,
+
     /// Open the desktop GUI window. GUI is the implicit default when no
     /// other surface flag is set, so this flag's main use is composing
     /// with `--serve` (`--serve --gui`): the desktop window and any
@@ -333,6 +399,30 @@ fn detach_console_for_gui() {
 
 #[cfg(not(windows))]
 fn detach_console_for_gui() {}
+
+/// Parse a TTL string like "30d" / "12h" / "60m" / "120s" / "never"
+/// into seconds. Used by `--gui-shell-token-ttl`. Returns `None` for
+/// "never" (no expiry) or any unparseable input — the caller falls
+/// back to the manifest / launcher default.
+fn parse_ttl_secs(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("never") || s.is_empty() {
+        return None;
+    }
+    let (num, unit) = match s.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => (&s[..s.len() - 1], c.to_ascii_lowercase()),
+        _ => (s, 's'),
+    };
+    let n: u64 = num.parse().ok()?;
+    Some(match unit {
+        's' => n,
+        'm' => n * 60,
+        'h' => n * 60 * 60,
+        'd' => n * 60 * 60 * 24,
+        'w' => n * 60 * 60 * 24 * 7,
+        _ => return None,
+    })
+}
 
 /// Windows-only: when about to launch the GUI from a console (cmd.exe /
 /// PowerShell), respawn ourselves as a detached child and exit the parent
@@ -575,8 +665,54 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            // dev-plan/33 Tier 2 Mode B: resolve the bound shell from
+            // (a) explicit --gui-shell flag, or (b)
+            // settings.json::guiShell.serveDefault. None of either
+            // means "serve React frontend as before".
+            let resolved_shell_id = cli.gui_shell.clone().or_else(|| {
+                thclaws_core::config::AppConfig::load().ok().and_then(|c| {
+                    c.gui_shell
+                        .and_then(|s| s.serve_default().map(str::to_string))
+                })
+            });
+            let gui_shell_mode =
+                resolved_shell_id.map(|shell_id| thclaws_core::server::ShellServeMode {
+                    shell_id,
+                    pinned_token: cli.gui_shell_token.clone(),
+                    token_ttl_secs: cli.gui_shell_token_ttl.as_deref().and_then(parse_ttl_secs),
+                    no_auth: cli.gui_shell_no_auth,
+                    no_auth_allow_public: cli.gui_shell_no_auth_allow_public,
+                });
+            // dev-plan/35 Tier 1: multi-tenant mode.
+            let multi_tenant_mode = if cli.multi_tenant {
+                let secret = cli
+                    .multi_tenant_secret
+                    .clone()
+                    .or_else(|| std::env::var("THCLAWS_CLOUD_HMAC_SECRET").ok())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        eprintln!(
+                            "\x1b[31m--multi-tenant requires --multi-tenant-secret or THCLAWS_CLOUD_HMAC_SECRET\x1b[0m"
+                        );
+                        std::process::exit(1);
+                    });
+                let idle_timeout_secs = cli
+                    .multi_tenant_idle_timeout
+                    .as_deref()
+                    .and_then(parse_ttl_secs)
+                    .unwrap_or(30 * 60);
+                Some(thclaws_core::server::MultiTenantMode {
+                    hmac_secret: secret.into_bytes(),
+                    max_users: cli.multi_tenant_max_users,
+                    idle_timeout: std::time::Duration::from_secs(idle_timeout_secs),
+                })
+            } else {
+                None
+            };
             let serve_config = thclaws_core::server::ServeConfig {
                 bind: std::net::SocketAddr::new(bind_ip, cli.port),
+                gui_shell: gui_shell_mode,
+                multi_tenant: multi_tenant_mode,
                 ..Default::default()
             };
             if cli.gui {

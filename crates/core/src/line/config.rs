@@ -1,13 +1,20 @@
-//! On-disk binding config at `~/.config/thclaws/line.json`.
+//! On-disk binding config at `./.thclaws/line.json` (dev-plan/33
+//! Tier 2 — project-scoped, mirrors the Telegram per-project move).
 //!
 //! Written once when the user redeems a pairing code via the GUI
 //! Line Connect modal (Phase 1.3) or the `--line-pair <code>` CLI
-//! flag. Subsequent thClaws launches read it to find the binding
-//! JWT and the relay URL, then auto-reconnect the WebSocket.
+//! flag. Subsequent thClaws launches in the same project read it to
+//! find the binding JWT and the relay URL, then auto-reconnect the
+//! WebSocket.
 //!
 //! Schema is intentionally minimal — anything else (machine
 //! label, cwd, last-active timestamp) lives inside the JWT's
 //! claims, which the server is the source of truth for.
+//!
+//! Legacy `~/.config/thclaws/line.json` is consulted as a fallback
+//! only when the env var `THCLAWS_LINE_USER_CONFIG=1` is set, so
+//! pre-Tier 2 installs keep working until the user migrates by
+//! moving the file into a project's `.thclaws/`.
 
 use std::path::PathBuf;
 
@@ -16,6 +23,17 @@ use serde::{Deserialize, Serialize};
 /// Default server when `server_url` isn't set explicitly. Override
 /// in dev via `THCLAWS_LINE_SERVER`.
 pub const DEFAULT_SERVER_URL: &str = "https://line.thclaws.ai";
+
+/// Env opt-in for the legacy `~/.config/thclaws/line.json` fallback
+/// path. Without this, only `./.thclaws/line.json` is consulted —
+/// each project owns its own LINE binding.
+pub const USER_FALLBACK_ENV: &str = "THCLAWS_LINE_USER_CONFIG";
+
+fn user_fallback_enabled() -> bool {
+    std::env::var(USER_FALLBACK_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum LineConfigError {
@@ -54,29 +72,66 @@ pub struct LineConfig {
 }
 
 impl LineConfig {
-    /// Canonical on-disk path. `None` only when no home directory
-    /// can be resolved (unusual; mostly headless/CI environments).
+    /// Project-scoped path: `./.thclaws/line.json` — resolved against
+    /// the current working directory at call time. dev-plan/33 Tier 2
+    /// moved this off the user-level path so each project owns its own
+    /// LINE binding.
     pub fn path() -> Result<PathBuf, LineConfigError> {
+        let cwd = std::env::current_dir().map_err(|source| LineConfigError::Io {
+            path: PathBuf::from("."),
+            source,
+        })?;
+        Ok(cwd.join(".thclaws").join("line.json"))
+    }
+
+    /// Legacy user-level path (`~/.config/thclaws/line.json`). Only
+    /// consulted as a fallback when `THCLAWS_LINE_USER_CONFIG=1` is
+    /// set — pre-Tier 2 installs had their binding here.
+    pub fn legacy_user_path() -> Result<PathBuf, LineConfigError> {
         let home = crate::util::home_dir().ok_or(LineConfigError::NoHome)?;
         Ok(home.join(".config").join("thclaws").join("line.json"))
     }
 
-    /// Read from disk. `Ok(None)` when the file is absent — the
-    /// caller treats this as "LINE bridge not configured", which
-    /// is the default state for a fresh install.
+    /// Read from disk. Project path first; legacy user path as
+    /// opt-in fallback. `Ok(None)` when both are absent (the
+    /// default state for a fresh install).
     pub fn load() -> Result<Option<Self>, LineConfigError> {
-        let path = Self::path()?;
-        match std::fs::read_to_string(&path) {
+        let project_path = Self::path()?;
+        match std::fs::read_to_string(&project_path) {
+            Ok(body) => {
+                return serde_json::from_str(&body).map(Some).map_err(|source| {
+                    LineConfigError::Json {
+                        path: project_path,
+                        source,
+                    }
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(LineConfigError::Io {
+                    path: project_path,
+                    source,
+                });
+            }
+        }
+        if !user_fallback_enabled() {
+            return Ok(None);
+        }
+        let user_path = Self::legacy_user_path()?;
+        match std::fs::read_to_string(&user_path) {
             Ok(body) => {
                 serde_json::from_str(&body)
                     .map(Some)
                     .map_err(|source| LineConfigError::Json {
-                        path: path.clone(),
+                        path: user_path,
                         source,
                     })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(LineConfigError::Io { path, source }),
+            Err(source) => Err(LineConfigError::Io {
+                path: user_path,
+                source,
+            }),
         }
     }
 

@@ -1,0 +1,10 @@
+{
+  "id": "chatbot",
+  "name": "Chatbot",
+  "version": "0.1.0",
+  "description": "Minimal conversational shell — demonstrates thclaws.run() + thclaws.storage end-to-end. Works with any configured model; no tools required.",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "minBridgeVersion": "1",
+  "permissions": ["agent.run"]
+}

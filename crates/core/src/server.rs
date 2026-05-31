@@ -25,8 +25,8 @@
 
 use crate::config::AppConfig;
 use crate::event_render::{
-    render_chat_dispatches, render_terminal_ansi, terminal_data_envelope,
-    terminal_history_replaced_envelope, TerminalRenderState,
+    render_chat_dispatches, render_gui_shell_dispatch, render_terminal_ansi,
+    terminal_data_envelope, terminal_history_replaced_envelope, TerminalRenderState,
 };
 use crate::ipc::{handle_ipc, IpcContext, PendingAsks};
 use crate::providers::provider_has_credentials;
@@ -61,6 +61,64 @@ pub struct ServeConfig {
     /// which is the production default. Tests inject a tempdir to
     /// avoid touching global cwd.
     pub workspace: Option<std::path::PathBuf>,
+    /// dev-plan/33 Tier 2 Mode B: bind a single GUI Shell as the
+    /// served frontend. `None` → serve React (existing behaviour).
+    /// `Some(id)` → mount the shell at `/t/<token>/` (or `/` if
+    /// `gui_shell_no_auth`), 404 everything else.
+    #[doc(alias = "gui-shell")]
+    pub gui_shell: Option<ShellServeMode>,
+    /// dev-plan/35 Tier 1: enable multi-tenant routing — pod accepts
+    /// HMAC-signed user identity headers + spawns per-user sessions.
+    /// `None` → single-tenant (today's behaviour).
+    pub multi_tenant: Option<MultiTenantMode>,
+}
+
+/// dev-plan/35 Tier 1: multi-tenant `--serve` configuration. When
+/// `Some`, the pod expects HMAC-signed X-Thclaws-User headers on
+/// every WS upgrade and routes each request to a per-user
+/// `SharedSessionHandle` from the [`UserSessionRegistry`]. When
+/// `None`, --serve is single-tenant (today's behaviour).
+#[derive(Clone)]
+pub struct MultiTenantMode {
+    /// Shared HMAC secret. Verifies X-Thclaws-User-Proof headers
+    /// from the cloud routing layer.
+    pub hmac_secret: Vec<u8>,
+    /// LRU cap on concurrent resident sessions.
+    pub max_users: usize,
+    /// Idle-TTL for session eviction.
+    pub idle_timeout: std::time::Duration,
+}
+
+impl std::fmt::Debug for MultiTenantMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never log the HMAC secret — accidental leak risk.
+        f.debug_struct("MultiTenantMode")
+            .field("hmac_secret", &"<redacted>")
+            .field("max_users", &self.max_users)
+            .field("idle_timeout", &self.idle_timeout)
+            .finish()
+    }
+}
+
+/// Bound-shell configuration for Mode B serve. Built from CLI flags +
+/// `settings.json::guiShell.serveDefault` fallback.
+#[derive(Debug, Clone)]
+pub struct ShellServeMode {
+    /// Shell id to bind (resolved against the registry at launch time).
+    pub shell_id: String,
+    /// Pinned token (from `--gui-shell-token`). When `None`, the token
+    /// store generates / loads via `(shell_id, port)`.
+    pub pinned_token: Option<String>,
+    /// TTL for newly-generated tokens, parsed from
+    /// `--gui-shell-token-ttl`. `None` = use the default (30d).
+    pub token_ttl_secs: Option<u64>,
+    /// `--gui-shell-no-auth` — skip the `/t/<token>/` prefix, mount
+    /// at `/`. Refuses non-loopback binds without
+    /// `no_auth_allow_public`.
+    pub no_auth: bool,
+    /// `--gui-shell-no-auth-allow-public` — override the loopback
+    /// guard on `no_auth` for trusted reverse-proxy setups.
+    pub no_auth_allow_public: bool,
 }
 
 impl Default for ServeConfig {
@@ -71,6 +129,8 @@ impl Default for ServeConfig {
             // what you're doing.
             bind: ([127, 0, 0, 1], 8443).into(),
             workspace: None,
+            gui_shell: None,
+            multi_tenant: None,
         }
     }
 }
@@ -94,6 +154,20 @@ struct ServeState {
     pending_asks: PendingAsks,
     ask_broadcast: broadcast::Sender<String>,
     workspace: Arc<std::path::PathBuf>,
+    /// dev-plan/35 Tier 1: when `Some`, the WS handler verifies
+    /// X-Thclaws-User HMAC headers and routes to a per-user
+    /// session from this registry instead of using `shared`.
+    /// `None` = single-tenant (use `shared`).
+    multi_tenant: Option<MultiTenantState>,
+}
+
+/// State derived from [`MultiTenantMode`] at server bootstrap. Held
+/// inside [`ServeState`] when multi-tenant mode is enabled; absent
+/// otherwise (single-tenant path unchanged).
+#[derive(Clone)]
+struct MultiTenantState {
+    registry: crate::multi_tenant::UserSessionRegistry,
+    hmac_secret: Arc<Vec<u8>>,
 }
 
 /// Spin up the server. Spawns the worker, builds the Axum router,
@@ -105,6 +179,57 @@ pub async fn run(config: ServeConfig) -> crate::error::Result<()> {
     // keys in `.thclaws/.env` instead. CLI flag override TBD.
     if std::env::var_os("THCLAWS_DISABLE_KEYCHAIN").is_none() {
         std::env::set_var("THCLAWS_DISABLE_KEYCHAIN", "1");
+    }
+
+    // dev-plan/33 Tier 2 Mode B: a shell lives INSIDE a project folder;
+    // the project root is where the agent's context comes from.
+    //
+    //   gui-shell-test/image-gen/      ← project root (AGENTS.md, etc.)
+    //     AGENTS.md
+    //     .thclaws/settings.json
+    //     .thclaws/gui-shell/my-bot/   ← shell asset folder
+    //     output/                       ← agent-produced files
+    //
+    // Resolution by shell source:
+    //   - Project (`./.thclaws/gui-shell/<id>/`) → already in project
+    //     root; do nothing. The user launched from the project dir.
+    //   - User (`~/.config/thclaws/gui-shell/<id>/`) → no external
+    //     project; treat the shell folder itself as the project root.
+    //   - Embedded built-in → materialise to ~/.cache/thclaws/gui-shell/
+    //     <id>/ and treat the shadow as the project root.
+    //
+    // Either way, agent loaders (AGENTS.md, .thclaws/settings.json,
+    // MCP, KMS, .env) end up looking at the right directory.
+    if let Some(mode) = &config.gui_shell {
+        let shell = crate::gui_shell::serve::resolve_bound_shell(&mode.shell_id)?;
+        match shell.source() {
+            crate::gui_shell::ShellSource::Project => {
+                eprintln!(
+                    "\x1b[36m[serve] gui-shell project root: {} (cwd)\x1b[0m",
+                    std::env::current_dir().unwrap_or_default().display()
+                );
+            }
+            crate::gui_shell::ShellSource::User | crate::gui_shell::ShellSource::Builtin => {
+                let root = shell.ensure_shadow_root()?;
+                std::env::set_current_dir(&root).map_err(|e| {
+                    crate::error::Error::Tool(format!(
+                        "gui-shell: cannot chdir to '{}': {e}",
+                        root.display()
+                    ))
+                })?;
+                // Re-init sandbox at the new root so file tools
+                // operate on the shell folder; reload dotenv so a
+                // `<shell>/.env` is picked up.
+                crate::sandbox::Sandbox::init().map_err(|e| {
+                    crate::error::Error::Tool(format!("sandbox re-init at shell root: {e}"))
+                })?;
+                crate::dotenv::load_dotenv();
+                eprintln!(
+                    "\x1b[36m[serve] gui-shell project root: {} (chdir'd)\x1b[0m",
+                    root.display()
+                );
+            }
+        }
     }
 
     let (approver, _approval_rx) = crate::permissions::GuiApprover::new();
@@ -176,12 +301,38 @@ pub async fn run_with_engine(
         None => std::env::current_dir()
             .map_err(|e| crate::error::Error::Tool(format!("workspace cwd unavailable: {e}")))?,
     };
+    // dev-plan/35 Tier 1: construct the multi-tenant registry +
+    // background evictor when multi-tenant mode is configured.
+    let multi_tenant_state = config.multi_tenant.as_ref().map(|cfg| {
+        let registry =
+            crate::multi_tenant::UserSessionRegistry::new(crate::multi_tenant::RegistryConfig {
+                max_users: cfg.max_users,
+                idle_timeout: cfg.idle_timeout,
+                approver: approver.clone() as Arc<dyn crate::permissions::ApprovalSink>,
+                // Per-user JSONLs / storage / usage will land under
+                // <workspace>/.thclaws/users/<user_id>/... so a pod
+                // restart preserves every user's session.
+                project_root: workspace.clone(),
+            });
+        // Sweep every 30s — fine for 30m default idle_timeout, will
+        // need re-tuning if Tier 3 wants sub-minute sessions.
+        let _evictor = registry.spawn_evictor(std::time::Duration::from_secs(30));
+        eprintln!(
+            "\x1b[36m[serve] multi-tenant on — max_users={}, idle_timeout={:?}\x1b[0m",
+            cfg.max_users, cfg.idle_timeout
+        );
+        MultiTenantState {
+            registry,
+            hmac_secret: Arc::new(cfg.hmac_secret.clone()),
+        }
+    });
     let state = ServeState {
         shared,
         approver,
         pending_asks,
         ask_broadcast,
         workspace: Arc::new(workspace),
+        multi_tenant: multi_tenant_state,
     };
 
     // Loopback-only safety check for the API auth-bypass token. The
@@ -197,28 +348,175 @@ pub async fn run_with_engine(
         )));
     }
 
-    let app = Router::new()
-        .route("/", get(serve_index))
-        .route("/healthz", get(serve_health))
-        .route("/ws", get(ws_handler))
-        .route("/upload", post(serve_upload))
-        .with_state(state)
-        // /v1/* OpenAI-compatible endpoints. Merged at the end so the
-        // existing routes win on path collisions (none today).
-        .merge(crate::api_v1::router());
+    // dev-plan/33 Tier 2 Mode B: when a shell is bound, swap the
+    // React-frontend routes for the gui_shell::serve mount. The
+    // OpenAI-compat /v1/* surface is preserved either way (api_v1
+    // is merged unconditionally).
+    let app = if let Some(mode) = config.gui_shell.clone() {
+        build_shell_router(&config.bind, state, mode)?
+    } else {
+        Router::new()
+            .route("/", get(serve_index))
+            .route("/healthz", get(serve_health))
+            .route("/ws", get(ws_handler))
+            .route("/upload", post(serve_upload))
+            .with_state(state)
+            .merge(crate::api_v1::router())
+    };
 
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .map_err(|e| crate::error::Error::Tool(format!("bind {}: {e}", config.bind)))?;
-    eprintln!(
-        "\x1b[36m[serve] thClaws listening on http://{}\x1b[0m",
-        config.bind
-    );
-    eprintln!("\x1b[36m[serve] open the URL above in your browser (over an SSH tunnel for remote access)\x1b[0m");
+    if config.gui_shell.is_none() {
+        eprintln!(
+            "\x1b[36m[serve] thClaws listening on http://{}\x1b[0m",
+            config.bind
+        );
+        eprintln!("\x1b[36m[serve] open the URL above in your browser (over an SSH tunnel for remote access)\x1b[0m");
+    }
     axum::serve(listener, app)
         .await
         .map_err(|e| crate::error::Error::Tool(format!("serve: {e}")))?;
     Ok(())
+}
+
+/// Build the Mode B Axum router. Mounts the bound shell at
+/// `/t/<token>/` (or `/` when `no_auth`) and silently 404s
+/// everything else — `/gui-shell/<id>/...` from Mode A's internal
+/// protocol path is *not* mounted, so direct URLs to other shells
+/// fail closed.
+fn build_shell_router(
+    bind: &SocketAddr,
+    state: ServeState,
+    mode: ShellServeMode,
+) -> crate::error::Result<Router> {
+    // Resolve bound shell + token + safety guards before binding.
+    let shell = crate::gui_shell::serve::resolve_bound_shell(&mode.shell_id)?;
+    crate::gui_shell::serve::check_no_auth_safety(bind, mode.no_auth, mode.no_auth_allow_public)?;
+
+    // Token: pinned > stored > generated.
+    let token: Option<crate::gui_shell::ShellToken> = if mode.no_auth {
+        None
+    } else if let Some(pinned) = mode.pinned_token.clone() {
+        Some(crate::gui_shell::tokens::pin(
+            &mode.shell_id,
+            bind.port(),
+            pinned,
+            mode.token_ttl_secs,
+        )?)
+    } else {
+        // Default TTL = 30 days when nothing else is specified.
+        let ttl = mode.token_ttl_secs.or(Some(30 * 24 * 60 * 60));
+        let (t, _was_generated) =
+            crate::gui_shell::tokens::resolve_or_generate(&mode.shell_id, bind.port(), ttl)?;
+        Some(t)
+    };
+
+    // Build prefixed routes. We could use Router::nest, but explicit
+    // route strings keep the URL surface visible in source — important
+    // because the "no /gui-shell/<id>/" rule is the security model.
+    let prefix = crate::gui_shell::serve::url_prefix(token.as_ref());
+    let ws_url_path = format!("{prefix}/__ws");
+    let bridge_url_path = format!("{prefix}/__bridge.js");
+    let index_path = if prefix.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{prefix}/")
+    };
+    let asset_path = format!("{prefix}/{{*rel}}");
+
+    let shell_clone1 = shell.clone();
+    let shell_clone2 = shell.clone();
+    let ws_url_for_index = ws_url_path.clone();
+
+    // /t/<token>/file-asset/<rel> — serves files from the shell's
+    // current workspace (the cwd, set by `run` when a shell is
+    // bound). Used by shell frontends to render agent-produced files
+    // (generated images, outputs, etc.) via direct <img src> tags.
+    //
+    // dev-plan/35 Tier 1 multi-tenant: when multi_tenant is on,
+    // every file-asset request must (a) carry the same HMAC-signed
+    // headers as the WS upgrade and (b) request a path under
+    // `users/<that_user_id>/...`. Cloud routing layer attaches the
+    // headers automatically (proxied through). User A can't fetch
+    // user B's files because the path validator rejects the
+    // mismatched user_id prefix.
+    let file_asset_path = format!("{prefix}/file-asset/{{*rel}}");
+    let workspace_for_files = state.workspace.clone();
+    let multi_tenant_for_files = state.multi_tenant.clone();
+    let file_asset_route = file_asset_path.clone();
+
+    let mut router = Router::new()
+        .route(
+            &index_path,
+            get(move || {
+                let s = shell_clone1.clone();
+                let u = ws_url_for_index.clone();
+                async move { crate::gui_shell::serve::serve_shell_index(&s, &u) }
+            }),
+        )
+        .route(
+            &bridge_url_path,
+            get(|| async { crate::gui_shell::serve::serve_bridge_runtime() }),
+        )
+        .route(
+            &file_asset_route,
+            get(
+                move |axum::extract::Path(rel): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap| {
+                    let workspace = workspace_for_files.clone();
+                    let mt = multi_tenant_for_files.clone();
+                    async move {
+                        // Multi-tenant: verify HMAC and confirm
+                        // the path is scoped to this user.
+                        if let Some(mt) = mt {
+                            if let Err(status) = verify_file_asset_for_user(&headers, &mt, &rel) {
+                                return axum::response::Response::builder()
+                                    .status(status)
+                                    .body(axum::body::Body::from("forbidden"))
+                                    .expect("build file-asset 4xx");
+                            }
+                        }
+                        crate::gui_shell::serve::serve_project_asset(workspace.as_ref(), &rel)
+                    }
+                },
+            ),
+        )
+        .route(
+            &asset_path,
+            get(
+                move |axum::extract::Path(rel): axum::extract::Path<String>| {
+                    let s = shell_clone2.clone();
+                    async move { crate::gui_shell::serve::serve_shell_asset(&s, &rel) }
+                },
+            ),
+        )
+        .route(&ws_url_path, get(ws_handler))
+        .route("/healthz", get(serve_health))
+        .with_state(state);
+
+    // /v1/* OpenAI-compat surface stays available regardless of Mode B —
+    // it has its own auth (THCLAWS_API_TOKEN) independent of the shell
+    // token, and removing it would break automation clients that don't
+    // know or care about the shell binding.
+    router = router.merge(crate::api_v1::router());
+
+    // Print the launch URL on stdout so the operator can copy it.
+    let launch = crate::gui_shell::serve::launch_url(*bind, token.as_ref());
+    eprintln!(
+        "\x1b[36m[serve] Serving {} ({}) at\n        {}\x1b[0m",
+        shell.manifest().name,
+        shell.manifest().version,
+        launch
+    );
+    if token.is_some() {
+        eprintln!(
+            "\x1b[36m[serve] Token persisted to ~/.config/thclaws/gui-shell-tokens.json (rotate with `thclaws shell rotate-token {}`).\x1b[0m",
+            mode.shell_id
+        );
+    }
+
+    Ok(router)
 }
 
 fn is_loopback(addr: &SocketAddr) -> bool {
@@ -390,8 +688,107 @@ async fn serve_upload(
         .into_response()
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServeState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+    State(state): State<ServeState>,
+) -> Response {
+    // dev-plan/35 Tier 1: when multi-tenant mode is on, verify the
+    // cloud routing layer's HMAC-signed user-identity headers BEFORE
+    // accepting the WS upgrade. Bad / missing headers → 401 without
+    // ever opening a socket.
+    let resolved_shared = match resolve_session_handle(&state, &headers) {
+        Ok(handle) => handle,
+        Err(status) => return status.into_response(),
+    };
+    ws.on_upgrade(move |socket| handle_socket(socket, state, resolved_shared))
+}
+
+/// dev-plan/35 Tier 1: verify HMAC headers + confirm the requested
+/// file-asset path begins with `users/<authenticated_user_id>/`.
+/// Rejects cross-user file access even if the user knows the path.
+fn verify_file_asset_for_user(
+    headers: &axum::http::HeaderMap,
+    mt: &MultiTenantState,
+    rel: &str,
+) -> Result<(), StatusCode> {
+    let get = |name: &str| -> Result<&str, StatusCode> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(StatusCode::UNAUTHORIZED)
+    };
+    let user_id_h = get("x-thclaws-user")?;
+    let ts_h = get("x-thclaws-user-ts")?;
+    let proof_h = get("x-thclaws-user-proof")?;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let user_id = crate::multi_tenant::verify_user_header(
+        user_id_h,
+        ts_h,
+        proof_h,
+        &mt.hmac_secret,
+        now_secs,
+    )
+    .map_err(|e| {
+        eprintln!("\x1b[33m[file-asset] HMAC rejected: {e}\x1b[0m");
+        StatusCode::UNAUTHORIZED
+    })?;
+    // URL-decode rel (Axum's Path extractor already does this for us,
+    // but be defensive) and ensure it begins with users/<user_id>/.
+    // Two valid prefixes: output/users/<id>/ and .thclaws/users/<id>/.
+    let normalised = rel.trim_start_matches('/');
+    let user_segment = format!("users/{}/", user_id.as_str());
+    let valid = normalised.starts_with(&format!("output/{user_segment}"))
+        || normalised.starts_with(&format!(".thclaws/{user_segment}"));
+    if !valid {
+        eprintln!(
+            "\x1b[33m[file-asset] user={} attempted cross-user fetch: {rel}\x1b[0m",
+            user_id.as_str()
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
+/// Single-tenant: return the default shared session handle.
+/// Multi-tenant: verify the three cloud-routing headers and look up
+/// (or spawn) the per-user session in the registry.
+fn resolve_session_handle(
+    state: &ServeState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Arc<SharedSessionHandle>, StatusCode> {
+    let Some(mt) = state.multi_tenant.as_ref() else {
+        return Ok(state.shared.clone());
+    };
+    let get = |name: &str| -> Result<&str, StatusCode> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(StatusCode::UNAUTHORIZED)
+    };
+    let user_id_h = get("x-thclaws-user")?;
+    let ts_h = get("x-thclaws-user-ts")?;
+    let proof_h = get("x-thclaws-user-proof")?;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let user_id = crate::multi_tenant::verify_user_header(
+        user_id_h,
+        ts_h,
+        proof_h,
+        &mt.hmac_secret,
+        now_secs,
+    )
+    .map_err(|e| {
+        eprintln!("\x1b[33m[serve] HMAC rejected: {e}\x1b[0m");
+        StatusCode::UNAUTHORIZED
+    })?;
+    let session = mt.registry.get_or_spawn(&user_id);
+    Ok(session.handle.clone())
 }
 
 /// One task per WS connection. Receives inbound frames, parses JSON,
@@ -402,7 +799,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServeState>) -> Re
 /// alongside the snapshot frame. SERVE2's WS is half-duplex (inbound
 /// only) so the IpcContext + handle_ipc plumbing can be smoke-tested
 /// before the rendering layer is wired.
-async fn handle_socket(socket: WebSocket, state: ServeState) {
+async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedSessionHandle>) {
     let (mut sink, mut stream) = socket.split();
     // Outbound channel: every dispatch closure invocation lands here;
     // a single task drains it to the sink so concurrent dispatches
@@ -431,7 +828,12 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
         })
     };
     let ctx = IpcContext {
-        shared: state.shared.clone(),
+        // dev-plan/35 Tier 1: `shared` here is the RESOLVED handle
+        // (per-user in multi-tenant mode; the default in single-
+        // tenant mode). Subsequent state.shared references below
+        // (events subscription, workflow_approver lookup) use the
+        // same resolved handle so per-user isolation holds end-to-end.
+        shared: shared.clone(),
         approver: state.approver.clone(),
         pending_asks: state.pending_asks.clone(),
         dispatch,
@@ -449,7 +851,7 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
             // hook needed unless we want to persist the scale across
             // sessions. Defer.
         }),
-        workflow_approver: state.shared.workflow_approver.clone(),
+        workflow_approver: shared.workflow_approver.clone(),
     };
 
     // Ask-user broadcast subscription (issue #82). Each WS connection
@@ -479,7 +881,11 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
     // ViewEvent into chat-shaped + terminal-shaped envelopes, identical
     // to gui::spawn_event_translator's path. Both translators feed the
     // same outbound channel so the writer task serializes WS writes.
-    let mut events_rx = state.shared.subscribe();
+    // dev-plan/35 Tier 1: subscribe to the RESOLVED handle (per-user
+    // in multi-tenant; default in single-tenant). Critical for
+    // isolation — without this, every user's translator would
+    // subscribe to the default handle and see everyone's events.
+    let mut events_rx = shared.subscribe();
     let event_tx = out_tx.clone();
     let event_forwarder = tokio::spawn(async move {
         let mut term_state = TerminalRenderState::default();
@@ -495,6 +901,19 @@ async fn handle_socket(socket: WebSocket, state: ServeState) {
                         break;
                     }
                     for dispatch in render_chat_dispatches(&ev) {
+                        if event_tx.send(dispatch).is_err() {
+                            return;
+                        }
+                    }
+                    // dev-plan/33 Tier 2 Mode B: emit gui_shell_event
+                    // envelopes so a shell's bridge runtime can consume
+                    // streamed text/done/error events over the same WS.
+                    // The browser-side bridge filters by `event` and
+                    // ignores chat_*/terminal_* envelopes meant for
+                    // the React frontend (which isn't loaded in Mode B
+                    // anyway, but staying symmetric keeps the gui+serve
+                    // combo path working too).
+                    if let Some(dispatch) = render_gui_shell_dispatch(&ev) {
                         if event_tx.send(dispatch).is_err() {
                             return;
                         }
@@ -781,6 +1200,8 @@ mod tests {
         let cfg = ServeConfig {
             bind: addr,
             workspace: Some(td.path().to_path_buf()),
+            gui_shell: None,
+            multi_tenant: None,
         };
         let server_handle = tokio::spawn(async move {
             let _ = run(cfg).await;
@@ -834,5 +1255,200 @@ mod tests {
         assert!(td.path().join("uploads").join("photo_1.jpg").exists());
 
         server_handle.abort();
+    }
+
+    // ── dev-plan/35 Tier 1 multi-tenant tests ────────────────────
+    //
+    // These unit-test the per-user routing and file-asset isolation
+    // helpers without spinning up a full TCP+WebSocket harness. The
+    // helpers do all the security-relevant work (HMAC verify, path
+    // scoping); a real-server end-to-end test in Task 32 confirms
+    // the wiring; these tests confirm the per-helper invariants
+    // that wiring depends on.
+
+    use crate::multi_tenant::auth::sign_user_header;
+    use axum::http::HeaderMap;
+
+    const TEST_SECRET: &[u8] = b"test-hmac-secret-for-unit-tests-only";
+
+    fn dummy_state(multi_tenant: Option<MultiTenantState>) -> ServeState {
+        let approver = std::sync::Arc::new(crate::permissions::AutoApprover);
+        let shared =
+            std::sync::Arc::new(crate::shared_session::spawn_with_approver(approver.clone()));
+        let (ask_broadcast, _) = tokio::sync::broadcast::channel::<String>(16);
+        // ServeState wants GuiApprover (concrete type), not AutoApprover.
+        // For these tests we only exercise the multi_tenant + routing
+        // paths that don't touch `state.approver` — construct a fresh
+        // GuiApprover and discard the receiver.
+        let (gui_approver, _approval_rx) = crate::permissions::GuiApprover::new();
+        ServeState {
+            shared,
+            approver: gui_approver,
+            pending_asks: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            ask_broadcast,
+            workspace: std::sync::Arc::new(std::env::temp_dir()),
+            multi_tenant,
+        }
+    }
+
+    fn multi_tenant_state() -> MultiTenantState {
+        let approver = std::sync::Arc::new(crate::permissions::AutoApprover);
+        let registry =
+            crate::multi_tenant::UserSessionRegistry::new(crate::multi_tenant::RegistryConfig {
+                max_users: 10,
+                idle_timeout: std::time::Duration::from_secs(60),
+                approver,
+                // Existing 9 integration tests are HMAC + URL-prefix
+                // checks that never write per-user state — temp_dir
+                // is fine, nothing lands on disk.
+                project_root: std::env::temp_dir(),
+            });
+        MultiTenantState {
+            registry,
+            hmac_secret: std::sync::Arc::new(TEST_SECRET.to_vec()),
+        }
+    }
+
+    fn headers_for(user_id: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let proof = sign_user_header(user_id, ts, TEST_SECRET);
+        headers.insert("x-thclaws-user", user_id.parse().unwrap());
+        headers.insert("x-thclaws-user-ts", ts.to_string().parse().unwrap());
+        headers.insert("x-thclaws-user-proof", proof.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn resolve_session_handle_single_tenant_returns_default() {
+        let state = dummy_state(None);
+        let headers = HeaderMap::new();
+        let h = resolve_session_handle(&state, &headers).unwrap();
+        // Single-tenant returns the same default handle every call.
+        assert!(std::sync::Arc::ptr_eq(&h, &state.shared));
+    }
+
+    /// Helper: SharedSessionHandle has no Debug impl so `.unwrap_err()`
+    /// (which requires Debug on the Ok type) doesn't compile. Use a
+    /// match arm to extract the StatusCode without crossing the type
+    /// boundary.
+    fn expect_status_err(
+        result: Result<std::sync::Arc<SharedSessionHandle>, StatusCode>,
+    ) -> StatusCode {
+        match result {
+            Ok(_) => panic!("expected Err(StatusCode), got Ok(handle)"),
+            Err(s) => s,
+        }
+    }
+
+    #[test]
+    fn resolve_session_handle_multi_tenant_rejects_missing_headers() {
+        let state = dummy_state(Some(multi_tenant_state()));
+        let headers = HeaderMap::new();
+        assert_eq!(
+            expect_status_err(resolve_session_handle(&state, &headers)),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn resolve_session_handle_multi_tenant_rejects_forged_proof() {
+        let state = dummy_state(Some(multi_tenant_state()));
+        let mut headers = headers_for("alice");
+        headers.insert("x-thclaws-user-proof", "00".parse().unwrap());
+        assert_eq!(
+            expect_status_err(resolve_session_handle(&state, &headers)),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn resolve_session_handle_routes_different_users_to_different_sessions() {
+        let mt = multi_tenant_state();
+        let state = dummy_state(Some(mt.clone()));
+        let alice = resolve_session_handle(&state, &headers_for("alice")).unwrap();
+        let bob = resolve_session_handle(&state, &headers_for("bob")).unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&alice, &bob),
+            "different users → different SharedSessionHandle"
+        );
+        // Same user reuses the same handle.
+        let alice2 = resolve_session_handle(&state, &headers_for("alice")).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&alice, &alice2),
+            "same user → same SharedSessionHandle"
+        );
+        assert_eq!(mt.registry.active_user_count(), 2);
+    }
+
+    #[test]
+    fn verify_file_asset_for_user_accepts_own_subtree() {
+        let mt = multi_tenant_state();
+        assert!(verify_file_asset_for_user(
+            &headers_for("alice"),
+            &mt,
+            "output/users/alice/image.png"
+        )
+        .is_ok());
+        assert!(verify_file_asset_for_user(
+            &headers_for("alice"),
+            &mt,
+            ".thclaws/users/alice/storage/sess.json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn verify_file_asset_for_user_rejects_other_user_subtree() {
+        let mt = multi_tenant_state();
+        let err =
+            verify_file_asset_for_user(&headers_for("alice"), &mt, "output/users/bob/image.png")
+                .unwrap_err();
+        assert_eq!(err, StatusCode::FORBIDDEN);
+        let err = verify_file_asset_for_user(
+            &headers_for("alice"),
+            &mt,
+            ".thclaws/users/bob/grants.json",
+        )
+        .unwrap_err();
+        assert_eq!(err, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn verify_file_asset_for_user_rejects_shared_subtree() {
+        let mt = multi_tenant_state();
+        for shared_path in [
+            "AGENTS.md",
+            "output/shared.png",
+            ".thclaws/settings.json",
+            "kms/products.md",
+        ] {
+            let err =
+                verify_file_asset_for_user(&headers_for("alice"), &mt, shared_path).unwrap_err();
+            assert_eq!(err, StatusCode::FORBIDDEN, "{shared_path}");
+        }
+    }
+
+    #[test]
+    fn verify_file_asset_for_user_rejects_missing_hmac() {
+        let mt = multi_tenant_state();
+        let err = verify_file_asset_for_user(&HeaderMap::new(), &mt, "output/users/alice/x.png")
+            .unwrap_err();
+        assert_eq!(err, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn verify_file_asset_for_user_rejects_forged_hmac() {
+        let mt = multi_tenant_state();
+        let mut headers = headers_for("alice");
+        headers.insert("x-thclaws-user-proof", "00".parse().unwrap());
+        let err =
+            verify_file_asset_for_user(&headers, &mt, "output/users/alice/x.png").unwrap_err();
+        assert_eq!(err, StatusCode::UNAUTHORIZED);
     }
 }

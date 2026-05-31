@@ -30,6 +30,30 @@ Tier 1" ด้านล่าง)
 แลก message ถกเถียงสมมติฐาน ประสานงานบน task list ร่วมกัน
 Workflows เป็น stateless fan-out ส่วน team เป็น stateful collaboration
 
+## สองทางในการเรียก workflow
+
+Engine เดียวกัน (LLM เขียนสคริปต์ JS แล้ว Boa sandbox รัน) แต่มี
+ทางเข้า 2 ทาง ขึ้นกับว่าใครเป็นคนตัดสินว่าควรใช้ workflow:
+
+| Trigger | เหมาะกับ | UX |
+|---|---|---|
+| **คุณพิมพ์ `/workflow run <prompt>`** (slash command) | คุณรู้อยู่แล้วว่าควร fan-out และอยากเห็นสคริปต์ก่อนรัน | Author → review → approve/cancel/re-author loop → run |
+| **Model เรียก tool `WorkflowRun`** | คุณอธิบายงานเป็นภาษาธรรมชาติ ("rewrite all tests ให้ใช้ fixture ใหม่") แล้วให้ model ตัดสินเองว่าจะ spawn subagent ตัวเดียวหรือ author workflow ขนาน | approval prompt ต่อ call (เหมือน Bash) → author → run, ไม่มี review loop |
+
+เลือก slash command เมื่ออยากเห็น JS ก่อนรัน — ดีกับ pattern ใหม่
+หรือเวลาที่กำลังลองรูปแบบงาน เลือกเส้น tool เมื่ออยากได้ผลลัพธ์
+เลยและไว้ใจให้ model เลือก orchestration strategy เอง
+
+Model รู้จัก `WorkflowRun` เพราะอยู่ใน section **Collaboration
+primitives** ของ system prompt คู่กับ Subagent (side-quest ครั้งเดียว)
+กับ Agent Teams (collaborator ที่อยู่นาน) — เลือก primitive ที่
+เหมาะสมได้เองโดยไม่ต้องบอก ถ้าอยาก nudge ชัด ๆ บอกใน chat ได้เลย
+"ใช้ WorkflowRun ทำ …"
+
+ทั้งสองทาง reject nested call: สคริปต์ที่พยายามเรียก `WorkflowRun`
+ในตัวเองจะ fail พร้อม error ชัดเจน — orchestrate ผ่าน
+`thclaws.subagent(...)` / `thclaws.parallel(...)` ในสคริปต์แทน
+
 ## เริ่มใช้
 
 ```text
@@ -65,6 +89,35 @@ Workflows เป็น stateless fan-out ส่วน team เป็น stateful
 
 ถ้า worker error จะเห็น `✗ wN  …` และสคริปต์มักจะ catch แล้วทำงาน
 ต่อ (แล้วแต่ model เขียน)
+
+### เริ่มใช้ผ่าน model
+
+งานเดียวกัน ไม่ต้องพิมพ์ slash command — บอกใน chat เลย:
+
+```text
+you > rewrite each test file under tests/ ให้ใช้ TestHarness fixture ใหม่
+```
+
+Model มอง pattern นี้เป็น fan-out แล้วตัดสินใจเรียก `WorkflowRun`:
+
+```text
+[approval] WorkflowRun(prompt: "rewrite each test file under tests/
+                                 ให้ใช้ TestHarness fixture ใหม่")
+[a]llow once · [A]lways · [d]eny: a
+[workflow: author phase…]
+[workflow: 32 subagent turn(s), 18432 in / 9621 out tokens]
+✓ tests/test_login.rs — migrated to TestHarness::new()
+✓ tests/test_signup.rs — migrated; 1 helper renamed
+…
+```
+
+เห็น approval prompt 1 ครั้งสำหรับทั้ง call `WorkflowRun` (เหมือน
+Bash) แต่ใน script — แต่ละ `Skill` / `Bash` / `Edit` call ยังต้อง
+approval ของตัวเองตามปกติ — `WorkflowRun` ไม่ bypass per-tool gate
+
+ถ้าอยากเห็น JS script ที่ model เขียน ใช้ slash-command แทน
+(`/workflow run <prompt>` เดียวกัน) — เส้น tool ข้าม review loop
+เพื่อความเร็ว
 
 ## API `thclaws.*`
 

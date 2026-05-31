@@ -12,9 +12,7 @@
 
 use crate::agent::{Agent, AgentEvent};
 use crate::config::AppConfig;
-use crate::context::ProjectContext;
 use crate::error::{Error, Result as CoreResult};
-use crate::memory::MemoryStore;
 use crate::providers::{EventStream, Provider, StreamRequest};
 use crate::repl::{build_provider, build_provider_with_fallback};
 use crate::session::{Session, SessionStore};
@@ -578,6 +576,12 @@ pub struct SharedSessionHandle {
     /// the IPC dispatch (`IpcContext.workflow_approver`) so both
     /// reach the same pending-request map.
     pub workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
+    /// dev-plan/35 Tier 1 multi-tenant override: when `Some`,
+    /// session JSONLs, gui-shell storage, and usage metering for
+    /// this handle write to per-user roots instead of the cwd /
+    /// HOME-relative defaults. `None` for single-tenant `--serve`,
+    /// desktop GUI, and CLI — those use the legacy paths unchanged.
+    pub session_roots: Option<crate::multi_tenant::SessionRoots>,
 }
 
 impl SharedSessionHandle {
@@ -601,6 +605,13 @@ pub struct WorkerState {
     pub config: AppConfig,
     pub session: Session,
     pub session_store: Option<SessionStore>,
+    /// dev-plan/35 Tier 1: per-user roots when this worker belongs to
+    /// a multi-tenant pod, `None` for single-tenant. Forwarded from
+    /// [`spawn_with_roots`] and consulted at every site that would
+    /// otherwise pick up `SessionStore::default_path()` /
+    /// `UsageTracker::default_path()` — keeps the override sticky
+    /// across `/new`, `/reload`, model swaps, and session forks.
+    pub session_roots: Option<crate::multi_tenant::SessionRoots>,
     pub tool_registry: ToolRegistry,
     pub system_prompt: String,
     pub cwd: PathBuf,
@@ -776,7 +787,13 @@ impl WorkerState {
     /// the Settings menu emitted "system prompt rebuilt" but the new
     /// content didn't actually reach the model until a restart.
     pub fn rebuild_system_prompt(&mut self) {
-        self.system_prompt = build_system_prompt(&self.config, &self.cwd, &self.skill_store);
+        let mcp_instructions = crate::mcp::collect_mcp_instructions(&self.mcp_clients);
+        self.system_prompt = build_system_prompt(
+            &self.config,
+            &self.cwd,
+            &self.skill_store,
+            &mcp_instructions,
+        );
         self.agent.set_system(self.system_prompt.clone());
     }
 }
@@ -789,262 +806,20 @@ pub fn build_system_prompt(
     config: &AppConfig,
     cwd: &std::path::Path,
     skill_store: &std::sync::Arc<std::sync::Mutex<crate::skills::SkillStore>>,
+    mcp_instructions: &[(String, String)],
 ) -> String {
-    let ctx = ProjectContext::discover(cwd).unwrap_or(ProjectContext {
-        cwd: cwd.to_path_buf(),
-        git: None,
-        project_instructions: None,
-    });
-    let system_fallback = if config.system_prompt.is_empty() {
-        crate::prompts::defaults::SYSTEM
-    } else {
-        config.system_prompt.as_str()
-    };
-    let base_prompt = crate::prompts::load("system", system_fallback);
-    let mut system = ctx.build_system_prompt(&base_prompt);
-
-    if let Some(store) = MemoryStore::default_path().map(MemoryStore::new) {
-        if let Some(mem) = store.system_prompt_section() {
-            system.push_str("\n\n# Memory\n");
-            system.push_str(&mem);
-        }
-    }
-
-    let kms_section = crate::kms::system_prompt_section(&config.kms_active);
-    if !kms_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&kms_section);
-    }
-
-    let services_section = services_prompt_section();
-    if !services_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&services_section);
-    }
-
-    // Documents section is unconditional — its tools are always
-    // registered, so the prompt section's only job is to nudge the
-    // model away from Bash + Python libraries toward the native
-    // bundled tools. Sits after Services so all "capabilities"
-    // sections cluster together, before Team (collaboration) and
-    // Skills (workflows).
-    let documents_section = documents_prompt_section();
-    if !documents_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&documents_section);
-    }
-
-    let team_enabled = crate::config::ProjectConfig::load()
-        .and_then(|c| c.team_enabled)
-        .unwrap_or(false);
-    let team_section = team_grounding_prompt(&config.model, team_enabled);
-    if !team_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&team_section);
-    }
-
+    // dev-plan/35 followup: delegate to the always-on unified builder
+    // in `prompts::build_full_system_prompt` so GUI + REPL + print +
+    // agent_runtime emit byte-identical text modulo the surface-tagged
+    // priming. Pre-fix, four inline assemblies had drifted apart.
     let guard = skill_store.lock().ok();
-    if let Some(store) = guard.as_ref() {
-        if !store.skills.is_empty() {
-            // dev-plan/06 P2: branch on the user's chosen strategy.
-            // - "full" preserves the original behavior (every skill
-            //   listed with name + description + trigger)
-            // - "names-only" lists names only, refers the model to
-            //   the SkillSearch / SkillList / Skill tools for detail
-            // - "discover-tool-only" lists no skills at all; just
-            //   names the discovery tools
-            let strategy = config.skills_listing_strategy.as_str();
-            append_skills_section(&mut system, store, strategy);
-        }
-    }
-
-    system
-}
-
-/// Build the "External services" section of the system prompt. Only
-/// surfaces services whose API key is currently in the process env
-/// (so a key paste mid-session lights up on the next
-/// `rebuild_system_prompt`). Returns an empty string when nothing is
-/// configured — caller skips the section entirely in that case.
-///
-/// Motivation: `ToolRegistry::tool_defs` already hides
-/// `WebScrape` / `YouTubeTranscript` when `HAL_API_KEY` is absent,
-/// and surfaces them when present — but the model has to *notice*
-/// the presence of an unfamiliar tool name in a long tools-param
-/// list. Pre-fix the model defaulted to `WebFetch` for everything
-/// (the name it recognised from training data) and never reached for
-/// the HAL-backed tools, even though they were technically visible.
-/// This section names them explicitly with a one-line "when to pick"
-/// hint so the model has the discovery shortcut it was missing.
-fn services_prompt_section() -> String {
-    let mut bullets: Vec<String> = Vec::new();
-
-    let hal_ok = std::env::var("HAL_API_KEY")
-        .ok()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-    if hal_ok {
-        bullets.push(
-            "**HAL Public API** (key set). \
-             `WebFetch` now runs **both** a HAL headless-browser scrape **and** \
-             a plain HTTP GET in parallel on every call, returning a single \
-             combined response with each section clearly labelled (`[via HAL …]` \
-             then `[via plain HTTP GET …]`). Pick the slice that answers your \
-             question — HAL for SPA / JS-rendered / docs / blog content; plain \
-             GET for JSON APIs / sitemaps / robots.txt / anything where the raw \
-             body matters. Set `prefer_raw: true` on `WebFetch` to skip HAL \
-             entirely when you know the URL is a JSON endpoint or similar \
-             (saves wall-clock + tokens). Reach directly for `WebScrape` only \
-             when you need advanced HAL parameters (`wait_for` CSS selector, \
-             `scroll_to_bottom`, `remove_selectors`, `output_format`). Use \
-             `YouTubeTranscript` for video captions (en/th preference by default)."
-                .to_string(),
-        );
-    }
-
-    // `WebSearch` is always registered — it auto-selects Tavily →
-    // Brave → DuckDuckGo at call time, with DuckDuckGo as the always-
-    // available no-key fallback. Surface it here so the model reaches
-    // for the structured tool instead of shelling out via `Bash` +
-    // `curl 'https://duckduckgo.com/html/...'` (a recurring failure
-    // mode pre-fix: descriptions in the API tools-param weren't
-    // enough to dislodge the model's `curl` habit).
-    let tavily_ok = std::env::var("TAVILY_API_KEY")
-        .ok()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-    let brave_ok = std::env::var("BRAVE_SEARCH_API_KEY")
-        .ok()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-    let backend_hint = match (tavily_ok, brave_ok) {
-        (true, _) => "currently Tavily (best quality)",
-        (false, true) => "currently Brave",
-        (false, false) => "currently DuckDuckGo (no key set — paste a Tavily or Brave key in Settings for better results)",
-    };
-    bullets.push(format!(
-        "**Web search**. `WebSearch` returns titles, URLs, and snippets \
-         from the live web — {backend_hint}. Auto-picks the best \
-         available backend at call time: Tavily → Brave → DuckDuckGo. \
-         Each result starts with a `Source: <engine>` line — mention \
-         the engine when summarising so the user knows result quality. \
-         Reach for this instead of `Bash` + `curl` for any web lookup."
-    ));
-
-    if bullets.is_empty() {
-        return String::new();
-    }
-
-    let mut out = String::from("# External services\n\n");
-    for b in bullets {
-        out.push_str("- ");
-        out.push_str(&b);
-        out.push('\n');
-    }
-    out
-}
-
-/// Document- and spreadsheet-generation tool surface. Always rendered
-/// — these tools are unconditionally registered in
-/// `ToolRegistry::with_builtins`, so the prompt section's job is
-/// purely discoverability: the model otherwise defaults to
-/// `Bash` + `python-docx` / `openpyxl` / `python-pptx` / `reportlab`
-/// (often broken on the user's machine, slow, and produces inconsistent
-/// output). Mentioning the native tools dislodges that habit.
-///
-/// Critical motivation: pre-fix the only place these tools appeared
-/// was the API tools-param schema list — a 25+ entry list where the
-/// model's eye glides past unfamiliar names like `DocxCreate`. Users
-/// reported "make a PDF" requests resolving to bash scripts that
-/// failed three times before the model considered the native tool.
-fn documents_prompt_section() -> String {
-    String::from(
-        "# Document & spreadsheet generation\n\n\
-         When the user asks to create or read Word docs, Excel sheets, \
-         PowerPoint decks, or PDFs, reach for these native tools instead \
-         of shelling out to Python libraries. They are bundled (no setup \
-         on the user's machine), embed Noto Sans Thai (mixed Thai/Latin \
-         renders correctly), and produce predictable output.\n\n\
-         - **DocxCreate** / **DocxRead** — Word `.docx`. Markdown in, \
-         supports tables, inline images, H1–H4. Read extracts to text.\n\
-         - **XlsxCreate** / **XlsxRead** — Excel `.xlsx`. Accepts CSV \
-         string, JSON 2D array, or `[{sheet, rows}]` for multi-sheet \
-         workbooks. Numeric cells stay numeric.\n\
-         - **PptxCreate** / **PptxRead** — PowerPoint `.pptx`. Markdown \
-         outline: `# Heading` starts a new slide, bullets become body. \
-         Read extracts slide text.\n\
-         - **PdfCreate** / **PdfRead** — PDF. Markdown in, supports \
-         tables, inline images, embedded fonts. A4 / Letter / Legal.\n\n\
-         Use these for the matching format every time. Do NOT call \
-         generic `Read` on `.docx` / `.xlsx` / `.pptx` / `.pdf` — it \
-         returns raw bytes the model can't parse; the dedicated `*Read` \
-         tool extracts to model-readable text.\n",
+    crate::prompts::build_full_system_prompt(
+        config,
+        cwd,
+        guard.as_deref(),
+        mcp_instructions,
+        crate::prompts::SurfaceHints::Gui,
     )
-}
-
-/// dev-plan/06 P2 helper. Renders the Available-skills section of the
-/// system prompt according to the configured strategy.
-fn append_skills_section(system: &mut String, store: &crate::skills::SkillStore, strategy: &str) {
-    let mut entries: Vec<&crate::skills::SkillDef> = store.skills.values().collect();
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-
-    match strategy {
-        "discover-tool-only" => {
-            system.push_str("\n\n# Available skills (MANDATORY usage)\n");
-            system.push_str(
-                "Bundled skills are available but not listed inline (you have \
-                 a large catalog). Discover them via `SkillList()` for the full \
-                 catalog or `SkillSearch(query: \"...\")` for a substring \
-                 lookup. When a user request sounds like it might match a \
-                 bundled workflow (\"make a PDF\", \"scaffold a skill\", \
-                 \"extract data from xlsx\", etc.), you MUST call SkillList \
-                 or SkillSearch FIRST before implementing the task manually. \
-                 Once you find a relevant skill, call `Skill(name: \"<name>\")` \
-                 to load its expert instructions and follow them.\n",
-            );
-        }
-        "names-only" => {
-            system.push_str("\n\n# Available skills (MANDATORY usage)\n");
-            system.push_str(
-                "The `Skill` tool loads expert instructions for a bundled \
-                 workflow. Skill names are listed below; for descriptions and \
-                 trigger criteria call `SkillSearch(query: \"...\")` or \
-                 `SkillList()`. If a user request might match any of these \
-                 skills, you MUST call Skill (or SkillSearch first) FIRST — \
-                 before any Bash, Write, Edit, or other tool calls for that \
-                 task. Announce the skill at the start of your reply.\n\n",
-            );
-            let names: Vec<&str> = entries.iter().map(|s| s.name.as_str()).collect();
-            // Render as a comma-separated list to keep token cost minimal
-            // — one line per N skills, ~30 chars per name.
-            system.push_str(&names.join(", "));
-            system.push('\n');
-        }
-        _ => {
-            // "full" (default) — preserves the original behavior.
-            system.push_str("\n\n# Available skills (MANDATORY usage)\n");
-            system.push_str(
-                "The `Skill` tool loads expert instructions for a bundled workflow. \
-                 If a user request matches the trigger criteria of any skill below, \
-                 you MUST:\n\
-                 1. Call `Skill(name: \"<skill-name>\")` FIRST — before any Bash, \
-                    Write, Edit, or other tool calls for that task.\n\
-                 2. Follow the instructions returned by that skill for the rest of \
-                    the task. They override your default approach.\n\
-                 3. Announce the skill at the start of your reply, e.g. \
-                    \"Using the `pdf` skill to …\".\n\
-                 Do NOT implement the task yourself when a matching skill exists — \
-                 the skill encodes conventions and scripts you don't have built in.\n\n",
-            );
-            for skill in entries {
-                system.push_str(&format!("- **{}** — {}", skill.name, skill.description));
-                if !skill.when_to_use.is_empty() {
-                    system.push_str(&format!("\n  Trigger: {}", skill.when_to_use));
-                }
-                system.push('\n');
-            }
-        }
-    }
 }
 
 /// True when two paths refer to the same on-disk directory. Prefers
@@ -1075,6 +850,19 @@ pub fn spawn() -> SharedSessionHandle {
 pub fn spawn_with_approver(
     approver: std::sync::Arc<dyn crate::permissions::ApprovalSink>,
 ) -> SharedSessionHandle {
+    spawn_with_roots(approver, None)
+}
+
+/// dev-plan/35 Tier 1 multi-tenant entry point. Same as
+/// [`spawn_with_approver`] but threads a [`SessionRoots`] override
+/// into the worker so session JSONLs, gui-shell storage, and usage
+/// metering land under per-user prefixes instead of the cwd /
+/// HOME-relative defaults. `None` → identical behaviour to
+/// `spawn_with_approver` (single-tenant defaults).
+pub fn spawn_with_roots(
+    approver: std::sync::Arc<dyn crate::permissions::ApprovalSink>,
+    session_roots: Option<crate::multi_tenant::SessionRoots>,
+) -> SharedSessionHandle {
     let (input_tx, input_rx) = mpsc::channel::<ShellInput>();
     let (events_tx, _) = broadcast::channel::<ViewEvent>(256);
     let cancel = crate::cancel::CancelToken::new();
@@ -1091,6 +879,7 @@ pub fn spawn_with_approver(
     let gate_for_thread = ready_gate.clone();
     let injection_queue_for_worker = injection_queue.clone();
     let workflow_approver_for_worker = workflow_approver.clone();
+    let session_roots_for_worker = session_roots.clone();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -1103,6 +892,7 @@ pub fn spawn_with_approver(
                 gate_for_thread,
                 injection_queue_for_worker,
                 workflow_approver_for_worker,
+                session_roots_for_worker,
             ));
         }));
         if let Err(payload) = result {
@@ -1125,6 +915,7 @@ pub fn spawn_with_approver(
         ready_gate,
         injection_queue,
         workflow_approver,
+        session_roots,
     }
 }
 
@@ -1184,6 +975,7 @@ async fn run_worker(
     ready_gate: Arc<ReadyGate>,
     injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
     workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
+    session_roots: Option<crate::multi_tenant::SessionRoots>,
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = AppConfig::load().unwrap_or_default();
@@ -1339,6 +1131,16 @@ async fn run_worker(
     // M6.46: SessionRename — for dream + power-user manual rename.
     tools.register(std::sync::Arc::new(crate::tools::SessionRenameTool));
 
+    // Tool-parity audit fix: respect `searchEngine` config override
+    // (REPL had this; GUI/serve fell back to "auto" silently).
+    // `HashMap::insert` in `ToolRegistry::register` overwrites the
+    // default `WebSearchTool` from `with_builtins` by name.
+    if config.search_engine != "auto" {
+        tools.register(std::sync::Arc::new(crate::tools::WebSearchTool::new(
+            &config.search_engine,
+        )));
+    }
+
     // M6.11 (H1): daily auto-refresh of the marketplace catalog. No-op
     // when the cache is < 24h old; otherwise spawns a fail-silent
     // background fetch so newly-added skills appear without the user
@@ -1434,7 +1236,18 @@ async fn run_worker(
             let _ = crate::model_catalogue::refresh_from_remote().await;
         }
     });
-    for server_cfg in config.mcp_servers.clone() {
+    // Tool-parity audit fix: merge plugin-contributed MCPs with
+    // config.mcp_servers (config wins on name clash). REPL + HTTP
+    // both did this; GUI/serve silently dropped plugin MCPs —
+    // installing a plugin that ships an MCP server only worked in
+    // CLI mode, the GUI never saw it.
+    let mut merged_mcp = config.mcp_servers.clone();
+    for p_mcp in crate::plugins::plugin_mcp_servers() {
+        if !merged_mcp.iter().any(|s| s.name == p_mcp.name) {
+            merged_mcp.push(p_mcp);
+        }
+    }
+    for server_cfg in merged_mcp {
         let approver_for_spawn = approver.clone();
         let input_tx_for_spawn = input_tx_self.clone();
         tokio::spawn(async move {
@@ -1467,7 +1280,11 @@ async fn run_worker(
         });
     }
 
-    let system = build_system_prompt(&config, &cwd, &skill_store);
+    // Initial assembly — MCP servers are still spawning in tokio tasks
+    // above, so no instructions are available yet. Each McpReady arm
+    // calls `rebuild_system_prompt` to fold the new server's
+    // instructions in once initialize() returns.
+    let system = build_system_prompt(&config, &cwd, &skill_store, &[]);
 
     // `build_provider_with_fallback` walks the configured model first,
     // then any provider whose key is actually present, before giving
@@ -1534,11 +1351,21 @@ async fn run_worker(
             // hooks see Task-spawned tool calls.
             hooks: Some(hooks_arc.clone()),
         });
-        tools.register(std::sync::Arc::new(
+        let subagent_arc: std::sync::Arc<dyn crate::tools::Tool> = std::sync::Arc::new(
             crate::subagent::SubAgentTool::new(factory.clone())
                 .with_depth(0)
                 .with_agent_defs(agent_defs_state.clone()),
-        ));
+        );
+        tools.register(subagent_arc.clone());
+        // WorkflowRun: model-callable wrapper around `/workflow run`.
+        // GUI / --serve get the same engine as the worker's agent
+        // (provider + model) plus the live Task tool so scripts'
+        // `thclaws.subagent(...)` calls dispatch correctly.
+        tools.register(std::sync::Arc::new(crate::tools::WorkflowRunTool::new(
+            factory.provider.clone(),
+            config.model.clone(),
+            Some(subagent_arc),
+        )));
         factory
     };
     // Apply `disallowed_tools` to the main agent's registry. Until
@@ -1650,7 +1477,13 @@ async fn run_worker(
         });
     }
 
-    let session_store = SessionStore::default_path().map(SessionStore::new);
+    // dev-plan/35 Tier 1: per-user override beats `default_path()`
+    // when this worker belongs to a multi-tenant pod.
+    let session_store = session_roots
+        .as_ref()
+        .map(|r| r.sessions_dir.clone())
+        .or_else(SessionStore::default_path)
+        .map(SessionStore::new);
     let current_session = Session::new(&config.model, cwd.to_string_lossy());
     // Point the plan-persistence arc at the initial session's JSONL
     // path so any SubmitPlan / UpdatePlanStep call before the first
@@ -1698,6 +1531,7 @@ async fn run_worker(
         config,
         session: current_session,
         session_store,
+        session_roots: session_roots.clone(),
         tool_registry: tools,
         system_prompt: system,
         cwd,
@@ -2015,6 +1849,14 @@ async fn run_worker(
                     state.tool_registry.register(std::sync::Arc::new(tool));
                 }
                 state.mcp_clients.push(client);
+                // Re-assemble the system prompt FIRST so the new
+                // server's `# MCP server instructions` section (if it
+                // returned one via InitializeResult.instructions)
+                // lands in the system text before `rebuild_agent`
+                // captures it. rebuild_agent reuses self.system_prompt;
+                // skipping rebuild_system_prompt here would leave the
+                // instructions stranded until the next /reload.
+                state.rebuild_system_prompt();
                 // Rebuild so the agent actually sees the newly-registered
                 // MCP tools on its next turn.
                 if let Err(e) = state.rebuild_agent(true) {
@@ -2877,8 +2719,43 @@ async fn run_worker(
                 // pinned to the previous workspace's `.thclaws/sessions/`,
                 // so saves land in the wrong project and the sidebar
                 // never reflects the new project's sessions.
-                state.session_store =
-                    crate::session::SessionStore::default_path().map(SessionStore::new);
+                //
+                // dev-plan/35 Tier 1: the per-user override (multi-
+                // tenant pod) is sticky across cwd changes — a user's
+                // session JSONL must keep landing in their own
+                // <project>/.thclaws/users/<id>/sessions/ regardless
+                // of any `/cd` inside the worker. The single-tenant
+                // `None` path keeps the old cwd-relative default.
+                state.session_store = state
+                    .session_roots
+                    .as_ref()
+                    .map(|r| r.sessions_dir.clone())
+                    .or_else(crate::session::SessionStore::default_path)
+                    .map(SessionStore::new);
+
+                // Re-discover skills against the NEW cwd. Without this,
+                // project-scoped `<cwd>/.thclaws/skills/<name>/` is
+                // pinned to whichever cwd the worker was spawned with
+                // (typically the launcher cwd, NOT the project the
+                // StartupModal selected). Symptom: `/<skill-name>` in
+                // chat fails the `skill_store.contains_key` check at
+                // line ~3613 and gets emitted as "unknown command",
+                // even though the skill file is on disk in the new
+                // project. CLI never hit this because `run_repl`
+                // discovers AFTER the user has `cd`'d in their shell
+                // and there's no in-session project switch.
+                //
+                // Skill discovery walks a handful of directories and is
+                // cheap; safe to redo on every cwd change. Pre-existing
+                // refresh helper at `shell_dispatch::refresh_skill_store
+                // _and_rebuild` does the same thing for `/skill install`
+                // / `/plugin install`; this mirrors it but skips the
+                // separate `rebuild_agent` call because the unconditional
+                // hygiene block + `rebuild_system_prompt` below already
+                // rebuilds the agent's view via `set_system`.
+                if let Ok(mut store) = state.skill_store.lock() {
+                    *store = crate::skills::SkillStore::discover();
+                }
 
                 // If the model changed, rebuild the agent without history
                 // — the new provider's message schema may not match the
@@ -3565,14 +3442,11 @@ async fn handle_line(
                 .map(|s| s.skills.contains_key(&word))
                 .unwrap_or(false);
             if skill_present {
-                let args_note = if args.is_empty() {
-                    String::new()
-                } else {
-                    format!(" The user's task for this skill: {args}")
-                };
-                let rewritten = format!(
-                    "The user ran the `/{word}` slash command. Call `Skill(name: \"{word}\")` right away and follow the instructions it returns.{args_note}"
-                );
+                // Shared rewrite-text helper (`repl::make_skill_rewrite_prompt`)
+                // so CLI and GUI / --serve send byte-identical
+                // instructions to the model. Pre-extract, two parallel
+                // copies of this format string could drift silently.
+                let rewritten = crate::repl::make_skill_rewrite_prompt(&word, args);
                 emit_skill_resolution_hint(events_tx, &word);
                 let stream = Box::pin(state.agent.run_turn(rewritten));
                 let lead_mb = crate::team::Mailbox::new(crate::team::Mailbox::default_dir());
@@ -3773,8 +3647,13 @@ async fn drive_turn_stream(
                 // GUI shell silently dropped every turn's usage
                 // regardless of provider).
                 let provider_name = state.config.detect_provider().unwrap_or("unknown");
-                let tracker =
-                    crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+                let tracker = crate::usage::UsageTracker::new(
+                    state
+                        .session_roots
+                        .as_ref()
+                        .map(|r| r.usage_dir.clone())
+                        .unwrap_or_else(crate::usage::UsageTracker::default_path),
+                );
                 tracker.record(provider_name, &state.config.model, &usage);
 
                 // Cost accounting (GUI parity with the CLI REPL). Drain
@@ -4171,8 +4050,13 @@ async fn handle_team_messages(
                 write_lead_log(&state.lead_log, "\x1b[0m\n");
                 let _ = lead_mb.write_status("lead", "active", None);
                 let provider_name = state.config.detect_provider().unwrap_or("unknown");
-                let tracker =
-                    crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+                let tracker = crate::usage::UsageTracker::new(
+                    state
+                        .session_roots
+                        .as_ref()
+                        .map(|r| r.usage_dir.clone())
+                        .unwrap_or_else(crate::usage::UsageTracker::default_path),
+                );
                 tracker.record(provider_name, &state.config.model, &usage);
                 save_history(&state.agent, &mut state.session, &state.session_store);
                 let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
@@ -4193,166 +4077,6 @@ async fn handle_team_messages(
             _ => {}
         }
     }
-}
-
-/// System-prompt addendum that grounds the model in thClaws's team
-/// feature and pushes back against Claude Code training-data bias.
-fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
-    let kind = crate::providers::ProviderKind::detect(model);
-    let on_claude_sdk = matches!(kind, Some(crate::providers::ProviderKind::AgentSdk));
-
-    if !team_enabled && !on_claude_sdk {
-        return String::new();
-    }
-
-    // Special case: teamEnabled is on, but the user picked agent/* —
-    // which shells to the local `claude` CLI subprocess. That
-    // subprocess uses Claude Code's own built-in toolset and does NOT
-    // see thClaws's tool registry. So our `TeamCreate` /
-    // `SpawnTeammate` / etc. are registered in our registry but are
-    // unreachable by the model. Telling the model to use them would
-    // be telling it to call tools it cannot see.
-    if team_enabled && on_claude_sdk {
-        return String::from(
-            "# Agent Teams — UNREACHABLE on this provider\n\n\
-             The user has enabled thClaws's team feature \
-             (`teamEnabled: true`), but they are also running on the \
-             `agent/*` provider — which shells to the local `claude` \
-             CLI as a subprocess. That subprocess uses Claude Code's \
-             own built-in toolset (`Agent`, `Bash`, `Edit`, `Read`, \
-             `ScheduleWakeup`, `Skill`, `ToolSearch`, `Write`) and \
-             does NOT see thClaws's tool registry.\n\n\
-             This means thClaws's `TeamCreate`, `SpawnTeammate`, \
-             `SendMessage`, `CheckInbox`, `TeamStatus`, \
-             `TeamTaskCreate`/`List`/`Claim`/`Complete`, and \
-             `TeamMerge` tools are REGISTERED in thClaws but are \
-             unreachable from your current toolset. You literally \
-             cannot call them.\n\n\
-             Claude Code's own `TeamCreate` / `Agent` / `TodoWrite` / \
-             `AskUserQuestion` / `ToolSearch` / `SendMessage` \
-             built-ins are available to you, but they write state \
-             under `~/.claude/teams/` and `~/.claude/tasks/` which is \
-             invisible to the thClaws Team tab. Calling them produces \
-             a fabricated success — the user sees an empty Team tab.\n\n\
-             If the user asks you to \"create a team\" / \"spawn agents\":\n\
-             - Explain that thClaws's team tools are unreachable from \
-             the `agent/*` provider (their tool registry doesn't \
-             cross the CLI subprocess boundary).\n\
-             - Tell them to switch to a non-`agent/*` provider — e.g. \
-             `claude-sonnet-4-6`, `claude-opus-4-7`, `gpt-4o`, etc. — \
-             via `/model` or `/provider`. Once switched, thClaws's \
-             team tools are directly callable.\n\
-             - Offer to proceed sequentially without a team if they \
-             prefer to stay on the `agent/*` model.\n\n\
-             Do NOT pretend a team has been created. Do NOT call \
-             Claude Code's built-in `TeamCreate` etc. as a substitute. \
-             The honest answer is the only useful one.\n",
-        );
-    }
-
-    if !team_enabled {
-        return String::from(
-            "# Agent Teams — DISABLED in this workspace\n\n\
-             The user has NOT enabled thClaws's team feature \
-             (`teamEnabled: true` is missing from `.thclaws/settings.json`). \
-             thClaws's team tools (`TeamCreate`, `SpawnTeammate`, `SendMessage`, \
-             `CheckInbox`, `TeamStatus`, `TeamTaskCreate/List/Claim/Complete`, \
-             `TeamMerge`) are NOT registered in this session and you cannot \
-             call them.\n\n\
-             You are running under the local `claude` CLI subprocess \
-             (Anthropic Agent SDK), which DOES ship its own `TeamCreate`, \
-             `Agent`, `TodoWrite`, `AskUserQuestion`, `ToolSearch`, \
-             `SendMessage` built-ins backed by `~/.claude/teams/` and \
-             `~/.claude/tasks/`. DO NOT CALL THEM. Their state is invisible \
-             to thClaws — the Team tab polls `.thclaws/team/agents/` locally \
-             and will never see an SDK-created team, so the user gets a \
-             fabricated success story with nothing behind it.\n\n\
-             If the user asks you to \"create a team\" / \"spawn agents\" / \
-             \"set up a team of subagents\", respond in plain text:\n\
-             - Explain that thClaws's team feature is off in this workspace.\n\
-             - Tell them to set `teamEnabled: true` in `.thclaws/settings.json` \
-             (or globally in `~/.config/thclaws/settings.json`) and restart \
-             the app.\n\
-             - Offer to proceed WITHOUT a team by handling the task yourself \
-             sequentially.\n\n\
-             Do NOT claim to have created a team, spawned teammates, written \
-             config, or stored state. Do NOT reference `~/.claude/teams/` or \
-             `~/.claude/tasks/` paths. The only honest response is \"teams are \
-             disabled\" — anything else is a hallucination.\n",
-        );
-    }
-
-    let mut out = String::from(
-        "# Agent Teams (thClaws native)\n\n\
-         This workspace has thClaws's team feature ENABLED. When the user asks for \
-         parallel work via a team, use ONLY these thClaws tools — they are the \
-         canonical implementation and their state is visible in the Team tab:\n\n\
-         - `TeamCreate` — define a team (name + member agents with roles/prompts). \
-         Writes `.thclaws/team/config.json` in the current project root.\n\
-         - `SpawnTeammate` — start one named teammate. Spawns a thClaws subprocess \
-         that polls its inbox in a tmux pane (or background).\n\
-         - `SendMessage` — deliver a message to a teammate's inbox.\n\
-         - `CheckInbox` — read your own inbox.\n\
-         - `TeamStatus` — summarise the team.\n\
-         - `TeamTaskCreate` / `TeamTaskList` / `TeamTaskClaim` / `TeamTaskComplete` — \
-         a shared task queue teammates can claim from.\n\
-         - `TeamMerge` — (lead only) merge each teammate's git worktree back into \
-         the main branch.\n\n\
-         Team state lives under `.thclaws/team/` **in the current project root** — \
-         NOT under `~/.claude/teams/`, NOT under `~/.claude/tasks/`. Do not reference \
-         those paths; they are from a different product.\n\n\
-         You are the team **lead**. After `TeamCreate`:\n\
-         1. Do NOT use `Bash`/`Write`/`Edit` to build code — delegate via `SendMessage`.\n\
-         2. Use `TeamTaskCreate` to queue work; teammates claim via `TeamTaskClaim`.\n\
-         3. Use `Read`/`Glob`/`Grep` only for review and verification.\n\
-         4. Watch `CheckInbox` / `TeamStatus` between coordination rounds.\n\
-         \n\
-         **Worktree isolation is declarative.** If a teammate should work on \
-         an isolated branch, set `isolation: \"worktree\"` on that member when \
-         you call `TeamCreate`. `SpawnTeammate` then creates \
-         `.worktrees/{name}` on branch `team/{name}` automatically and \
-         launches the teammate there. DO NOT write `git worktree add …` or \
-         `cd ../{name}` into teammate prompts — the teammate will execute them \
-         as shell and the worktree will land somewhere wrong (project root, a \
-         sibling dir) and be invisible to `TeamMerge`.\n\
-         \n\
-         # CRITICAL: do NOT call Claude Code's Agent SDK team tools\n\n\
-         Your training data contains references to an Anthropic Managed Agents \
-         SDK server-side toolset (`agent_toolset_20260401`) that ships its own \
-         `TeamCreate`, `Agent`, `AskUserQuestion`, `TodoWrite`, `ToolSearch`, \
-         `SendMessage` tools backed by `~/.claude/teams/` and `~/.claude/tasks/`. \
-         Those are a DIFFERENT SYSTEM, invisible to thClaws — if you call them \
-         (or claim to have called them in your text output), the user will see \
-         an empty Team tab and think nothing happened.\n\n\
-         Rules that apply regardless of which provider you are running on:\n\
-         - When the user asks about \"teams\" / \"agents\" / \"task queue\", use \
-         the thClaws tools listed above. `TeamCreate` and `SendMessage` in this \
-         workspace mean the thClaws versions — never the SDK's.\n\
-         - Never reference `~/.claude/teams/`, `~/.claude/tasks/`, or \
-         `~/.config/thclaws/teams/` paths in your replies. Teams live in \
-         `.thclaws/team/`.\n\
-         - Do not call `AskUserQuestion`, `TodoWrite`, `ToolSearch`, or a bare \
-         `Agent` tool. Those belong to Claude Code's interactive flow and do \
-         not exist in thClaws. If you need a task list, use `TeamTaskCreate`. \
-         If you need to ask the user, just ask them in plain text.\n\
-         - Do not claim to have created a team, spawned agents, or stored \
-         config unless you actually called the corresponding thClaws tool and \
-         got a success response back.\n",
-    );
-
-    if on_claude_sdk {
-        out.push_str(
-            "\n# Additional note for the Claude Agent SDK provider\n\n\
-             You ARE running under the local `claude` CLI subprocess right now, \
-             which ships its own `TeamCreate`, `Agent`, `AskUserQuestion`, \
-             `TodoWrite`, and `ToolSearch` built-ins. Calling them will appear \
-             to succeed inside Claude Code's own world, but the thClaws Team \
-             tab polls `.thclaws/team/agents/` and will never see a team \
-             created that way. Treat any impulse to call those tools as a bug.\n",
-        );
-    }
-
-    out
 }
 
 /// Squash any control char (newline, carriage return, tab, ESC, etc.)
@@ -4555,7 +4279,7 @@ mod tests {
         std::env::remove_var("HAL_API_KEY");
         std::env::remove_var("TAVILY_API_KEY");
         std::env::remove_var("BRAVE_SEARCH_API_KEY");
-        let section = services_prompt_section();
+        let section = crate::prompts::services_prompt_section();
         assert!(
             section.contains("WebSearch"),
             "section must always mention WebSearch (DuckDuckGo fallback is always available): {section}"
@@ -4587,7 +4311,7 @@ mod tests {
         let _g = env_lock();
         let prev = std::env::var("TAVILY_API_KEY").ok();
         std::env::set_var("TAVILY_API_KEY", "test-key");
-        let section = services_prompt_section();
+        let section = crate::prompts::services_prompt_section();
         assert!(
             section.contains("Tavily (best quality)"),
             "should highlight Tavily as active backend when key set: {section}"
@@ -4603,7 +4327,7 @@ mod tests {
         let _g = env_lock();
         let prev = std::env::var("HAL_API_KEY").ok();
         std::env::set_var("HAL_API_KEY", "test-key");
-        let section = services_prompt_section();
+        let section = crate::prompts::services_prompt_section();
         assert!(
             section.contains("# External services"),
             "missing header: {section}"
@@ -4643,7 +4367,7 @@ mod tests {
         let _g = env_lock();
         let prev = std::env::var("HAL_API_KEY").ok();
         std::env::set_var("HAL_API_KEY", "   ");
-        let section = services_prompt_section();
+        let section = crate::prompts::services_prompt_section();
         // Section is no longer empty (WebSearch always mentioned),
         // but the HAL-specific bullet should NOT appear with a
         // whitespace-only key.
@@ -4669,7 +4393,7 @@ mod tests {
         // mentioned with both Create and Read variants — the model
         // looks for "DocxCreate" specifically when the user asks for
         // a .docx, and for "DocxRead" when given one to parse.
-        let section = documents_prompt_section();
+        let section = crate::prompts::documents_prompt_section();
         assert!(
             section.contains("# Document & spreadsheet generation"),
             "missing header: {section}"
@@ -4728,7 +4452,7 @@ mod tests {
         // behavior — every skill listed with description + trigger.
         let mut out = String::new();
         let store = store_with_two();
-        append_skills_section(&mut out, &store, "full");
+        crate::prompts::append_skills_section(&mut out, &store, "full");
         assert!(out.contains("# Available skills (MANDATORY usage)"));
         assert!(out.contains("**pdf**"), "name not bolded: {out}");
         assert!(out.contains("Render PDFs"), "description missing: {out}");
@@ -4746,7 +4470,7 @@ mod tests {
         // savings for users with many skills.
         let mut out = String::new();
         let store = store_with_two();
-        append_skills_section(&mut out, &store, "names-only");
+        crate::prompts::append_skills_section(&mut out, &store, "names-only");
         assert!(out.contains("# Available skills (MANDATORY usage)"));
         // Names ARE listed.
         assert!(out.contains("pdf"), "name missing: {out}");
@@ -4774,7 +4498,7 @@ mod tests {
         // skill name on a line), not raw substring absence.
         let mut out = String::new();
         let store = store_with_two();
-        append_skills_section(&mut out, &store, "discover-tool-only");
+        crate::prompts::append_skills_section(&mut out, &store, "discover-tool-only");
         assert!(out.contains("# Available skills (MANDATORY usage)"));
         // No skill listing — bullet markers + bolded names + comma
         // joins shouldn't appear.
@@ -4796,7 +4520,7 @@ mod tests {
         // "full" silently, but defense-in-depth.
         let mut out = String::new();
         let store = store_with_two();
-        append_skills_section(&mut out, &store, "totally-bogus-strategy");
+        crate::prompts::append_skills_section(&mut out, &store, "totally-bogus-strategy");
         // Should look like the full-strategy output.
         assert!(out.contains("**pdf**"));
         assert!(out.contains("Render PDFs"));

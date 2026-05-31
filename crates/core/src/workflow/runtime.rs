@@ -347,6 +347,16 @@ fn last_worker_usage() -> Option<crate::providers::Usage> {
     WORKFLOW_USAGE_SINK.with(|cell| cell.borrow().as_ref().and_then(|v| v.last().cloned()))
 }
 
+/// True when this thread is currently executing inside a
+/// `WorkflowSandbox::run` (i.e. `set_usage_sink(true)` has been
+/// called and not yet cleared). Used by `WorkflowRunTool` to reject
+/// nested calls — if the model authors a workflow whose script tries
+/// to invoke `WorkflowRun` via `thclaws.tool(...)`, the inner
+/// spawn_blocking would stomp the outer's thread-locals on unwind.
+pub(crate) fn is_inside_workflow() -> bool {
+    WORKFLOW_USAGE_SINK.with(|cell| cell.borrow().is_some())
+}
+
 /// Drain all collected usages — called by the REPL handler after
 /// `spawn_blocking` returns so totals can be rolled up.
 pub(crate) fn take_all_usages() -> Vec<crate::providers::Usage> {

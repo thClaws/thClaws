@@ -17,8 +17,8 @@
 
 use crate::config::AppConfig;
 use crate::event_render::{
-    render_chat_dispatches, render_terminal_ansi, terminal_data_envelope,
-    terminal_history_replaced_envelope, TerminalRenderState,
+    render_chat_dispatches, render_gui_shell_dispatch, render_terminal_ansi,
+    terminal_data_envelope, terminal_history_replaced_envelope, TerminalRenderState,
 };
 use crate::session::SessionStore;
 use crate::shared_session::{SharedSessionHandle, ShellInput, ViewEvent};
@@ -118,6 +118,14 @@ fn spawn_event_translator(handle: &SharedSessionHandle, proxy: EventLoopProxy<Us
                             continue;
                         }
                         for dispatch in render_chat_dispatches(&ev) {
+                            let _ = proxy.send_event(UserEvent::Dispatch(dispatch));
+                        }
+                        // dev-plan/33 Tier 1: also emit a gui_shell_event
+                        // for any active shell iframes. The shell shares
+                        // this session in Tier 1, so this is effectively
+                        // a third rendering of the same stream — Chat and
+                        // Terminal still get their events as before.
+                        if let Some(dispatch) = render_gui_shell_dispatch(&ev) {
                             let _ = proxy.send_event(UserEvent::Dispatch(dispatch));
                         }
                         if let Some(ansi) = render_terminal_ansi(&mut term_state, &ev) {
@@ -406,6 +414,98 @@ fn escape_for_js(s: &str) -> String {
         .replace('\0', "\\0")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
+}
+
+/// Resolve a `/gui-shell/<id>/<rel>` request against the embedded
+/// registry and return the asset bytes (HTML responses get the bridge
+/// `<script>` injected). Used by the custom-protocol handler.
+fn serve_gui_shell_asset(
+    registry: &crate::gui_shell::ShellRegistry,
+    rest: &str,
+) -> Response<Cow<'static, [u8]>> {
+    // rest = "<id>/<path>" or "<id>" (latter → treat as "<id>/index.html"
+    // wouldn't apply here because the loader always specifies index.html
+    // in the iframe src, so a bare id is a 404).
+    let decoded = urlencoding::decode(rest)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| rest.to_string());
+    let mut parts = decoded.splitn(2, '/');
+    let shell_id = parts.next().unwrap_or("");
+    let rel = parts.next().unwrap_or("");
+
+    let Some(shell) = registry.resolve(shell_id) else {
+        return Response::builder()
+            .status(404)
+            .body(Cow::Borrowed(&b"unknown shell"[..]))
+            .expect("build 404");
+    };
+
+    let (bytes, mime) = match shell.read_asset(rel) {
+        Ok(pair) => pair,
+        Err(_) => {
+            return Response::builder()
+                .status(404)
+                .body(Cow::Borrowed(&b"asset not found"[..]))
+                .expect("build 404");
+        }
+    };
+
+    let body: Cow<'static, [u8]> = if mime.starts_with("text/html") {
+        Cow::Owned(inject_bridge_script(&bytes))
+    } else {
+        Cow::Owned(bytes)
+    };
+
+    Response::builder()
+        .header("Content-Type", mime)
+        .header("X-Content-Type-Options", "nosniff")
+        .body(body)
+        .expect("build gui-shell asset response")
+}
+
+/// Inject `<script src="thclaws://localhost/gui-shell-bridge.js"></script>`
+/// at the start of `<head>` so shell authors don't have to include it
+/// manually. If no `<head>` is present (rare — shells are encouraged to
+/// declare one), prepend a minimal head wrapper at the top of the body.
+fn inject_bridge_script(html: &[u8]) -> Vec<u8> {
+    const TAG: &[u8] = b"<script src=\"thclaws://localhost/gui-shell-bridge.js\"></script>";
+    let lower = html.to_ascii_lowercase();
+    if let Some(idx) = find_subslice(&lower, b"<head>") {
+        let insert_at = idx + b"<head>".len();
+        let mut out = Vec::with_capacity(html.len() + TAG.len());
+        out.extend_from_slice(&html[..insert_at]);
+        out.extend_from_slice(TAG);
+        out.extend_from_slice(&html[insert_at..]);
+        out
+    } else if let Some(idx) = find_subslice(&lower, b"<head ") {
+        // Match `<head class="...">` etc. — insert after the closing >.
+        let after_open = html[idx..]
+            .iter()
+            .position(|&b| b == b'>')
+            .map(|p| idx + p + 1)
+            .unwrap_or(idx);
+        let mut out = Vec::with_capacity(html.len() + TAG.len());
+        out.extend_from_slice(&html[..after_open]);
+        out.extend_from_slice(TAG);
+        out.extend_from_slice(&html[after_open..]);
+        out
+    } else {
+        // No head — prepend one. Wraps the bridge in <head> so a strict
+        // parser still treats the rest as body.
+        let mut out = Vec::with_capacity(html.len() + TAG.len() + b"<head></head>".len());
+        out.extend_from_slice(b"<head>");
+        out.extend_from_slice(TAG);
+        out.extend_from_slice(b"</head>");
+        out.extend_from_slice(html);
+        out
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(target_os = "macos")]
@@ -731,15 +831,39 @@ fn run_gui_inner(serve: Option<crate::server::ServeConfig>) {
     #[cfg(not(windows))]
     let start_url = "thclaws://localhost/";
 
+    // Tier 1 GUI Shell registry — embedded built-ins only. Built once,
+    // cloned into the protocol-handler closure. Cheap (compile-time data),
+    // so no Arc needed; just an owned struct moved into the closure.
+    let shell_registry = crate::gui_shell::ShellRegistry::new();
+
     let builder = WebViewBuilder::new()
         .with_url(start_url)
-        .with_custom_protocol("thclaws".into(), |_webview_id, request| {
+        .with_custom_protocol("thclaws".into(), move |_webview_id, request| {
             // File-asset route: serves on-disk files so previewed HTML
             // can load its sibling CSS/JS with relative URLs. Example:
             // `thclaws://localhost/file-asset/Users/jimmy/site/index.html`
             // → reads `/Users/jimmy/site/index.html`. Every request is
             // validated through the sandbox before hitting disk.
             let req_path = request.uri().path();
+
+            // GUI Shell bridge runtime — served at a fixed path so every
+            // shell's injected <script src="…/gui-shell-bridge.js"> hits
+            // the same well-known URL regardless of which shell is loaded.
+            if req_path == "/gui-shell-bridge.js" {
+                return Response::builder()
+                    .header("Content-Type", "application/javascript; charset=utf-8")
+                    .body(Cow::Borrowed(crate::gui_shell::BRIDGE_RUNTIME.as_bytes()))
+                    .expect("build bridge-runtime response");
+            }
+
+            // GUI Shell asset route — `/gui-shell/<id>/<rel>`. Resolves
+            // <id> via the registry, looks up <rel> in the shell's asset
+            // map. HTML responses get the bridge `<script>` injected at
+            // <head> start so shell authors don't ship the bridge.
+            if let Some(rest) = req_path.strip_prefix("/gui-shell/") {
+                return serve_gui_shell_asset(&shell_registry, rest);
+            }
+
             if let Some(rest) = req_path.strip_prefix("/file-asset/") {
                 let decoded = urlencoding::decode(rest)
                     .map(|c| c.into_owned())

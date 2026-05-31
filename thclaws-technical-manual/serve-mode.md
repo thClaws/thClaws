@@ -72,7 +72,7 @@ thclaws --serve --port <N> --bind <ADDR>
 
 **Phase 2 (deferred):**
 - Optional HTTP basic / OAuth / Tailscale-aware auth — design TBD. Today: defer to the network layer (SSH, Cloudflare Tunnel + Access, reverse proxy with auth).
-- Multi-tenant — explicitly out of scope. Per-user containers if you want multiple users.
+- **Multi-tenant — shipped Tier 1 in dev-plan/35.** Use `thclaws --serve --gui-shell <agent> --multi-tenant --multi-tenant-secret <s>` to host N users on one pod with HMAC-signed `X-Thclaws-User` headers from the routing layer, per-user `SharedSessionHandle`s, per-user JSONLs / gui-shell storage / usage under `<project>/.thclaws/users/<id>/`, LRU + idle eviction, file-asset HMAC + path-prefix gate, and `MeteringSink` ingest. See [`multi-tenant-serve.md`](multi-tenant-serve.md) for the HMAC contract, on-disk layout, registry semantics, and curl smoke. The "per-user containers" path remains valid for stronger isolation (Tier 1 doesn't yet do per-user cgroups or bash subprocess pools — that's Tier 3).
 
 ## 4. The protocol
 

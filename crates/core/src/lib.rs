@@ -48,6 +48,8 @@ pub mod file_preview;
 pub mod goal_state;
 #[cfg(feature = "gui")]
 pub mod gui;
+#[cfg(feature = "gui")]
+pub mod gui_shell;
 pub mod hooks;
 pub mod instructions;
 #[cfg(feature = "gui")]
@@ -61,6 +63,7 @@ pub mod mcp;
 pub mod memory;
 pub mod messenger;
 pub mod model_catalogue;
+pub mod multi_tenant;
 pub mod oauth;
 pub mod permissions;
 pub mod plugins;

@@ -1,14 +1,17 @@
 //! Telegram adapter config — the canonical `TelegramConfig` struct plus
-//! the on-disk runtime state at `~/.config/thclaws/telegram.json`.
+//! the on-disk runtime state.
 //!
-//! Two layers feed this (Tier 1):
-//! 1. **Project settings** — `ProjectConfig.telegram` in
-//!    `.thclaws/settings.json` embeds this same struct (integration
-//!    phase). Lets a repo ship a bot binding alongside its agents.
-//! 2. **User runtime** — `~/.config/thclaws/telegram.json`, written by
-//!    the GUI Telegram Connect modal when the user pastes a bot token.
-//!    Mirrors the `line.json` pattern so the bridge auto-reconnects on
-//!    the next launch.
+//! Config lookup (dev-plan/33 Tier 2 — per-project, not per-user):
+//! 1. **Project runtime** — `./.thclaws/telegram.json` (preferred).
+//!    Each GUI Shell / project owns its own bot config so distributing
+//!    a shell folder to a VPS doesn't leak the user's personal bot
+//!    settings — and so two shells running side-by-side don't fight
+//!    over a single user-level bot binding.
+//! 2. **User-level legacy** — `~/.config/thclaws/telegram.json`.
+//!    Loaded ONLY when the env var `THCLAWS_TELEGRAM_USER_CONFIG=1` is
+//!    set. Pre-Tier 2 installs had their token here; this opt-in
+//!    fallback lets existing users keep their setup until they choose
+//!    to migrate (move the file into a project's `.thclaws/`).
 //!
 //! The bot **token** resolves independently of either file via
 //! [`TelegramConfig::resolved_token`]: `TELEGRAM_BOT_TOKEN` env beats
@@ -28,6 +31,16 @@ pub const DEFAULT_OUTPUT_CEILING: u32 = 4000;
 
 /// Env var consulted before the config-file `bot_token`.
 pub const BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+
+/// Env opt-in for the legacy `~/.config/thclaws/telegram.json` fallback
+/// path. Without this, only `./.thclaws/telegram.json` is consulted.
+pub const USER_FALLBACK_ENV: &str = "THCLAWS_TELEGRAM_USER_CONFIG";
+
+fn user_fallback_enabled() -> bool {
+    std::env::var(USER_FALLBACK_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TelegramConfigError {
@@ -159,27 +172,72 @@ impl Default for TelegramConfig {
 }
 
 impl TelegramConfig {
-    /// Canonical user-runtime path: `~/.config/thclaws/telegram.json`.
+    /// Project-scoped runtime path: `./.thclaws/telegram.json` —
+    /// resolved against the current working directory at call time.
+    /// dev-plan/33 Tier 2 moved this off the user-level path so each
+    /// GUI Shell / project owns its bot config independently.
     pub fn path() -> Result<PathBuf, TelegramConfigError> {
+        let cwd = std::env::current_dir().map_err(|source| TelegramConfigError::Io {
+            path: PathBuf::from("."),
+            source,
+        })?;
+        Ok(cwd.join(".thclaws").join("telegram.json"))
+    }
+
+    /// Legacy user-level path (`~/.config/thclaws/telegram.json`).
+    /// Only consulted as a fallback when the env opt-in is set —
+    /// pre-Tier 2 installs had their config here, and we don't
+    /// silently delete or migrate user state.
+    pub fn legacy_user_path() -> Result<PathBuf, TelegramConfigError> {
         let home = crate::util::home_dir().ok_or(TelegramConfigError::NoHome)?;
         Ok(home.join(".config").join("thclaws").join("telegram.json"))
     }
 
-    /// Read from disk. `Ok(None)` when absent — the default state for a
-    /// fresh install (Telegram bridge not configured).
+    /// Read from disk. `Ok(None)` when absent at the project path AND
+    /// (when env opt-in is set) at the legacy user path.
+    ///
+    /// Env opt-in: set `THCLAWS_TELEGRAM_USER_CONFIG=1` to fall back
+    /// to `~/.config/thclaws/telegram.json` when no project-level file
+    /// exists. Keeps existing users working until they migrate by
+    /// moving their `telegram.json` into the target project's
+    /// `.thclaws/` folder.
     pub fn load() -> Result<Option<Self>, TelegramConfigError> {
-        let path = Self::path()?;
-        match std::fs::read_to_string(&path) {
+        let project_path = Self::path()?;
+        match std::fs::read_to_string(&project_path) {
+            Ok(body) => {
+                return serde_json::from_str(&body).map(Some).map_err(|source| {
+                    TelegramConfigError::Json {
+                        path: project_path,
+                        source,
+                    }
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(TelegramConfigError::Io {
+                    path: project_path,
+                    source,
+                });
+            }
+        }
+        if !user_fallback_enabled() {
+            return Ok(None);
+        }
+        let user_path = Self::legacy_user_path()?;
+        match std::fs::read_to_string(&user_path) {
             Ok(body) => {
                 serde_json::from_str(&body)
                     .map(Some)
                     .map_err(|source| TelegramConfigError::Json {
-                        path: path.clone(),
+                        path: user_path,
                         source,
                     })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(TelegramConfigError::Io { path, source }),
+            Err(source) => Err(TelegramConfigError::Io {
+                path: user_path,
+                source,
+            }),
         }
     }
 

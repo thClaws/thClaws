@@ -2049,6 +2049,68 @@ mod tests {
         );
     }
 
+    /// Tier-1 fix regression test for the v0.24 audit:
+    /// `SkillStore::discover()` is cwd-sensitive — its project-dir
+    /// scan resolves relative paths against `std::env::current_dir()`
+    /// indirectly via `load_dir`. The GUI worker's
+    /// `ShellInput::ChangeCwd` arm (`shared_session.rs:2866`) relies
+    /// on this: it calls `SkillStore::discover()` after `cwd`
+    /// updates, expecting the new cwd's `.thclaws/skills/<name>/`
+    /// to surface and any previous-cwd project skills to drop out.
+    ///
+    /// Without this property, the in-session "switch project"
+    /// affordance silently retains the previous project's skill
+    /// catalog forever — the original v0.24 bug.
+    ///
+    /// User-level skills (`~/.config/thclaws/skills/`, absolute) are
+    /// out of scope here; they correctly persist across cwd changes
+    /// regardless. This test only pins project-scope behaviour.
+    #[test]
+    fn discover_is_cwd_sensitive_for_project_skills() {
+        let proj_a = tempdir().unwrap();
+        let proj_b = tempdir().unwrap();
+
+        std::fs::create_dir_all(proj_a.path().join(".thclaws/skills/alpha")).unwrap();
+        std::fs::write(
+            proj_a.path().join(".thclaws/skills/alpha/SKILL.md"),
+            "---\nname: alpha\ndescription: only in project A\n---\nA body\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(proj_b.path().join(".thclaws/skills/beta")).unwrap();
+        std::fs::write(
+            proj_b.path().join(".thclaws/skills/beta/SKILL.md"),
+            "---\nname: beta\ndescription: only in project B\n---\nB body\n",
+        )
+        .unwrap();
+
+        // discover() from project A — should see alpha, not beta.
+        let from_a = with_cwd(proj_a.path(), SkillStore::discover);
+        assert!(
+            from_a.skills.contains_key("alpha"),
+            "expected alpha in A's discover, got keys: {:?}",
+            from_a.skills.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !from_a.skills.contains_key("beta"),
+            "beta must NOT leak across cwd boundaries"
+        );
+
+        // discover() from project B — should see beta, not alpha.
+        // This is what the ChangeCwd fix at shared_session.rs:~2944
+        // re-runs after the worker's cwd flips.
+        let from_b = with_cwd(proj_b.path(), SkillStore::discover);
+        assert!(
+            from_b.skills.contains_key("beta"),
+            "expected beta in B's discover, got keys: {:?}",
+            from_b.skills.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !from_b.skills.contains_key("alpha"),
+            "alpha must NOT leak across cwd boundaries"
+        );
+    }
+
     #[test]
     fn project_skills_beat_plugin_skills_with_same_name() {
         // M6.14 BUG 2: previously discover_with_extra appended plugin

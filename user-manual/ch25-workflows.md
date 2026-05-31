@@ -31,6 +31,33 @@ Use Agent Teams (Chapter 17) when teammates need to **collaborate**
 list. Workflows are for stateless fan-out; teams are for stateful
 collaboration.
 
+## Two ways to invoke a workflow
+
+Same underlying engine (LLM authors a JS script, Boa sandbox runs
+it); two different entry points depending on who decides a workflow
+is the right tool:
+
+| Trigger | Best for | UX |
+|---|---|---|
+| **You type `/workflow run <prompt>`** (the slash command) | You already know fan-out is the right shape and want to review the script before it runs | Author → review → approve/cancel/re-author loop → run |
+| **The model calls the `WorkflowRun` tool** | You describe the work in natural language ("rewrite all the tests using the new fixture") and let the model decide whether to spawn one subagent or author a parallel workflow | Per-call approval prompt (same one Bash gets) → author → run, no review loop |
+
+Pick the slash command when you want to see the JS before it
+executes — useful for novel patterns or when you're iterating on the
+shape of the work. Pick the tool path when you just want the result
+and trust the model to choose the orchestration strategy.
+
+The model knows about `WorkflowRun` because it's listed in the
+**Collaboration primitives** section of the system prompt alongside
+Subagent (single-shot side-quest) and Agent Teams (persistent
+collaborators) — so it can pick the right primitive without being
+told. If you want to nudge it explicitly, just say "use WorkflowRun
+to …" in chat.
+
+Both paths reject nested calls: a script that tries to invoke
+`WorkflowRun` inside itself fails with a clear error — orchestrate
+through `thclaws.subagent(...)` / `thclaws.parallel(...)` instead.
+
 ## Quick start
 
 ```text
@@ -67,6 +94,37 @@ What happens, in order:
 
 If a worker errors, you see `✗ wN  …` for that line and the script
 typically catches and continues (depending on what the model wrote).
+
+### Quick start via the model
+
+Same task, no slash command — just ask in chat:
+
+```text
+you > rewrite each test file under tests/ to use the new TestHarness fixture
+```
+
+The model recognises this as fan-out and decides to call
+`WorkflowRun`:
+
+```text
+[approval] WorkflowRun(prompt: "rewrite each test file under tests/
+                                 to use the new TestHarness fixture")
+[a]llow once · [A]lways · [d]eny: a
+[workflow: author phase…]
+[workflow: 32 subagent turn(s), 18432 in / 9621 out tokens]
+✓ tests/test_login.rs — migrated to TestHarness::new()
+✓ tests/test_signup.rs — migrated; 1 helper renamed
+…
+```
+
+You see one approval prompt for the whole `WorkflowRun` call (the
+same shape Bash gets); inside the script, individual `Skill` /
+`Bash` / `Edit` calls each still need their own approvals as
+normal — `WorkflowRun` doesn't bypass the per-tool gates inside.
+
+If you want to see the JS script the model authored, use the
+slash-command path instead (`/workflow run <same prompt>`). The
+tool path skips the review loop for speed.
 
 ## The `thclaws.*` API
 

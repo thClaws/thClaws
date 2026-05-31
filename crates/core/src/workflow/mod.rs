@@ -34,8 +34,8 @@ pub(crate) use inspect::{
 };
 pub use runtime::check_kms_write_capability;
 pub(crate) use runtime::{
-    push_worker_usage, replay_remaining, set_replay_cache, set_task_tool, set_usage_sink,
-    take_all_usages, WorkflowSandbox,
+    is_inside_workflow, push_worker_usage, replay_remaining, set_replay_cache, set_task_tool,
+    set_usage_sink, take_all_usages, WorkflowSandbox,
 };
 
 #[cfg(feature = "gui")]

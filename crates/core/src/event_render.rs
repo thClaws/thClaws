@@ -277,6 +277,77 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
     }
 }
 
+// ── GUI Shell-shaped translator (dev-plan/33) ─────────────────────
+//
+// Emits a single envelope per event that's interesting to a shell UI.
+// The bridge runtime's `thclaws.on(event, cb)` consumes these — Tier 1
+// events are `"text"`, `"done"`, `"error"`. Tier 2 adds `"tool_call"`
+// and `"tool_result"`.
+//
+// Returns `None` for events that have no shell representation
+// (sidebar refreshes, status pills, etc. — those belong to the
+// main GUI's chrome, not to a shell's domain UI).
+
+/// Build a shell-shaped JSON envelope for a single ViewEvent. The
+/// frontend ShellView filters by `sessionId` before forwarding to the
+/// iframe; here we just emit the event without a session id and the
+/// parent will stamp it when re-posting.
+pub fn render_gui_shell_dispatch(ev: &ViewEvent) -> Option<String> {
+    match ev {
+        ViewEvent::AssistantTextDelta(text) => Some(
+            serde_json::json!({
+                "type": "gui_shell_event",
+                "event": "text",
+                "payload": strip_ansi(text),
+            })
+            .to_string(),
+        ),
+        ViewEvent::TurnDone => Some(
+            serde_json::json!({
+                "type": "gui_shell_event",
+                "event": "done",
+                "payload": null,
+            })
+            .to_string(),
+        ),
+        ViewEvent::ErrorText(s) => Some(
+            serde_json::json!({
+                "type": "gui_shell_event",
+                "event": "error",
+                "payload": { "error": strip_ansi(s) },
+            })
+            .to_string(),
+        ),
+        // Tier 2: surface agent tool activity so shells with
+        // domain-specific UIs can show a progress indicator next to
+        // each call ("Generating image…", "Fetching market data…").
+        ViewEvent::ToolCallStart { name, label, input } => Some(
+            serde_json::json!({
+                "type": "gui_shell_event",
+                "event": "tool_call",
+                "payload": {
+                    "name": name,
+                    "label": strip_ansi(label),
+                    "input": input,
+                },
+            })
+            .to_string(),
+        ),
+        ViewEvent::ToolCallResult { name, output, .. } => Some(
+            serde_json::json!({
+                "type": "gui_shell_event",
+                "event": "tool_result",
+                "payload": {
+                    "name": name,
+                    "output": strip_ansi(output),
+                },
+            })
+            .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 // ── ANSI strip ─────────────────────────────────────────────────────
 
 /// Strip ANSI escape sequences from a string. Handles the common forms

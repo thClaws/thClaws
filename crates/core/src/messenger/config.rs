@@ -1,15 +1,21 @@
-//! On-disk binding config at `~/.config/thclaws/messenger.json`.
+//! On-disk binding config at `./.thclaws/messenger.json` (dev-plan/33
+//! Tier 2 — project-scoped, mirrors the Telegram + LINE per-project
+//! move).
 //!
 //! Same model as the LINE bridge (`crate::line::config`): the
 //! high-value secrets — the Page Access Token + App Secret — live on
 //! the relay (k3s Secret), never here. The desktop only stores the
 //! binding JWT the relay's `POST /pair` hands back plus the relay URL,
-//! then reconnects the WebSocket on each launch.
+//! then reconnects the WebSocket on each launch — per project.
 //!
 //! Tier 1 (dev-plan/31) shares the LINE relay deployment, so the
 //! default server URL is the same `line.thclaws.ai` host with a
 //! `/messenger/webhook` ingest path. The rename to a neutral gateway
 //! host is dev-plan/31 open-question #1 (deferred to Tier 3).
+//!
+//! Legacy `~/.config/thclaws/messenger.json` is consulted as a
+//! fallback only when env var `THCLAWS_MESSENGER_USER_CONFIG=1` is
+//! set, so pre-Tier 2 installs keep working until the user migrates.
 
 use std::path::PathBuf;
 
@@ -18,6 +24,17 @@ use serde::{Deserialize, Serialize};
 /// Default relay when `server_url` isn't set. Shared with the LINE
 /// relay in Tier 1; override in dev via `THCLAWS_MESSENGER_SERVER`.
 pub const DEFAULT_SERVER_URL: &str = "https://line.thclaws.ai";
+
+/// Env opt-in for the legacy `~/.config/thclaws/messenger.json`
+/// fallback path. Without this, only `./.thclaws/messenger.json` is
+/// consulted — each project owns its own Messenger binding.
+pub const USER_FALLBACK_ENV: &str = "THCLAWS_MESSENGER_USER_CONFIG";
+
+fn user_fallback_enabled() -> bool {
+    std::env::var(USER_FALLBACK_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MessengerConfigError {
@@ -54,28 +71,66 @@ pub struct MessengerConfig {
 }
 
 impl MessengerConfig {
-    /// Canonical on-disk path. `None` only when no home directory can
-    /// be resolved (headless/CI environments).
+    /// Project-scoped path: `./.thclaws/messenger.json` — resolved
+    /// against the current working directory at call time. dev-plan/33
+    /// Tier 2 moved this off the user-level path so each project owns
+    /// its own Messenger binding.
     pub fn path() -> Result<PathBuf, MessengerConfigError> {
+        let cwd = std::env::current_dir().map_err(|source| MessengerConfigError::Io {
+            path: PathBuf::from("."),
+            source,
+        })?;
+        Ok(cwd.join(".thclaws").join("messenger.json"))
+    }
+
+    /// Legacy user-level path (`~/.config/thclaws/messenger.json`).
+    /// Only consulted as a fallback when
+    /// `THCLAWS_MESSENGER_USER_CONFIG=1` is set — pre-Tier 2 installs
+    /// had their binding here.
+    pub fn legacy_user_path() -> Result<PathBuf, MessengerConfigError> {
         let home = crate::util::home_dir().ok_or(MessengerConfigError::NoHome)?;
         Ok(home.join(".config").join("thclaws").join("messenger.json"))
     }
 
-    /// Read from disk. `Ok(None)` when the file is absent — the
-    /// "Messenger bridge not configured" default for a fresh install.
+    /// Read from disk. Project path first; legacy user path as
+    /// opt-in fallback. `Ok(None)` when both are absent.
     pub fn load() -> Result<Option<Self>, MessengerConfigError> {
-        let path = Self::path()?;
-        match std::fs::read_to_string(&path) {
+        let project_path = Self::path()?;
+        match std::fs::read_to_string(&project_path) {
+            Ok(body) => {
+                return serde_json::from_str(&body).map(Some).map_err(|source| {
+                    MessengerConfigError::Json {
+                        path: project_path,
+                        source,
+                    }
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(MessengerConfigError::Io {
+                    path: project_path,
+                    source,
+                });
+            }
+        }
+        if !user_fallback_enabled() {
+            return Ok(None);
+        }
+        let user_path = Self::legacy_user_path()?;
+        match std::fs::read_to_string(&user_path) {
             Ok(body) => {
                 serde_json::from_str(&body)
                     .map(Some)
                     .map_err(|source| MessengerConfigError::Json {
-                        path: path.clone(),
+                        path: user_path,
                         source,
                     })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(MessengerConfigError::Io { path, source }),
+            Err(source) => Err(MessengerConfigError::Io {
+                path: user_path,
+                source,
+            }),
         }
     }
 

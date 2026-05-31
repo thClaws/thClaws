@@ -18,7 +18,6 @@
 
 use crate::agent::Agent;
 use crate::config::AppConfig;
-use crate::context::ProjectContext;
 use crate::mcp::McpClient;
 use crate::providers::Provider;
 use crate::skills::SkillStore;
@@ -94,46 +93,57 @@ pub async fn build_runtime_with_provider(
     tool_registry.register(Arc::new(crate::tools::MemoryAppendTool));
     tool_registry.register(Arc::new(crate::tools::SessionRenameTool));
 
-    // System prompt: default thClaws system + project context where
-    // possible. ProjectContext::discover reads CLAUDE.md / AGENT.md
-    // siblings — we point it at the workspace dir so files in that dir
-    // get picked up, not files in the daemon's CWD.
-    let system_fallback = if config.system_prompt.is_empty() {
-        crate::prompts::defaults::SYSTEM
-    } else {
-        config.system_prompt.as_str()
-    };
-    let base_prompt = crate::prompts::load("system", system_fallback);
-    let project_ctx = ProjectContext::discover(workspace_dir).ok();
-    let mut system: String = match project_ctx.as_ref() {
-        Some(ctx) => ctx.build_system_prompt(&base_prompt),
-        None => base_prompt,
-    };
-
-    // Memory section — same plumbing the REPL uses.
-    if let Some(store) =
-        crate::memory::MemoryStore::default_path().map(crate::memory::MemoryStore::new)
-    {
-        if let Some(mem_section) = store.system_prompt_section() {
-            system.push_str("\n\n# Memory\n");
-            system.push_str(&mem_section);
-        }
-    }
-    let kms_section = crate::kms::system_prompt_section(&config.kms_active);
-    if !kms_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&kms_section);
+    // Tool-parity audit fix: respect `searchEngine` override (REPL
+    // had this; agent_runtime fell back to "auto"). HashMap::insert
+    // in `register` overwrites the default `WebSearchTool` from
+    // `with_builtins` by name.
+    if config.search_engine != "auto" {
+        tool_registry.register(Arc::new(crate::tools::WebSearchTool::new(
+            &config.search_engine,
+        )));
     }
 
-    // Discover skills for this workspace + plugin contributions.
+    // Tool-parity audit fix: Task tools (TodoWrite + task queue) —
+    // REPL + GUI register these; agent_runtime omitted them. HTTP
+    // clients now get the same scaffolding the default system prompt
+    // tells the model to use. TodoWrite is safe across surfaces (it
+    // writes per-project `.thclaws/todos.md`, which dev-plan/35's
+    // per-user state plumbing scopes correctly for multi-tenant
+    // serve). Returned task_store handle is unused here (no
+    // subagent factory wiring on the HTTP path) so dropped.
+    let _task_store = crate::tools::tasks::register_task_tools(&mut tool_registry);
+
+    // WorkflowRun: model-callable wrapper around `/workflow run`.
+    // agent_runtime doesn't register SubAgentTool (no subagent
+    // factory wiring on the HTTP path), so scripts that call
+    // `thclaws.subagent(...)` will error at runtime — same as print
+    // mode. The workflow primitive itself still works for non-
+    // subagent scripts, and registering keeps the tool surface
+    // consistent across all 4 entry points.
+    tool_registry.register(Arc::new(crate::tools::WorkflowRunTool::new(
+        provider.clone(),
+        config.model.clone(),
+        None,
+    )));
+
+    // Team tools deliberately NOT registered for the HTTP API
+    // surface — multi-tenant agent_runtime serves untrusted callers,
+    // and TeamCreate / SpawnTeammate spawn subprocesses outside the
+    // request boundary. If a deployment wants team-on for HTTP, add
+    // a config knob; for now stay safe-by-default.
+
+    // dev-plan/35 followup: discover skills BEFORE the prompt build
+    // so the unified `build_full_system_prompt` sees the live catalog.
+    // The daemon's cwd may differ from the workspace_dir the caller
+    // pointed at, so use `discover_in(workspace_dir, …)` instead of
+    // the cwd-relative `discover()`.
     let plugin_skill_dirs = crate::plugins::plugin_skill_dirs();
     let skill_store = SkillStore::discover_in(workspace_dir, &plugin_skill_dirs);
     let mut skill_names: Vec<String> = skill_store.skills.keys().cloned().collect();
     skill_names.sort();
 
     if !skill_store.skills.is_empty() {
-        append_skill_catalog(&mut system, &skill_store);
-        let skill_tool = crate::skills::SkillTool::new(skill_store);
+        let skill_tool = crate::skills::SkillTool::new(skill_store.clone());
         let store_handle = skill_tool.store_handle();
         tool_registry.register(Arc::new(skill_tool));
         tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
@@ -145,7 +155,9 @@ pub async fn build_runtime_with_provider(
     }
 
     // MCP servers: config-level + plugin contributions, merged with
-    // config winning on name clash.
+    // config winning on name clash. Spawn BEFORE the prompt build so
+    // each server's `InitializeResult.instructions` lands in the
+    // `# MCP server instructions` section on the first request.
     let mut merged_mcp = config.mcp_servers.clone();
     for p_mcp in crate::plugins::plugin_mcp_servers() {
         if !merged_mcp.iter().any(|s| s.name == p_mcp.name) {
@@ -153,6 +165,21 @@ pub async fn build_runtime_with_provider(
         }
     }
     let (mcp_clients, mcp_summary) = load_mcp_servers_silent(&merged_mcp, &mut tool_registry).await;
+    let mcp_instructions = crate::mcp::collect_mcp_instructions(&mcp_clients);
+
+    // System prompt via the unified builder — same shape as CLI / GUI /
+    // print. SurfaceHints::Headless skips the REPL slash-command priming.
+    let mut system = crate::prompts::build_full_system_prompt(
+        config,
+        workspace_dir,
+        if skill_store.skills.is_empty() {
+            None
+        } else {
+            Some(&skill_store)
+        },
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Headless,
+    );
 
     // Per-request extra system content (the OpenAI-style `system`
     // message a caller can pass). Appended so the default scaffolding
@@ -180,39 +207,6 @@ pub async fn build_runtime_with_provider(
         mcp_summary,
         skill_names,
     })
-}
-
-/// Append the skill catalog + invocation rules to the system prompt.
-/// Mirrors the REPL's catalog so models behave identically regardless
-/// of surface.
-fn append_skill_catalog(system: &mut String, store: &SkillStore) {
-    system.push_str("\n\n# Available skills (MANDATORY usage)\n");
-    system.push_str(
-        "The `Skill` tool loads expert instructions for a bundled workflow. \
-         If a user request matches the trigger criteria of any skill below, \
-         you MUST:\n\
-         1. Call `Skill(name: \"<skill-name>\")` FIRST — before any Bash, \
-            Write, Edit, or other tool calls for that task.\n\
-         2. Follow the instructions returned by that skill for the rest of \
-            the task. They override your default approach.\n\
-         3. Announce the skill at the start of your reply, e.g. \
-            \"Using the `pdf` skill to …\".\n\
-         Do NOT implement the task yourself when a matching skill exists — \
-         the skill encodes conventions and scripts you don't have built in.\n\n",
-    );
-    let mut entries: Vec<&crate::skills::SkillDef> = store.skills.values().collect();
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    for skill in entries {
-        if !skill.when_to_use.is_empty() {
-            system.push_str(&format!("- **{}**: {}\n", skill.name, skill.when_to_use));
-        } else {
-            system.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
-        }
-    }
-    system.push_str(
-        "\nReminder: if the user's request matches ANY skill trigger above, \
-         call `Skill(name: \"...\")` FIRST.\n",
-    );
 }
 
 /// Server-friendly MCP loader: same shape as `repl::load_mcp_servers`

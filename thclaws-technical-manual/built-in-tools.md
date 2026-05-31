@@ -72,7 +72,7 @@ impl ToolRegistry {
 }
 ```
 
-`with_builtins()` registers the 26 "built-in" tools (file + search + shell + web + ask + planning + 12 document tools). Task tools (TaskCreate/Update/Get/List) require shared state and are registered separately via `register_task_tools(&mut registry) -> SharedTaskStore`. Team tools register via `register_team_tools` (see team docs). MCP tools register at MCP-server-spawn time.
+`with_builtins()` registers the 26 "built-in" tools (file + search + shell + web + ask + planning + 12 document tools). Task tools (TaskCreate/Update/Get/List) require shared state and are registered separately via `register_task_tools(&mut registry) -> SharedTaskStore`. Team tools register via `register_team_tools` (see team docs). `Skill` / `SkillList` / `SkillSearch` register per-surface (need `SkillStore` access). `WorkflowRun` registers per-surface (needs the live `Provider` + `model` + Subagent `Tool` reference at construction — see §9b). MCP tools register at MCP-server-spawn time.
 
 `tool_defs()` is what gets sent to the provider — sorted by name for deterministic output (helps with prompt caching: the byte-stable ordering means the tools array doesn't change across turns until a tool registers/removes).
 
@@ -500,6 +500,50 @@ In Plan mode the dispatch gate blocks TodoWrite with a "use SubmitPlan instead" 
 - **Unique-id check** — duplicate ids rejected with `'<id>' — every todo must have a unique id` (pre-fix: file kept both bullets, frontend logged React key collisions, next-read state was ambiguous).
 
 Same intentional sandbox carve-out as KMS / Memory writes — `.thclaws/` is reserved-write but TodoWrite specifically targets it via the validated path.
+
+---
+
+## 9b. Orchestration: WorkflowRun
+
+| | |
+|---|---|
+| Name | `WorkflowRun` |
+| Approval | **yes** — every call prompts (same posture as `Bash`; runs LLM-authored JavaScript) |
+| Schema | `{prompt: string}` — natural-language goal for the workflow author |
+| Source | `crates/core/src/tools/workflow_run.rs` |
+| Returns | Script's final-expression value as a string, plus a one-line token rollup `[workflow: N subagent turn(s), X in / Y out tokens]` |
+
+Model-callable wrapper around the same `crate::workflow::script::author` + `crate::workflow::WorkflowSandbox::run` flow the user-typed `/workflow run` slash command takes. The model decides when fan-out is the right primitive instead of the user typing the slash command. Both paths share one engine — no duplicate authoring logic.
+
+Internally:
+
+1. **Nested-call guard** — `crate::workflow::is_inside_workflow()` checks the `WORKFLOW_USAGE_SINK` thread-local. If set (we're inside a running sandbox), bail with "WorkflowRun cannot be invoked from inside a running workflow…" before authoring so we don't burn tokens on an unrunnable script.
+2. **Author phase** — `workflow::script::author(provider, model, prompt, None)` makes ONE provider stream call with `WORKFLOW_AUTHOR` as the system prompt and the user goal as the only message. Returns the JS script body (markdown fences stripped).
+3. **Execute phase** — `tokio::task::spawn_blocking` opens a worker thread; inside:
+   - `workflow::set_task_tool(Some(subagent_arc))` — installs the Subagent (`Task`) tool the sandbox's `thclaws.subagent(...)` host binding dispatches through.
+   - `workflow::set_usage_sink(true)` — enables per-turn usage capture.
+   - `WorkflowSandbox::new()` + `sandbox.run(&script)` — Boa runs the script.
+   - `workflow::take_all_usages()` drains; `set_task_tool(None)` + `set_usage_sink(false)` unwind the thread-locals.
+4. **Result** — script's final-expression string + token rollup.
+
+**Captured state at registration:** `Arc<dyn Provider>`, `model: String`, `Option<Arc<dyn Tool>>` (the live Subagent tool). The provider+model snapshot means a `/model` swap mid-session leaves WorkflowRun pinned to the swap-time provider until the surface re-registers (REPL: on `/reload`, GUI: on rebuild_agent path). The Subagent reference may be `None` on surfaces that don't register Subagent (print mode, `agent_runtime` HTTP) — non-subagent scripts still work; scripts calling `thclaws.subagent(...)` fail with the runtime's own "Task tool not available" error.
+
+**Surface availability matrix:**
+
+| Surface | Registered? | Subagent threaded? |
+|---|---|---|
+| CLI REPL (`thclaws --cli`) | yes | yes |
+| GUI / `--serve` (worker) | yes | yes |
+| Print mode (`thclaws -p`) | yes | no |
+| `agent_runtime` HTTP (`/v1`) | yes | no |
+
+**Tests** in `crates/core/src/tools/workflow_run.rs::tests`:
+- `workflow_run_executes_authored_script_and_returns_result` — stub provider returns `"'hi'"`, tool runs end-to-end through `spawn_blocking` + Boa, returns `"hi"` + token rollup. Pins the pipeline composes from the tool layer, not just from the slash-command handler.
+- `nested_workflow_run_is_rejected_via_thread_local` — sets `WORKFLOW_USAGE_SINK` by hand, calls tool, expects "inside a running workflow" error.
+
+**Cancellation** — the workflow runtime's polling boundary observes the standard cancellation token set by the calling worker (`shell_dispatch.rs:3733` for GUI / `repl.rs:9080` for CLI slash-command path). The tool inherits whichever surface invoked it; no extra plumbing here.
+
+**Why a tool and not just the slash command** — pre-fix users wanted the model to reach for the workflow primitive on its own when a task looked like deterministic fan-out, without needing to remember `/workflow run`. The slash command stays as the interactive-review path for novel patterns; the tool path skips review for speed. Both go through the same author + sandbox flow so changes to the engine don't drift.
 
 ---
 

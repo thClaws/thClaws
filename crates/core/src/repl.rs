@@ -6,10 +6,8 @@
 
 use crate::agent::{Agent, AgentEvent};
 use crate::config::{AppConfig, ProjectConfig};
-use crate::context::ProjectContext;
 use crate::error::{Error, Result};
 use crate::mcp::{McpClient, McpServerConfig, McpTool};
-use crate::memory::MemoryStore;
 use crate::permissions::{PermissionMode, ReplApprover};
 use crate::providers::{
     anthropic::AnthropicProvider, gemini::GeminiProvider, ollama::OllamaProvider,
@@ -1429,6 +1427,25 @@ fn parse_size(s: &str) -> Option<u32> {
 /// backward-compat tests and REPL call sites that already use `&str`.
 pub fn default_model_for_provider(provider: &str) -> Option<&'static str> {
     ProviderKind::from_name(provider).map(|k| k.default_model())
+}
+
+/// Shared `/<skill-name>` → model-prompt rewrite text. CLI (`run_repl`)
+/// and GUI / --serve (`shared_session::handle_line`) call this so the
+/// instruction that lands in the next agent turn is byte-identical
+/// across surfaces — pre-extract, the two had parallel implementations
+/// that could drift. The caller decides whether `word` actually
+/// matches a discovered skill (CLI uses a `skill_names` snapshot;
+/// GUI queries the live `state.skill_store` Mutex); this helper just
+/// builds the canonical rewrite once `word` is known to match.
+pub fn make_skill_rewrite_prompt(word: &str, args: &str) -> String {
+    let args_note = if args.is_empty() {
+        String::new()
+    } else {
+        format!(" The user's task for this skill: {args}")
+    };
+    format!(
+        "The user ran the `/{word}` slash command. Call `Skill(name: \"{word}\")` right away and follow the instructions it returns.{args_note}"
+    )
 }
 
 /// Parse a line as a slash command. Returns `None` when the line isn't a
@@ -3906,26 +3923,6 @@ async fn load_mcp_servers(
 /// Matches the Python `--print` flag behavior.
 pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ctx = ProjectContext::discover(&cwd)?;
-    let memory_store = MemoryStore::default_path().map(MemoryStore::new);
-    let system_fallback = if config.system_prompt.is_empty() {
-        crate::prompts::defaults::SYSTEM
-    } else {
-        config.system_prompt.as_str()
-    };
-    let base_prompt = crate::prompts::load("system", system_fallback);
-    let mut system = ctx.build_system_prompt(&base_prompt);
-    if let Some(store) = &memory_store {
-        if let Some(mem_section) = store.system_prompt_section() {
-            system.push_str("\n\n# Memory\n");
-            system.push_str(&mem_section);
-        }
-    }
-    let kms_section = crate::kms::system_prompt_section(&config.kms_active);
-    if !kms_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&kms_section);
-    }
 
     let mut tool_registry = ToolRegistry::with_builtins();
     // KMS tools always-on (pre-fix this was gated by
@@ -3950,8 +3947,103 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     // because tool filtering happens via per-agent allow-lists, not
     // here.
     tool_registry.register(Arc::new(crate::tools::SessionRenameTool));
-    let (_mcp_clients, _mcp_summary) =
-        load_mcp_servers(&config.mcp_servers, &mut tool_registry).await;
+
+    // Tool-parity audit fix: print mode now respects the configured
+    // search engine override (REPL had this since day one; print
+    // silently fell back to "auto" / DuckDuckGo regardless of
+    // settings.json::searchEngine). HashMap::insert in `register`
+    // overwrites the default "auto" WebSearchTool from
+    // ToolRegistry::with_builtins by name.
+    if config.search_engine != "auto" {
+        tool_registry.register(Arc::new(crate::tools::WebSearchTool::new(
+            &config.search_engine,
+        )));
+    }
+
+    // Tool-parity audit fix: Task tools (TodoWrite + the subagent
+    // task queue) — REPL + GUI register these; print mode used to
+    // omit them, so `thclaws -p "do multi-step thing"` couldn't use
+    // the TodoWrite scaffolding the default system prompt explicitly
+    // tells it to use. `register_task_tools` returns a TaskStore
+    // handle; print mode has no subagent factory wiring (single-shot,
+    // no /spawn slash commands) so the returned handle is dropped.
+    let _task_store = crate::tools::tasks::register_task_tools(&mut tool_registry);
+
+    // Tool-parity audit fix: Team tools (`TeamCreate` / `SpawnTeammate`
+    // / `SendMessage` / `CheckInbox` / `TeamStatus` / `TeamTask*` /
+    // `TeamMerge`) — gated on the same `team_enabled` config flag
+    // REPL + GUI use. agent_runtime HTTP intentionally skips this
+    // (daemon safety — clients shouldn't spawn subprocesses); print
+    // mode is single-user-on-their-own-machine, same security
+    // posture as REPL, so we mirror REPL.
+    let team_agent_name = std::env::var("THCLAWS_TEAM_AGENT").ok();
+    let team_role = team_agent_name.as_deref().unwrap_or("lead");
+    let team_enabled = team_agent_name.is_some()
+        || crate::config::ProjectConfig::load()
+            .and_then(|c| c.team_enabled)
+            .unwrap_or(false);
+    if team_enabled {
+        let _team_mailbox = crate::team::register_team_tools(&mut tool_registry, team_role);
+    }
+
+    // dev-plan/35 followup #2: print mode picks up skills too so
+    // one-shot prompts (`thclaws -p "make a PDF of …"`) reach for
+    // the matching skill the same way the REPL / GUI / --serve
+    // surfaces do. Pre-fix print mode silently skipped skill
+    // discovery — the model never saw the catalog, never called
+    // `Skill(...)`. ~10ms startup cost for the discover() walk,
+    // worth the parity. Same plugin-skill-dir fan-in as the REPL.
+    let plugin_skill_dirs = crate::plugins::plugin_skill_dirs();
+    let skill_store = crate::skills::SkillStore::discover_with_extra(&plugin_skill_dirs);
+    // Tool-parity audit fix: Skill family registers unconditionally
+    // across all 4 surfaces (GUI/serve was already always-on; REPL +
+    // print + HTTP gated on `!is_empty()` and diverged). The tool
+    // returns "skill 'X' not found" when called against an empty
+    // store — graceful enough that the model can recover, and far
+    // simpler than threading a re-registration hook through every
+    // mid-session catalog change. The system prompt's
+    // `# Available skills` section still correctly skips when the
+    // catalog is empty (see `prompts::build_full_system_prompt`).
+    let skill_tool = crate::skills::SkillTool::new(skill_store.clone());
+    let store_handle = skill_tool.store_handle();
+    tool_registry.register(Arc::new(skill_tool));
+    tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
+        store_handle.clone(),
+    )));
+    tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
+        store_handle,
+    )));
+    let store_ref = if skill_store.skills.is_empty() {
+        None
+    } else {
+        Some(&skill_store)
+    };
+
+    // Load MCPs BEFORE building the system prompt so their
+    // `InitializeResult.instructions` make it into the
+    // `# MCP server instructions` section on the very first turn.
+    // Print mode is single-shot — no later rebuild opportunity.
+    //
+    // Tool-parity audit fix: merge plugin-contributed MCPs (same
+    // shape as repl.rs:~4189 + agent_runtime.rs:~123). Without
+    // this, a plugin-installed MCP server was invisible in print
+    // mode unless the user manually duplicated it into mcp.json.
+    let mut merged_mcp = config.mcp_servers.clone();
+    for p_mcp in crate::plugins::plugin_mcp_servers() {
+        if !merged_mcp.iter().any(|s| s.name == p_mcp.name) {
+            merged_mcp.push(p_mcp);
+        }
+    }
+    let (mcp_clients, _mcp_summary) = load_mcp_servers(&merged_mcp, &mut tool_registry).await;
+    let mcp_instructions = crate::mcp::collect_mcp_instructions(&mcp_clients);
+
+    let system = crate::prompts::build_full_system_prompt(
+        &config,
+        &cwd,
+        store_ref,
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Headless,
+    );
 
     let provider = build_provider(&config)?;
     let perm_mode = if config.permissions == "auto" {
@@ -3959,6 +4051,18 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     } else {
         PermissionMode::Ask
     };
+
+    // WorkflowRun: model-callable wrapper around `/workflow run`. Print
+    // mode doesn't register Subagent, so scripts that call
+    // `thclaws.subagent(...)` will error — fine, the model authors
+    // around it. Registered for surface-parity with REPL / GUI; rarely
+    // exercised in one-shot `-p` mode but it works when asked.
+    tool_registry.register(Arc::new(crate::tools::WorkflowRunTool::new(
+        provider.clone(),
+        config.model.clone(),
+        None,
+    )));
+
     let agent = Agent::new(provider, tool_registry, config.model.clone(), system)
         .with_max_iterations(config.max_iterations)
         .with_max_tokens(config.max_tokens)
@@ -4037,8 +4141,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     crate::providers::set_stream_chunk_timeout_secs(config.stream_chunk_timeout_secs);
 
     let cwd = std::env::current_dir()?;
-    let ctx = ProjectContext::discover(&cwd)?;
-    let memory_store = MemoryStore::default_path().map(MemoryStore::new);
+    // Keep `memory_store` around for the `/memory list/show/dump/...`
+    // slash-command handlers further down (line ~5744 onward). The
+    // system-prompt builder loads memory independently — this binding
+    // is purely for the interactive commands the REPL exposes.
+    let memory_store =
+        crate::memory::MemoryStore::default_path().map(crate::memory::MemoryStore::new);
 
     // M6.11 (H1): daily auto-refresh of the marketplace catalog so
     // CLI users get fresh entries without having to remember
@@ -4046,25 +4154,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // no-op when the cache is < 24h old.
     crate::marketplace::spawn_daily_auto_refresh();
 
-    // Append memory section to the project system prompt, if any memory exists.
-    let system_fallback = if config.system_prompt.is_empty() {
-        crate::prompts::defaults::SYSTEM
-    } else {
-        config.system_prompt.as_str()
-    };
-    let base_prompt = crate::prompts::load("system", system_fallback);
-    let mut system = ctx.build_system_prompt(&base_prompt);
-    if let Some(store) = &memory_store {
-        if let Some(mem_section) = store.system_prompt_section() {
-            system.push_str("\n\n# Memory\n");
-            system.push_str(&mem_section);
-        }
-    }
-    let kms_section = crate::kms::system_prompt_section(&config.kms_active);
-    if !kms_section.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&kms_section);
-    }
+    // dev-plan/35 followup: defer system-prompt assembly until AFTER
+    // skill discovery (line ~4177) so the unified builder gets the
+    // populated SkillStore in one shot. Pre-fix, REPL inlined four
+    // assembly steps here, then appended the skills section separately
+    // at line ~4193, with the GUI/serve worker doing things in a
+    // different order — every drift fix had to be applied twice.
+    // `mut` because the lead-role addendum is appended later (~4342).
+    let mut system: String;
 
     // Build the tool registry once, with built-ins + task tools + MCP tools.
     // Override WebSearch with the configured engine (with_builtins uses "auto").
@@ -4180,71 +4277,47 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // SkillTool's shared store via `skill_store_handle` below.
     let mut skill_names: std::collections::HashSet<String> =
         skill_store.skills.keys().cloned().collect();
-    let mut skill_store_handle: Option<
-        std::sync::Arc<std::sync::Mutex<crate::skills::SkillStore>>,
-    > = None;
     if !skill_store.skills.is_empty() {
         let count = skill_store.skills.len();
         println!("{COLOR_DIM}[skills] {} skill(s) loaded{COLOR_RESET}", count);
-        // Surface the skill catalog in the system prompt so the model knows
-        // what's available without having to read the Skill tool's input
-        // schema. For each skill list name + description + whenToUse — the
-        // same fields Claude Code uses to decide when to reach for a skill.
-        system.push_str("\n\n# Available skills (MANDATORY usage)\n");
-        system.push_str(
-            "The `Skill` tool loads expert instructions for a bundled workflow. \
-             If a user request matches the trigger criteria of any skill below, \
-             you MUST:\n\
-             1. Call `Skill(name: \"<skill-name>\")` FIRST — before any Bash, \
-                Write, Edit, or other tool calls for that task.\n\
-             2. Follow the instructions returned by that skill for the rest of \
-                the task. They override your default approach.\n\
-             3. Announce the skill at the start of your reply, e.g. \
-                \"Using the `pdf` skill to …\".\n\
-             Do NOT implement the task yourself when a matching skill exists — \
-             the skill encodes conventions and scripts you don't have built in.\n\n",
-        );
-        let mut entries: Vec<&crate::skills::SkillDef> = skill_store.skills.values().collect();
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        for skill in entries {
-            // Keep each entry compact: name + short trigger only. Full
-            // description is available via `Skill(name)` call. This helps
-            // small-context models (Ollama/Gemma) where 18 multi-line
-            // descriptions push the catalog out of the attention window.
-            if !skill.when_to_use.is_empty() {
-                system.push_str(&format!("- **{}**: {}\n", skill.name, skill.when_to_use));
-            } else {
-                system.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
-            }
-        }
-        // Re-anchor the rule close to where the model's attention is
-        // strongest (end of system prompt gets more weight than middle).
-        system.push_str(
-            "\nReminder: if the user's request matches ANY skill trigger above, \
-             call `Skill(name: \"...\")` FIRST.\n\n\
-             Slash-command shortcut: if a user message begins with \
-             `/<skill-name>` (matching one of the skills above), that IS \
-             an explicit request to run that skill. Call \
-             `Skill(name: \"<skill-name>\")` immediately, then follow its \
-             instructions using any args that appeared after the name.\n",
-        );
-        let skill_tool = crate::skills::SkillTool::new(skill_store);
-        let store_handle = skill_tool.store_handle();
-        skill_store_handle = Some(store_handle.clone());
-        tool_registry.register(Arc::new(skill_tool));
-        // dev-plan/06 P2: discovery tools register alongside Skill so
-        // the "names-only" / "discover-tool-only" strategies have
-        // something to point at. Always-registered for symmetry with
-        // the GUI worker.
-        tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
-            store_handle.clone(),
-        )));
-        tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
-            store_handle,
-        )));
     }
+    // Tool-parity audit fix: Skill family registers unconditionally
+    // across all 4 surfaces (see run_print_mode for the rationale).
+    let skill_tool = crate::skills::SkillTool::new(skill_store.clone());
+    let store_handle = skill_tool.store_handle();
+    let skill_store_handle: Option<std::sync::Arc<std::sync::Mutex<crate::skills::SkillStore>>> =
+        Some(store_handle.clone());
+    tool_registry.register(Arc::new(skill_tool));
+    // dev-plan/06 P2: discovery tools register alongside Skill so
+    // the "names-only" / "discover-tool-only" strategies have
+    // something to point at. Always-registered for symmetry with
+    // the GUI worker.
+    tool_registry.register(Arc::new(crate::skills::SkillListTool::new_from_handle(
+        store_handle.clone(),
+    )));
+    tool_registry.register(Arc::new(crate::skills::SkillSearchTool::new_from_handle(
+        store_handle,
+    )));
+    // run_repl already pre-merges plugin MCPs into `config.mcp_servers`
+    // at line ~4245 (the "Merge plugin MCP servers into config" loop),
+    // so `&config.mcp_servers` already contains the plugin contributions.
+    // No second merge needed here.
     let (mut mcp_clients, mut mcp_summary) =
         load_mcp_servers(&config.mcp_servers, &mut tool_registry).await;
+
+    // Now that the skill_store + MCP clients are both populated,
+    // assemble the system prompt. Single source of truth shared
+    // with CLI/GUI/print/agent_runtime via prompts.rs.
+    // SurfaceHints::Repl appends the slash-command-shortcut priming
+    // inside the skills section.
+    let mcp_instructions = crate::mcp::collect_mcp_instructions(&mcp_clients);
+    system = crate::prompts::build_full_system_prompt(
+        &config,
+        &cwd,
+        Some(&skill_store),
+        &mcp_instructions,
+        crate::prompts::SurfaceHints::Repl,
+    );
 
     // Try the configured provider first; on failure (missing key, etc.)
     // fall back to something usable so the REPL still opens. The user
@@ -4365,11 +4438,23 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
             cancel: None,
             hooks: Some(hooks_arc.clone()),
         });
-        tool_registry.register(Arc::new(
+        let subagent_arc: Arc<dyn crate::tools::Tool> = Arc::new(
             SubAgentTool::new(factory)
                 .with_depth(0)
                 .with_agent_defs(agent_defs),
-        ));
+        );
+        tool_registry.register(subagent_arc.clone());
+        // WorkflowRun: model-callable wrapper around the `/workflow
+        // run` slash command. Captures the live provider + current
+        // model so the workflow author sees the same engine as the
+        // calling agent. `subagent_arc` is threaded in so scripts'
+        // `thclaws.subagent(...)` calls dispatch to the Task tool the
+        // REPL just registered.
+        tool_registry.register(Arc::new(crate::tools::WorkflowRunTool::new(
+            provider.clone(),
+            config.model.clone(),
+            Some(subagent_arc),
+        )));
     }
 
     // If a team exists, inject lead coordination rules into the system prompt.
@@ -5224,15 +5309,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let args = body.strip_prefix(&word).unwrap_or("").trim();
 
                 if skill_names.contains(&word) {
-                    let args_note = if args.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" The user's task for this skill: {args}")
-                    };
+                    // dev-plan/35 followup: shared rewrite-text helper
+                    // so CLI and GUI / --serve speak the exact same
+                    // skill-invocation prompt. CLI keeps its own
+                    // `skill_names` snapshot for the lookup (kept in
+                    // sync with `/skill install` handlers below); GUI
+                    // queries `state.skill_store` live. Only the
+                    // rewrite text is centralised.
                     println!("{COLOR_DIM}(/{word} → Skill(name: \"{word}\")){COLOR_RESET}");
-                    line = format!(
-                        "The user ran the `/{word}` slash command. Call `Skill(name: \"{word}\")` right away and follow the instructions it returns.{args_note}"
-                    );
+                    line = make_skill_rewrite_prompt(&word, args);
                 } else if let Some(cmd) = command_store.get(&word).cloned() {
                     println!(
                         "{COLOR_DIM}(/{word} → prompt from {}){COLOR_RESET}",

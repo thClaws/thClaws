@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal, MessageSquare, FolderTree, Users, FolderOpen, Folder, Settings } from "lucide-react";
+import { Terminal, MessageSquare, FolderTree, Users, FolderOpen, Folder, Settings, Sparkles } from "lucide-react";
 import { TerminalView } from "./components/TerminalView";
 import { ChatView } from "./components/ChatView";
 import { FilesView } from "./components/FilesView";
 import { TeamView } from "./components/TeamView";
+import { ShellTab } from "./components/ShellTab";
 import { LoginButton } from "./components/LoginButton";
 import { Sidebar } from "./components/Sidebar";
 import { PlanSidebar } from "./components/PlanSidebar";
@@ -31,7 +32,7 @@ import { ContextWarningBanner } from "./components/ContextWarningBanner";
 import { useEditingShortcuts } from "./hooks/useEditingShortcuts";
 import { send, subscribe } from "./hooks/useIPC";
 
-type Tab = "terminal" | "chat" | "files" | "team";
+type Tab = "terminal" | "chat" | "files" | "team" | "shell";
 
 // Fires `frontend_ready` once on mount. Mounted only after both
 // startup modals (working-directory + secrets-backend) dismiss, so
@@ -49,6 +50,9 @@ const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "terminal", label: "Terminal", icon: <Terminal size={14} /> },
   { id: "files", label: "Files", icon: <FolderTree size={14} /> },
   { id: "team", label: "Team", icon: <Users size={14} /> },
+  // dev-plan/33 Tier 1: single hardcoded entry for Session Explorer.
+  // Tier 2 replaces this with a picker that lists every installed shell.
+  { id: "shell", label: "Shell", icon: <Sparkles size={14} /> },
 ];
 
 // ── Startup modal ────────────────────────────────────────────────────
@@ -537,6 +541,7 @@ export default function App() {
                 {id === "chat" && <ChatView active={isActive} modalOpen={modalOpen} />}
                 {id === "files" && <FilesView active={isActive} />}
                 {id === "team" && <TeamView />}
+                {id === "shell" && <ShellTab active={isActive} />}
               </div>
             );
           })}
