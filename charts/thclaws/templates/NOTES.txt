@@ -1,0 +1,35 @@
+thClaws {{ include "thclaws.imageTag" . }} deployed as {{ .Release.Name }}.
+
+{{- if .Values.ingress.enabled }}
+  Access via ingress:
+  {{- range .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ (index $.Values.ingress.hosts 0).host }}{{ .path }}
+  {{- end }}
+  {{- end }}
+{{- else if eq .Values.service.type "NodePort" }}
+  export NODE_PORT=$(kubectl get svc {{ include "thclaws.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}")
+  export NODE_IP=$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "http://${NODE_IP}:${NODE_PORT}"
+{{- else }}
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "thclaws.fullname" . }} 8443:{{ .Values.service.port }}
+  # then open http://localhost:8443
+{{- end }}
+
+{{- if .Values.multiTenant.enabled }}
+
+Multi-tenant mode is ENABLED (max {{ .Values.multiTenant.maxUsers }} users, idle timeout {{ .Values.multiTenant.idleTimeout }}s).
+Your routing proxy must attach signed headers:
+  X-Thclaws-User, X-Thclaws-Ts, X-Thclaws-Proof
+{{- if and (not .Values.multiTenant.existingSecret) (not .Values.multiTenant.secret) }}
+
+WARNING: multiTenant.secret and multiTenant.existingSecret are both empty.
+         Set one before deploying to production.
+{{- end }}
+{{- end }}
+
+{{- if and (not .Values.apiKeys.existingSecret) (not .Values.apiKeys.anthropic) (not .Values.apiKeys.openai) (not .Values.apiKeys.gemini) }}
+
+WARNING: No API keys configured. Set apiKeys.anthropic (or existingSecret) or
+         the agent will fail to connect to any LLM provider.
+{{- end }}

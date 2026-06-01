@@ -1,0 +1,124 @@
+## thClaws Helm chart — default values
+
+image:
+  repository: thclaws/thclaws
+  tag: ""  # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+## --serve flags
+serve:
+  port: 8443
+  bind: "0.0.0.0"
+
+## Multi-tenant mode (dev-plan/35)
+## Requires a routing layer (e.g. thClaws.cloud or your own proxy) that
+## attaches HMAC-signed X-Thclaws-User / X-Thclaws-Ts / X-Thclaws-Proof headers.
+multiTenant:
+  enabled: false
+  maxUsers: 100
+  ## Idle timeout before a user session is evicted (seconds)
+  idleTimeout: 3600
+  ## HMAC secret — set one of:
+  ##   secret: "plaintext-value"          (creates a new Secret)
+  ##   existingSecret: "my-k8s-secret"    (use pre-existing Secret, key must be "hmac-secret")
+  secret: ""
+  existingSecret: ""
+
+## GUI Shell (dev-plan/33)
+guiShell:
+  enabled: false
+  id: ""
+
+## LLM provider API keys
+## Set keys directly or point to a pre-existing Secret.
+## existingSecret keys must match: anthropic-api-key, openai-api-key, gemini-api-key
+apiKeys:
+  anthropic: ""
+  openai: ""
+  gemini: ""
+  existingSecret: ""
+
+## /workspace — the project directory the agent operates on.
+## In multi-tenant mode all per-user state lands under .thclaws/users/<id>/
+workspace:
+  ## Use a PersistentVolumeClaim (recommended for stateful workloads)
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 10Gi
+    ## Use an existing PVC instead of creating one
+    existingClaim: ""
+
+## ~/.config/thclaws — agent config, sessions list, model prefs, etc.
+config:
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 1Gi
+    existingClaim: ""
+
+service:
+  type: ClusterIP
+  port: 8443
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    # nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: thclaws.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - secretName: thclaws-tls
+  #   hosts:
+  #     - thclaws.example.com
+
+## Pod resource requests/limits
+resources: {}
+  # requests:
+  #   cpu: 500m
+  #   memory: 512Mi
+  # limits:
+  #   cpu: 2
+  #   memory: 2Gi
+
+## Horizontal Pod Autoscaler
+## Only useful if each replica serves a disjoint workspace (single-tenant, sharded).
+## Multi-tenant deployments should scale by increasing maxUsers instead.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false  # thclaws writes to /workspace and ~/.config
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

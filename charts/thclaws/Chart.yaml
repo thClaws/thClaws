@@ -1,0 +1,16 @@
+apiVersion: v2
+name: thclaws
+description: thClaws AI agent harness — self-hosted --serve with optional multi-tenant mode
+type: application
+version: 0.1.0
+appVersion: "0.27.0"
+keywords:
+  - ai
+  - agent
+  - llm
+  - thclaws
+home: https://github.com/thClaws/thClaws
+sources:
+  - https://github.com/thClaws/thClaws
+maintainers:
+  - name: modtanoii

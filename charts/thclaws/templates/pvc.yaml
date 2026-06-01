@@ -1,0 +1,35 @@
+{{- if and .Values.workspace.persistence.enabled (not .Values.workspace.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "thclaws.fullname" . }}-workspace
+  labels:
+    {{- include "thclaws.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.workspace.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.workspace.persistence.size }}
+  {{- if .Values.workspace.persistence.storageClass }}
+  storageClassName: {{ .Values.workspace.persistence.storageClass }}
+  {{- end }}
+{{- end }}
+---
+{{- if and .Values.config.persistence.enabled (not .Values.config.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "thclaws.fullname" . }}-config
+  labels:
+    {{- include "thclaws.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.config.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.config.persistence.size }}
+  {{- if .Values.config.persistence.storageClass }}
+  storageClassName: {{ .Values.config.persistence.storageClass }}
+  {{- end }}
+{{- end }}

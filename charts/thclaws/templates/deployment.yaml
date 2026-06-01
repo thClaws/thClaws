@@ -1,0 +1,150 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "thclaws.fullname" . }}
+  labels:
+    {{- include "thclaws.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "thclaws.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "thclaws.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "thclaws.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: thclaws
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ include "thclaws.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --serve
+            - --port
+            - {{ .Values.serve.port | quote }}
+            - --bind
+            - {{ .Values.serve.bind | quote }}
+            {{- if .Values.multiTenant.enabled }}
+            - --multi-tenant
+            - --multi-tenant-max-users
+            - {{ .Values.multiTenant.maxUsers | quote }}
+            - --multi-tenant-idle-timeout
+            - {{ .Values.multiTenant.idleTimeout | quote }}
+            {{- end }}
+            {{- if .Values.guiShell.enabled }}
+            - --gui-shell
+            - {{ .Values.guiShell.id | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.serve.port }}
+              protocol: TCP
+          env:
+            {{- if not .Values.apiKeys.existingSecret }}
+            {{- if .Values.apiKeys.anthropic }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "thclaws.fullname" . }}-api-keys
+                  key: anthropic-api-key
+            {{- end }}
+            {{- if .Values.apiKeys.openai }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "thclaws.fullname" . }}-api-keys
+                  key: openai-api-key
+            {{- end }}
+            {{- if .Values.apiKeys.gemini }}
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "thclaws.fullname" . }}-api-keys
+                  key: gemini-api-key
+            {{- end }}
+            {{- else }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiKeys.existingSecret }}
+                  key: anthropic-api-key
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiKeys.existingSecret }}
+                  key: openai-api-key
+                  optional: true
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiKeys.existingSecret }}
+                  key: gemini-api-key
+                  optional: true
+            {{- end }}
+            {{- if .Values.multiTenant.enabled }}
+            - name: THCLAWS_CLOUD_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "thclaws.hmacSecretName" . }}
+                  key: hmac-secret
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.workspace.persistence.enabled }}
+            - name: workspace
+              mountPath: /workspace
+            {{- end }}
+            {{- if .Values.config.persistence.enabled }}
+            - name: config
+              mountPath: /home/thclaws/.config/thclaws
+            {{- end }}
+      volumes:
+        {{- if .Values.workspace.persistence.enabled }}
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: {{ .Values.workspace.persistence.existingClaim | default (printf "%s-workspace" (include "thclaws.fullname" .)) }}
+        {{- end }}
+        {{- if .Values.config.persistence.enabled }}
+        - name: config
+          persistentVolumeClaim:
+            claimName: {{ .Values.config.persistence.existingClaim | default (printf "%s-config" (include "thclaws.fullname" .)) }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
