@@ -33,11 +33,12 @@ guiShell:
 
 ## LLM provider API keys
 ## Set keys directly or point to a pre-existing Secret.
-## existingSecret keys must match: anthropic-api-key, openai-api-key, gemini-api-key
+## existingSecret keys must match: anthropic-api-key, openai-api-key, gemini-api-key, openrouter-api-key
 apiKeys:
   anthropic: ""
   openai: ""
   gemini: ""
+  openrouter: ""
   existingSecret: ""
 
 ## /workspace — the project directory the agent operates on.
@@ -118,6 +119,22 @@ securityContext:
     drop:
       - ALL
   readOnlyRootFilesystem: false  # thclaws writes to /workspace and ~/.config
+
+## NetworkPolicy — restrict pod ingress/egress (requires a CNI that enforces NetworkPolicy)
+networkPolicy:
+  enabled: false
+  ## Restrict which sources may reach port 8443.
+  ## Leave empty to allow from all sources within the cluster.
+  ## Example: allow only from an ingress-nginx namespace:
+  ##   ingressFrom:
+  ##     - namespaceSelector:
+  ##         matchLabels:
+  ##           kubernetes.io/metadata.name: ingress-nginx
+  ingressFrom: []
+  ## Allow DNS egress (required for hostname resolution)
+  allowDNS: true
+  ## Additional egress rules appended verbatim
+  extraEgress: []
 
 nodeSelector: {}
 tolerations: []

@@ -12,5 +12,7 @@ keywords:
 home: https://github.com/thClaws/thClaws
 sources:
   - https://github.com/thClaws/thClaws
+annotations:
+  artifacthub.io/license: "MIT OR Apache-2.0"
 maintainers:
   - name: modtanoii

@@ -54,22 +54,29 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "thclaws.fullname" . }}-api-keys
+                  name: {{ include "thclaws.apiKeysSecretName" . }}
                   key: anthropic-api-key
             {{- end }}
             {{- if .Values.apiKeys.openai }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "thclaws.fullname" . }}-api-keys
+                  name: {{ include "thclaws.apiKeysSecretName" . }}
                   key: openai-api-key
             {{- end }}
             {{- if .Values.apiKeys.gemini }}
             - name: GEMINI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "thclaws.fullname" . }}-api-keys
+                  name: {{ include "thclaws.apiKeysSecretName" . }}
                   key: gemini-api-key
+            {{- end }}
+            {{- if .Values.apiKeys.openrouter }}
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "thclaws.apiKeysSecretName" . }}
+                  key: openrouter-api-key
             {{- end }}
             {{- else }}
             - name: ANTHROPIC_API_KEY
@@ -89,6 +96,12 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.apiKeys.existingSecret }}
                   key: gemini-api-key
+                  optional: true
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiKeys.existingSecret }}
+                  key: openrouter-api-key
                   optional: true
             {{- end }}
             {{- if .Values.multiTenant.enabled }}
