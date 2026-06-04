@@ -7,6 +7,296 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-06-04
+
+Cloud GUI-shell-over-HTTP plus a wave of agent/auth/catalogue hardening.
+
+### Added
+
+- **GUI shell over HTTP + full-screen mode for `cloud serve`.** The
+  PTY-backed Shell surface is now reachable over the cloud serve HTTP
+  transport, with a full-screen layout mode.
+
+### Fixed
+
+- **Strip orphan `tool_use`/`tool_result` blocks before the provider
+  call** ([#144](https://github.com/thClaws/thClaws/issues/144)). A
+  dangling tool block left in the transcript (e.g. after an interrupted
+  turn) could make providers reject the next request; orphans are now
+  pruned before send.
+- **Strip wrapping quotes from pasted API keys**
+  ([#145](https://github.com/thClaws/thClaws/issues/145)). Keys pasted
+  with surrounding `"`/`'` quotes are now unwrapped, with a live
+  provider-auth integration suite added as a regression net.
+- **De-duplicate `ReloadConfig`** — the settings file-watcher and the
+  `/model` write each fired a reload; the duplicate is now coalesced.
+
+### Changed
+
+- **Catalogue cleanup** — pruned dead OpenRouter, DashScope, NVIDIA, and
+  MiniMax entries.
+
+## [0.32.2] — 2026-06-03
+
+Patch release — `.thclaws/settings.json` changes now apply without a
+restart.
+
+### Fixed
+
+- **Hot-reload of `.thclaws/settings.json`.** Editing settings (e.g.
+  flipping `shellTabEnabled` or `teamEnabled`) previously required a full
+  process restart because `ProjectConfig::load()` ran once at boot. A
+  `notify-debouncer-mini` file watcher (`spawn_settings_watcher`) now
+  watches `.thclaws/` non-recursively, debounces at 500 ms, and fires
+  `ShellInput::ReloadConfig`. Spawned from `spawn_with_roots` so every
+  startup gets it (desktop GUI, CLI REPL, `--serve` pod); idempotent, so
+  the picker's own writes re-fire as a no-op.
+
+## [0.32.1] — 2026-06-03
+
+Patch release — cloud heartbeat and a richer engine image.
+
+### Added
+
+- **`thclaws --serve` cloud heartbeat.** Inside a thclaws.cloud
+  workspace pod (`THCLAWS_CLOUD_URL`/`_TOKEN`/`WORKSPACE_ID` set), a
+  background task pings the control plane's `…/keepalive` every 60 s
+  while at least one browser WebSocket is connected — closing the
+  idle-reaper edge case where the user closes the dashboard tab but keeps
+  the workspace open. No-ops outside cloud; local CLI/desktop unaffected.
+- **Engine image bundles ffmpeg + Playwright + Python + Node.** The cloud
+  workspace container now bakes in `ffmpeg`, `python3`/`pip`/`venv`,
+  `nodejs`/`npm`, and `playwright install --with-deps chromium` so agents
+  doing media work or browser automation work out of the box (~600 MB →
+  ~1 GB; shared per node via overlayfs).
+
+### Changed
+
+- README hero now an animated carousel (Chat / Terminal / Claude Code);
+  June 15 framing corrected to "unbundle, not discontinue".
+
+## [0.32.0] — 2026-06-03
+
+A PTY-backed **Shell** tab — run Claude Code inside thClaws under your
+own subscription, ahead of Anthropic's June 15 Agent-SDK unbundling.
+
+### Added
+
+- **GUI Shell tab (PTY-backed).** Spawns `$SHELL` (`/bin/sh` /
+  `powershell.exe` fallback) under a real pseudo-tty piped through
+  xterm.js — distinct from the agent-rendered `Terminal` tab. Lets you
+  run **Claude Code** directly inside thClaws under your normal Claude
+  subscription, no third-party API surface. Because `.thclaws/` and
+  `.claude/` layouts are compatible, skills / MCP servers / agent
+  definitions are shared between the two front-ends. Opt-in via
+  `shellTabEnabled: true` (default off — it's an unsandboxed shell with
+  no agent-side permission gating). Non-UTF-8 Alt-escapes survive via
+  base64 round-trip; resize propagates via TIOCSWINSZ.
+- **Files-tab dotfile toggle** — an eye icon reveals `.thclaws/`,
+  `.claude/`, `.env`, etc. (off by default) for editing shared config
+  inside the GUI.
+- **Workflow ergonomics** — `thclaws.include("./helpers.js")` for
+  cross-script reuse (traversal-rejected), `thclaws.subagent({prompt,
+  agent})` for per-call subagent definitions, and `/workflow exec <path>`
+  to run a pre-authored script mid-session.
+
+### Changed
+
+- The previous iframe-shells "Shell" tab is renamed **`UI`**, freeing
+  "Shell" for the PTY tab (functionality unchanged).
+- **Config parse failures are no longer silent** — a malformed
+  `.thclaws/settings.json` now emits a stderr warning with file path and
+  serde's line/column hint instead of defaulting every flag off quietly.
+
+## [0.31.0] — 2026-06-03
+
+### Fixed
+
+- **Switching model preserves the conversation**
+  ([#142](https://github.com/thClaws/thClaws/issues/142)). The old "new
+  session per provider switch" rule is retired — the JSONL transcript is
+  canonical and each provider translates it per turn.
+
+### Added
+
+- `CONTRIBUTORS.md` crediting community contributors.
+
+## [0.30.0] — 2026-06-02
+
+### Changed
+
+- **MiniMax default model updated to M3**
+  ([#140](https://github.com/thClaws/thClaws/pull/140),
+  [@modtanoii](https://github.com/modtanoii)), using canonical casing
+  `MiniMax-M3` to match the upstream API.
+
+### Fixed
+
+- **`split_shell_segments` uses `char_indices`**
+  ([#141](https://github.com/thClaws/thClaws/issues/141)) — fixes a
+  byte-vs-char boundary panic on multibyte input.
+
+## [0.29.0] — 2026-06-02
+
+### Added
+
+- **GUI Shell as the primary interface — Tier 1–3 MVP** (dev-plan/39).
+- **Appendix A — providers / models / prices** in the docs, plus **+42
+  new models** in the catalogue.
+
+### Fixed
+
+- Backfilled context size on 32 newly-added models and missing pricing on
+  `gemini-3.1-flash-lite`.
+- **Cap spinner line width to terminal columns**
+  ([#139](https://github.com/thClaws/thClaws/pull/139),
+  [@gobikom](https://github.com/gobikom)).
+- Chart review feedback from
+  [#135](https://github.com/thClaws/thClaws/pull/135) addressed
+  ([#137](https://github.com/thClaws/thClaws/pull/137)).
+
+## [0.28.0] — 2026-06-01
+
+### Added
+
+- **Helm chart for self-hosted Kubernetes deployment**
+  ([#135](https://github.com/thClaws/thClaws/pull/135),
+  [@modtanoii](https://github.com/modtanoii)).
+- **thClaws.cloud catalog client + agent identity in settings.**
+- thClaws.cloud chapter in the user manual + technical manual.
+
+## [0.27.0] — 2026-05-31
+
+### Fixed
+
+- **Clamp `last_saved_count` in `sync()` to prevent a panic after
+  `/clear`** ([#134](https://github.com/thClaws/thClaws/pull/134),
+  [@gobikom](https://github.com/gobikom)); the CLI REPL also rotates the
+  session on `/clear`.
+
+### Added
+
+- REPL refreshes the system prompt on mid-session mutators.
+- Subagent factory tracks live state, plus a GUI Shells authoring guide.
+
+## [0.26.0] — 2026-05-31
+
+### Added
+
+- **BM25 `KmsSearch` + native Thai segmenter** (dev-plan/36) — full-text
+  knowledge-store search with Thai word segmentation.
+
+## [0.25.0] — 2026-05-31
+
+A follow-up wave centred on three audits + fixes: prompt-builder
+unification, tool/MCP registration parity across all four surfaces, and
+surfacing collaboration primitives to the model.
+
+### Fixed
+
+- **Skill discovery after cwd change.** `shared_session::ChangeCwd` now
+  re-discovers skills via `SkillStore::discover()`; previously the GUI's
+  skill store was populated once at startup, so project-scoped
+  `.thclaws/skills/` discovered against the launch cwd stayed pinned and
+  `/<skill-name>` was reported as an unknown command.
+- **Tool + MCP registration parity (5 fixes).** A user-set WebSearch
+  engine, Task tools (TodoWrite + queue), team tools, the always-on skill
+  family, and plugin-contributed MCP servers were each registered on only
+  some of the four surfaces (CLI REPL, GUI/`--serve`, headless print,
+  agent_runtime HTTP); all now register consistently per their gates.
+
+### Added
+
+- **Unified system-prompt builder** — `prompts::build_full_system_prompt`
+  is the single source of truth for all four surfaces, which previously
+  inlined divergent assembly and received different text. Adds a
+  `# MCP server instructions` section (per-server briefings from each
+  MCP's `InitializeResult.instructions`, previously captured but
+  discarded) and a `# Collaboration primitives` section.
+- **Model-callable `WorkflowRun` tool** — the same author + sandbox flow
+  as `/workflow run`, so the model can reach for deterministic fan-out on
+  its own (requires approval; nested calls rejected). Wired into all four
+  surfaces.
+
+## [0.24.0] — 2026-05-30
+
+Two major threads land: GUI Shell Tier 2 and multi-tenant `--serve`.
+
+### Added
+
+- **GUI Shell — Tier 2** (dev-plan/33). A third tab mode picks a
+  single-HTML or html+js+css folder as the agent's frontend, served at
+  `/t/<token>/` behind a persisted-token URL with no direct browser
+  access to the shell folder. Shell discovery layers built-in → user →
+  project (last wins); a sandboxed bridge runtime (`thclaws.run` /
+  `thclaws.on` / `thclaws.storage`) is injected at serve time. Per-project
+  adapter configs now read from `./.thclaws/<adapter>.json`.
+- **Multi-tenant `--serve` — Tier 1** (dev-plan/35). One pod hosts N
+  users with HMAC-SHA256 signed routing from a trusted layer, per-user
+  `SharedSessionHandle`s with isolated on-disk state under
+  `.thclaws/users/<id>/`, LRU + idle eviction, a file-asset URL gate
+  (HMAC + path-prefix), and a `MeteringSink` trait (HTTP/stdout/noop).
+  Single-tenant defaults unchanged. Covered by restart-recovery,
+  50-user-concurrency no-cross-leakage, and HMAC-handshake tests.
+
+## [0.23.0] — 2026-05-29
+
+### Added
+
+- **Dynamic workflows** (dev-plan/32) — Tier 1 `/workflow run` plus the
+  full Tier 2 + Tier 3 workflow surface for deterministic multi-agent
+  orchestration.
+- **Self-contained `/quiz`** embedded in thClaws
+  ([#132](https://github.com/thClaws/thClaws/pull/132)), dropping the
+  external gamedev MCP dependency.
+
+## [0.22.0] — 2026-05-28
+
+### Added
+
+- **Tool progress visibility**
+  ([#130](https://github.com/thClaws/thClaws/pull/130),
+  [@gobikom](https://github.com/gobikom)) — contextual tool labels (Bash
+  command, Read path, Grep pattern, …), a Braille spinner with elapsed
+  timer, heartbeat lines for long-running tools, and a ✓/✗ completion
+  suffix with duration. A new `tool_display` module centralises
+  formatting and redacts secrets (Bearer tokens, `--api-key=`, …) from
+  every label.
+- **Typed `ProviderEvent::Progress` channel** — spinner state now flows
+  separately from `TextDelta`, so animation never leaks into `lead_log`,
+  session JSONL, GUI envelopes, or accumulated assistant text. The REPL
+  spinner is gated on `IsTerminal` so piped/headless runs stay ANSI-free.
+
+### Changed
+
+- README restructured to attract contributors.
+
+## [0.21.0] — 2026-05-28
+
+### Added
+
+- **Facebook Page Messenger adapter — Tier 1** (dev-plan/31). Chat with
+  your thClaws install from a Page inbox. Messenger is webhook-only, so
+  the bridge is relay-based (extending the LINE relay with a
+  `/messenger/webhook` route + Graph Send API client); the Page Access
+  Token and App Secret live on the relay, never on the desktop. Pair a
+  Page with a 6-digit code, then drive thClaws from a phone, with
+  quick-reply chips as the approval surface for mutating tools.
+  - New `crates/core/src/messenger/` module; GUI Messenger Connect modal +
+    sidebar pill + boot-time auto-reconnect.
+  - Headless via `thclaws --messenger`, plus `thclaws messenger
+    status`/`pair` subcommands.
+  - `PermissionMode::MessengerGated` (folds with LineGated /
+    TelegramGated); 2,000-char chunked output filter reusing the LINE
+    ANSI/tool-narration stripper.
+  - User manual ch24 (EN + TH) + technical manual cover Meta app setup,
+    webhook subscription, pairing flow, and privacy boundary.
+
+  Tier-1 known gaps: single shared session per Page (no per-PSID
+  isolation), approval prompts target the most-recent inbound PSID, and
+  production beyond app testers needs Meta App Review + Business
+  Verification for `pages_messaging`.
+
 ## [0.20.0] — 2026-05-26
 
 Telegram channels + forum topics + streaming preview, plus two
