@@ -1246,7 +1246,7 @@ fn run_schedule_subcommand(cmd: ScheduleCmd) -> i32 {
                 } else {
                     "      "
                 };
-                let last = s.last_run.as_deref().unwrap_or("never");
+                let last = schedule::display_last_run(s.last_run.as_deref());
                 let exit = match s.last_exit {
                     Some(0) => " ok ",
                     Some(_) => " err",

@@ -540,6 +540,16 @@ pub fn parse_last_run(schedule: &Schedule) -> Option<DateTime<Utc>> {
         .map(|d| d.with_timezone(&Utc))
 }
 
+/// Format a last-run timestamp for display in the local timezone.
+/// Returns `never` when the field is absent and preserves the raw
+/// string if parsing fails.
+pub fn display_last_run(last_run: Option<&str>) -> String {
+    last_run
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Local).to_rfc3339())
+        .unwrap_or_else(|| last_run.unwrap_or("never").to_string())
+}
+
 /// First cron fire strictly after `after`. Returns `None` if the
 /// expression is invalid or has no upcoming fire (rare — e.g. a
 /// `cron` expression pinned to a specific year that's already past).
@@ -2164,6 +2174,19 @@ mod tests {
             parsed.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             "2026-05-06T12:34:56Z"
         );
+    }
+
+    #[test]
+    fn display_last_run_formats_local_time_and_preserves_instant() {
+        let displayed = display_last_run(Some("2026-05-06T12:34:56Z"));
+        let parsed = DateTime::parse_from_rfc3339(&displayed).unwrap();
+        assert_eq!(parsed.with_timezone(&Utc).to_rfc3339(), "2026-05-06T12:34:56+00:00");
+    }
+
+    #[test]
+    fn display_last_run_handles_absent_and_invalid_values() {
+        assert_eq!(display_last_run(None), "never");
+        assert_eq!(display_last_run(Some("bad-timestamp")), "bad-timestamp");
     }
 
     /// Tick logic end-to-end: covers catch-up skipping (fresh

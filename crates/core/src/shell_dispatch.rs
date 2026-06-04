@@ -2909,7 +2909,7 @@ pub async fn dispatch(
                     } else {
                         "      "
                     };
-                    let last = s.last_run.as_deref().unwrap_or("never");
+                    let last = crate::schedule::display_last_run(s.last_run.as_deref());
                     let exit = match s.last_exit {
                         Some(0) => "ok ",
                         Some(_) => "err",
