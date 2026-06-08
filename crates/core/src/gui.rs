@@ -1316,29 +1316,55 @@ pub fn run_gui() {
                     if let Some(path) = msg.get("path").and_then(|v| v.as_str()) {
                         let p = std::path::Path::new(path);
                         if p.is_dir() {
-                            let _ = std::env::set_current_dir(p);
-                            let _ = crate::sandbox::Sandbox::init();
-                            save_recent_dir(path);
-                            // Tell the running worker to reload project
-                            // settings from the new cwd and swap its model
-                            // accordingly — without this, the session keeps
-                            // whatever model was loaded at startup, even
-                            // when the new project's settings.json says
-                            // something different. Project settings must
-                            // win — that's the contract.
-                            // Tell the worker to reload settings + swap
-                            // model from the new project's settings.json.
-                            let _ = shared_for_ipc
-                                .input_tx
-                                .send(ShellInput::ChangeCwd(p.to_path_buf()));
-                            let payload = serde_json::json!({
-                                "type": "cwd_changed",
-                                "path": path,
-                                "ok": true,
-                            });
-                            let _ = proxy_for_ipc.send_event(
-                                UserEvent::SessionLoaded(payload.to_string()),
-                            );
+                            match std::env::set_current_dir(p) {
+                                Ok(()) => {
+                                    match crate::sandbox::Sandbox::init() {
+                                        Ok(()) => {
+                                            save_recent_dir(path);
+                                            // Tell the running worker to reload project
+                                            // settings from the new cwd and swap its model
+                                            // accordingly — without this, the session keeps
+                                            // whatever model was loaded at startup, even
+                                            // when the new project's settings.json says
+                                            // something different. Project settings must
+                                            // win — that's the contract.
+                                            let _ = shared_for_ipc
+                                                .input_tx
+                                                .send(ShellInput::ChangeCwd(p.to_path_buf()));
+                                            let payload = serde_json::json!({
+                                                "type": "cwd_changed",
+                                                "path": path,
+                                                "ok": true,
+                                            });
+                                            let _ = proxy_for_ipc.send_event(
+                                                UserEvent::SessionLoaded(payload.to_string()),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            let payload = serde_json::json!({
+                                                "type": "cwd_changed",
+                                                "path": path,
+                                                "ok": false,
+                                                "error": format!("sandbox init failed: {e}"),
+                                            });
+                                            let _ = proxy_for_ipc.send_event(
+                                                UserEvent::SessionLoaded(payload.to_string()),
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let payload = serde_json::json!({
+                                        "type": "cwd_changed",
+                                        "path": path,
+                                        "ok": false,
+                                        "error": format!("cannot change to directory: {e}"),
+                                    });
+                                    let _ = proxy_for_ipc.send_event(
+                                        UserEvent::SessionLoaded(payload.to_string()),
+                                    );
+                                }
+                            }
                         } else {
                             let payload = serde_json::json!({
                                 "type": "cwd_changed",
