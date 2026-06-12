@@ -1504,6 +1504,184 @@ mod tests {
         server_handle.abort();
     }
 
+    #[tokio::test]
+    async fn upload_with_dir_param_saves_to_subdirectory() {
+        use std::time::Duration;
+
+        let td = tempfile::tempdir().unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let cfg = ServeConfig {
+            bind: addr,
+            workspace: Some(td.path().to_path_buf()),
+            gui_shell: None,
+            multi_tenant: None,
+        };
+        let server_handle = tokio::spawn(async move {
+            let _ = run(cfg).await;
+        });
+
+        let healthz_url = format!("http://{addr}/healthz");
+        for _ in 0..50 {
+            if reqwest::get(&healthz_url).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let upload_url = format!("http://{addr}/upload?dir=raw");
+        let part = reqwest::multipart::Part::bytes(vec![0u8; 16])
+            .file_name("photo.jpg")
+            .mime_str("image/jpeg")
+            .unwrap();
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let resp = reqwest::Client::new()
+            .post(&upload_url)
+            .multipart(form)
+            .send()
+            .await
+            .expect("upload POST with dir param");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["ok"], serde_json::Value::Bool(true));
+        assert_eq!(json["files"][0]["path"], "raw/photo.jpg");
+
+        assert!(td.path().join("raw").join("photo.jpg").exists());
+        assert!(!td.path().join("uploads").exists());
+
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn upload_with_dir_param_collision_suffix() {
+        use std::time::Duration;
+
+        let td = tempfile::tempdir().unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let cfg = ServeConfig {
+            bind: addr,
+            workspace: Some(td.path().to_path_buf()),
+            gui_shell: None,
+            multi_tenant: None,
+        };
+        let server_handle = tokio::spawn(async move {
+            let _ = run(cfg).await;
+        });
+
+        let healthz_url = format!("http://{addr}/healthz");
+        for _ in 0..50 {
+            if reqwest::get(&healthz_url).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let upload_url = format!("http://{addr}/upload?dir=raw");
+
+        let part_a = reqwest::multipart::Part::bytes(vec![0u8; 16])
+            .file_name("photo.jpg")
+            .mime_str("image/jpeg")
+            .unwrap();
+        let resp_a = reqwest::Client::new()
+            .post(&upload_url)
+            .multipart(reqwest::multipart::Form::new().part("file", part_a))
+            .send()
+            .await
+            .expect("upload POST 1");
+        assert_eq!(resp_a.status(), reqwest::StatusCode::OK);
+        let json_a: serde_json::Value = resp_a.json().await.unwrap();
+        assert_eq!(json_a["files"][0]["path"], "raw/photo.jpg");
+
+        let part_b = reqwest::multipart::Part::bytes(vec![1u8; 8])
+            .file_name("photo.jpg")
+            .mime_str("image/jpeg")
+            .unwrap();
+        let resp_b = reqwest::Client::new()
+            .post(&upload_url)
+            .multipart(reqwest::multipart::Form::new().part("file", part_b))
+            .send()
+            .await
+            .expect("upload POST 2");
+        assert_eq!(resp_b.status(), reqwest::StatusCode::OK);
+        let json_b: serde_json::Value = resp_b.json().await.unwrap();
+        assert_eq!(json_b["files"][0]["path"], "raw/photo_1.jpg");
+
+        assert!(td.path().join("raw").join("photo_1.jpg").exists());
+
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn upload_with_dir_escape_rejected() {
+        use std::time::Duration;
+
+        let td = tempfile::tempdir().unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let cfg = ServeConfig {
+            bind: addr,
+            workspace: Some(td.path().to_path_buf()),
+            gui_shell: None,
+            multi_tenant: None,
+        };
+        let server_handle = tokio::spawn(async move {
+            let _ = run(cfg).await;
+        });
+
+        let healthz_url = format!("http://{addr}/healthz");
+        for _ in 0..50 {
+            if reqwest::get(&healthz_url).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // `..` component must be rejected.
+        let part = reqwest::multipart::Part::bytes(vec![0u8; 8])
+            .file_name("evil.txt")
+            .mime_str("text/plain")
+            .unwrap();
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/upload?dir=../etc"))
+            .multipart(reqwest::multipart::Form::new().part("file", part))
+            .send()
+            .await
+            .expect("upload POST with path traversal");
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["ok"], serde_json::Value::Bool(false));
+
+        // Leading `/` is stripped by ensure_target_dir (trim_matches('/')),
+        // so `/absolute` is treated as the subdirectory `absolute` — not rejected.
+        let part2 = reqwest::multipart::Part::bytes(vec![0u8; 8])
+            .file_name("file.txt")
+            .mime_str("text/plain")
+            .unwrap();
+        let resp2 = reqwest::Client::new()
+            .post(format!("http://{addr}/upload?dir=/absolute"))
+            .multipart(reqwest::multipart::Form::new().part("file", part2))
+            .send()
+            .await
+            .expect("upload POST with leading slash");
+        assert_eq!(resp2.status(), reqwest::StatusCode::OK);
+        let json2: serde_json::Value = resp2.json().await.unwrap();
+        assert_eq!(json2["ok"], serde_json::Value::Bool(true));
+        assert_eq!(json2["files"][0]["path"], "absolute/file.txt");
+
+        server_handle.abort();
+    }
+
     // ── dev-plan/35 Tier 1 multi-tenant tests ────────────────────
     //
     // These unit-test the per-user routing and file-asset isolation
