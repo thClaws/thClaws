@@ -28,8 +28,8 @@ pub const MODELS_URL: &str = "https://opencode.ai/zen/go/v1/models";
 // qwen4.x release doesn't silently fall through to the OpenAI path
 // and get rejected with a 4xx upstream. Tracked as a TODO so we can
 // rip out the lists once the upstream exposes the hint.
-const ANTHROPIC_MODELS: &[&str] = &["minimax-m2.5", "minimax-m2.7"];
-const ALIBABA_MODELS: &[&str] = &["qwen3.5-plus", "qwen3.6-plus"];
+const ANTHROPIC_MODELS: &[&str] = &["minimax-m2.5", "minimax-m2.7", "minimax-m3"];
+const ALIBABA_MODELS: &[&str] = &["qwen3.5-plus", "qwen3.6-plus", "qwen3.7-max", "qwen3.7-plus"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WireFormat {
@@ -1087,12 +1087,15 @@ mod tests {
     fn test_detect_wire_format_anthropic() {
         assert_eq!(detect_wire_format("minimax-m2.7"), WireFormat::Anthropic);
         assert_eq!(detect_wire_format("minimax-m2.5"), WireFormat::Anthropic);
+        assert_eq!(detect_wire_format("minimax-m3"), WireFormat::Anthropic);
     }
 
     #[test]
     fn test_detect_wire_format_alibaba() {
         assert_eq!(detect_wire_format("qwen3.6-plus"), WireFormat::Alibaba);
         assert_eq!(detect_wire_format("qwen3.5-plus"), WireFormat::Alibaba);
+        assert_eq!(detect_wire_format("qwen3.7-max"), WireFormat::Alibaba);
+        assert_eq!(detect_wire_format("qwen3.7-plus"), WireFormat::Alibaba);
     }
 
     #[test]
