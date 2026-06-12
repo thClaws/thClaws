@@ -29,7 +29,12 @@ pub const MODELS_URL: &str = "https://opencode.ai/zen/go/v1/models";
 // and get rejected with a 4xx upstream. Tracked as a TODO so we can
 // rip out the lists once the upstream exposes the hint.
 const ANTHROPIC_MODELS: &[&str] = &["minimax-m2.5", "minimax-m2.7", "minimax-m3"];
-const ALIBABA_MODELS: &[&str] = &["qwen3.5-plus", "qwen3.6-plus", "qwen3.7-max", "qwen3.7-plus"];
+const ALIBABA_MODELS: &[&str] = &[
+    "qwen3.5-plus",
+    "qwen3.6-plus",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WireFormat {
