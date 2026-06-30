@@ -1171,11 +1171,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/models"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "data": [{"id": "minimax-m4"}]  // no "wire" field
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "minimax-m4"}]  // no "wire" field
+            })))
             .mount(&server)
             .await;
 
