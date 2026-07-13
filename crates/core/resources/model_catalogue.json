@@ -7849,6 +7849,24 @@
           "verified_at": "2026-07-04"
         }
       }
+    },
+    "atlascloud": {
+      "list_url": "https://api.atlascloud.ai/v1/models",
+      "default_context": 1000000,
+      "models": {
+        "atlascloud/deepseek-ai/deepseek-v4-pro": {
+          "context": 1048576,
+          "max_output": 393216,
+          "source": "https://api.atlascloud.ai/api/v1/models (display_console Text model, live verified 2026-07-13)",
+          "verified_at": "2026-07-13"
+        },
+        "atlascloud/qwen/qwen3.5-flash": {
+          "context": 1000000,
+          "max_output": 67072,
+          "source": "https://api.atlascloud.ai/api/v1/models (display_console Text model, live verified 2026-07-13)",
+          "verified_at": "2026-07-13"
+        }
+      }
     }
   },
   "aliases": {},

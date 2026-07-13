@@ -4295,6 +4295,24 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             }
             Ok(Arc::new(provider))
         }
+        ProviderKind::AtlasCloud => {
+            // Atlas Cloud exposes an OpenAI-compatible LLM API. Model ids
+            // use the `atlascloud/<id>` routing prefix locally, stripped
+            // before the upstream request so Atlas sees ids such as
+            // `qwen/qwen3.5-flash` or `deepseek-ai/deepseek-v4-pro`.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "ATLASCLOUD_BASE_URL",
+                "https://api.atlascloud.ai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("atlascloud/"),
+            ))
+        }
         ProviderKind::TokenRouter => {
             // TokenRouter (tokenrouter.com) — OpenAI-compatible unified
             // gateway to 300+ models. Models use the
