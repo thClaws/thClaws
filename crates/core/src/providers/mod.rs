@@ -1730,6 +1730,7 @@ mod tests {
             ProviderKind::OpenAIResponses,
             ProviderKind::ChatGptCodex,
             ProviderKind::AgentSdk,
+            ProviderKind::AtlasCloud,
             ProviderKind::QwenCloud,
             ProviderKind::ThaiLLM,
             ProviderKind::Nvidia,
@@ -1896,8 +1897,14 @@ mod tests {
             ProviderKind::detect("atlascloud/deepseek-ai/deepseek-v4-pro"),
             Some(ProviderKind::AtlasCloud)
         );
-        assert_eq!(ProviderKind::AtlasCloud.api_key_env(), Some("ATLASCLOUD_API_KEY"));
-        assert_eq!(ProviderKind::AtlasCloud.endpoint_env(), Some("ATLASCLOUD_BASE_URL"));
+        assert_eq!(
+            ProviderKind::AtlasCloud.api_key_env(),
+            Some("ATLASCLOUD_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::AtlasCloud.endpoint_env(),
+            Some("ATLASCLOUD_BASE_URL")
+        );
         assert_eq!(
             ProviderKind::AtlasCloud.default_endpoint(),
             Some("https://api.atlascloud.ai/v1")
@@ -1909,6 +1916,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn detect_tokenrouter_prefix_routes_to_tokenrouter_provider() {
         // tokenrouter/ must be detected before the bare-vendor heuristics.
         assert_eq!(
