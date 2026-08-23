@@ -238,6 +238,10 @@ thclaws
 ❯ /kms          # list attached knowledge bases
 ❯ /skill install https://github.com/anthropics/skills.git
 ❯ /mcp add github https://mcp.github.com
+
+# Optional web search and URL fetching (no API key or account needed)
+# User-provided search objectives, search queries, and requested URLs are sent to Parallel
+❯ /mcp add parallel-search https://search.parallel.ai/mcp
 ❯ ! git status  # shell escape
 
 # Concurrent and long-running work
