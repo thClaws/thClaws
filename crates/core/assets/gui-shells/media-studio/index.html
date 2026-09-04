@@ -60,6 +60,12 @@
           <span class="sub">Generate uses this while it has text — your prompt above is untouched.</span>
         </div>
 
+        <div class="field" id="iapp-text-field" hidden>
+          <span class="label">Text in the image (iApp)</span>
+          <textarea id="iapp-text" rows="2" placeholder="ยินดีต้อนรับ&#10;สู่ประเทศไทย"></textarea>
+          <span class="sub">One line per line, max 4. iApp typesets these in a real Thai font instead of the model drawing them — leave empty for no overlay.</span>
+        </div>
+
         <div class="row" id="image-params">
           <label class="field">
             <span class="label">Aspect</span>
@@ -106,6 +112,31 @@
               <option value="720P">720P</option>
               <option value="1080P">1080P</option>
               <option value="4K">4K (LTX only)</option>
+            </select>
+          </label>
+
+          <label class="field" id="iapp-font-field" hidden>
+            <span class="label">Thai font</span>
+            <select id="iapp-font">
+              <option value="kanit-bold">Kanit Bold — modern</option>
+              <option value="kanit">Kanit — modern</option>
+              <option value="prompt-bold">Prompt Bold — modern</option>
+              <option value="prompt">Prompt — modern</option>
+              <option value="athiti-bold">Athiti Bold — compact</option>
+              <option value="k2d-bold">K2D Bold — display</option>
+              <option value="sarabun-bold">Sarabun Bold — formal</option>
+              <option value="sarabun">Sarabun — formal</option>
+              <option value="notosans">Noto Sans Thai — neutral</option>
+              <option value="pridi">Pridi — serif</option>
+              <option value="taviraj">Taviraj — serif</option>
+              <option value="notoserif">Noto Serif Thai — serif</option>
+              <option value="mitr">Mitr — rounded</option>
+              <option value="itim">Itim — playful</option>
+              <option value="chakrapetch-bold">Chakra Petch Bold — technical</option>
+              <option value="mali">Mali — handwriting</option>
+              <option value="sriracha">Sriracha — handwriting</option>
+              <option value="charm">Charm — cursive</option>
+              <option value="srisakdi">Srisakdi — decorative</option>
             </select>
           </label>
 

@@ -37,19 +37,31 @@ The maintenance burden is the LLM's job; the curation + question-asking + direct
 
 ```
 ┌── sources/           layer 1: raw, immutable. LLM reads, never modifies.
-│   ├── article.md     The source of truth. CSV, txt, json, md, fetched HTML.
-│   └── paper.txt
+│   ├── article.md     The source of truth. CSV, txt, json, md, converted HTML.
+│   ├── paper.txt      SEARCHABLE + READABLE: indexed by BM25, walked by the
+│   └── _catalog.json  regex path, and reachable via KmsRead(kind: "source").
+│                      `_catalog.json` holds provenance (origin, date, size,
+│                      sha256) for every file beside it.
 │
 ├── pages/             layer 2: the wiki. LLM-authored markdown with frontmatter.
 │   ├── api-x.md       Curated summaries, entity pages, concept pages,
 │   ├── paper-y.md     comparisons. Each page references its sources via
-│   └── synthesis.md   frontmatter `sources:` field. Cross-links via
+│   └── synthesis.md   frontmatter `sources:` AND a relative link
+│                      [archive](../sources/<file>) so graph + backlinks
+│                      resolve. Cross-links via [[wikilink]] or
 │                      [label](pages/other.md). LLM owns this layer.
 │
 ├── SCHEMA.md          layer 3: the schema. Human-edited rules for layer 2.
-├── index.md           Auto-maintained table of contents (one bullet per page).
+├── index.md           GENERATED from disk on every write — categorised page
+│                      list + a `## Sources` block. Byte-for-byte the same
+│                      content the system prompt gets; never hand-edit.
 └── log.md             Auto-maintained change history (## [date] verb | alias).
 ```
+
+Both layers are first-class. Search covers them together by default and
+labels each hit; `KmsSearch(scope:)` narrows to one. Sources used to be a
+write-only archive — invisible to every search path and unreadable by any
+tool — which made `/kms ingest` add a file and no retrievable knowledge.
 
 ### Lifecycle
 
@@ -58,12 +70,23 @@ USER  /kms new mynotes              → create() seeds index/log/SCHEMA + dirs
 USER  /kms use mynotes              → adds to .thclaws/settings.json kms_active
                                       → registers KmsRead/Search/Write/Append tools
                                       → next system prompt includes KMS block
-USER  /kms ingest mynotes file.md   → copy to sources/, write stub in pages/
-LLM   reads stub, KmsRead source,   → enriched page with curated summary +
-      KmsWrite enriched page          frontmatter category/tags
+USER  /kms ingest mynotes file.md   → archive to sources/ + record provenance;
+                                      DERIVE pages/<alias>.md (title, lead,
+                                      outline, provenance, source link) marked
+                                      `status: derived`
+USER  /kms ingest mynotes ./docs/   → same, for every supported file under the
+                                      directory (alias derived from the path)
+LLM   KmsSearch finds the SOURCE,   → curated page; dropping `status: derived`
+      KmsRead(kind:"source"),         clears the "(derived — uncurated)" marker
+      KmsWrite curated page           in the index
 USER  asks question                 → LLM consults index, KmsRead pages, answers
 USER  /kms file-answer mynotes "X"  → assistant message → new page (compounds)
-USER  /kms lint mynotes             → broken links / orphans / drift / missing FM
+USER  /kms lint mynotes             → broken links (incl. [[wikilinks]]) /
+                                      orphan pages / ORPHAN SOURCES / dangling
+                                      `sources:` refs / missing FM / derived
+                                      backlog
+USER  /kms reindex mynotes          → regenerate all three derived artefacts:
+                                      source catalogue, index.md, BM25 index
 USER  /kms ingest mynotes file.md   → cascade marks dependent pages STALE
         --force                       (frontmatter sources: <alias>)
 USER  /kms off mynotes              → unregisters tools, removes from kms_active
@@ -119,6 +142,49 @@ Both fields are `#[serde(default)]` so adding new fields in future versions does
 
 `frontmatter_required` is keyed by `"global"` (every page) or a `category:` value (per-category rule). Consumed by `lint` (§4.6) — empty map disables enforcement entirely. Schema version anchors `migrate` (§4.9).
 
+### Source catalogue (`sources/_catalog.json`)
+
+Owned by [`kms_sources.rs`](../crates/core/src/kms_sources.rs). One record per
+archived file:
+
+```rust
+pub struct SourceRecord {
+    pub file: String,          // "spec.md" — the key, extension included
+    pub title: String,         // frontmatter title:, first heading, or de-slugged stem
+    pub origin: Origin,        // File | Url | Pdf | Research | Session | Unknown
+    pub origin_ref: String,    // absolute path, URL, or session id
+    pub ingested: String,      // YYYY-MM-DD
+    pub bytes: u64,
+    pub sha256: String,        // lowercase hex of the archived bytes
+    pub converted_from: Option<String>,  // e.g. "text/html", "application/pdf"
+}
+```
+
+**Why it exists.** `sources/` accumulated files from three writers with three
+conventions and no record tying them together: `/kms ingest <file>` wrote
+`<alias>.<ext>` as a byte copy with no metadata; `/kms ingest <url>` wrote
+`<alias>.md` with the origin buried in an HTML comment; `/research` and
+`KmsWriteSource` wrote `<url-slug>.md` with their own `type: research-source`
+frontmatter. Nothing could answer "where did this come from", "do I already
+have this document", or "which pages depend on it", and lint checked none of it.
+
+| Function | Purpose |
+|---|---|
+| `load` / `upsert` / `forget` | Read-modify-write the catalogue. A missing or malformed file reads as empty — provenance is additive metadata and must never block a KMS read or write. |
+| `hash_file` / `find_by_hash` | Content-identical detection, so a re-ingest under a different alias is reported instead of silently doubling the archive. |
+| `reconcile` | Bring the catalogue in line with disk: backfill records for hand-dropped files (as `Origin::Unknown`), drop records whose file is gone, refresh stale size/hash. Idempotent; run by `/kms reindex`. |
+| `citation_map` | Every source → the pages citing it, in ONE pass over `pages/`, recognising **both** conventions (frontmatter `sources:` and `](../sources/<file>)` links). The per-source `citing_pages` wraps it. |
+| `render_index_block` | The `## Sources` section spliced into `index.md` and the system prompt, flagging **uncited** archives. |
+
+`_`-prefixed files are skipped by `kms::list_sources`, so the catalogue never
+shows up as a source itself. `sanitize_alias` trims leading underscores, so no
+real archive can collide with it.
+
+`citation_map` exists because the index renderer needs citations for every
+source at once: the per-source variant re-reads the whole page directory each
+time, so a KMS with 200 pages and 100 sources did 20,000 file reads on every
+single page write.
+
 ---
 
 ## 3. Frontmatter convention
@@ -159,9 +225,36 @@ verified: 2026-05-11                              # /research stamps this; manua
 - Otherwise: prepend `\n# {title}\nDescription: {topic}\n---\n\n` to the body. Title falls back to the page stem when `title:` is absent; the `Description:` line is omitted when `topic:` is missing/blank
 - Idempotent on re-writes: `body_has_leading_heading` detects the previously-injected `# {title}` and skips re-injection
 
-### Index summary uses pre-injection body
+### Index summaries carry information, not the title again
 
-`first_meaningful_line(body)` runs against the **user-supplied** body, NOT the canonical-header version. Otherwise the model's first real paragraph would be replaced by the auto-injected `# {title}` line in `index.md`, which adds zero signal beyond the link text itself.
+`page_summary(fm, body, stem)` picks, in order: frontmatter `summary:`, `topic:`,
+`description:`, then the first line of real **prose** — skipping the injected
+`# {title}` header, its `Description:` line, the `---` rule, callout
+blockquotes, fenced code and table rows — and finally rejecting a first line
+that merely restates the page name.
+
+The old fallback was "first non-blank line of the body", which
+`maybe_inject_canonical_header` had just filled with `# {title}`. Nearly every
+bullet read `- [welsh-corgi](pages/welsh-corgi.md) — Welsh Corgi`: it restated
+its own link text and told the model nothing about whether the page was worth
+opening.
+
+### One index generator, one index
+
+`scan_index_entries(kref)` is the single reader behind **both** the on-disk
+`index.md` (via `rebuild_index`) and the system-prompt block (via
+`render_index_section`). `rebuild_index` runs after every mutating operation, so
+`index.md` is generated, not hand-maintained.
+
+Previously `update_index_for_write` appended a bullet to `index.md` in write
+order while the prompt rebuilt its own categorised list from frontmatter and
+ignored `index.md` entirely once any page had frontmatter — two indexes for the
+same KMS, drifting apart, the human reading one and the model the other. A
+third renderer existed in the OKF import path; it now delegates here too.
+
+Derived (uncurated) pages are marked `_(derived — uncurated)_` in the listing,
+and a `## Sources` block from `kms_sources::render_index_block` follows the
+pages so archived material is visible even before anyone writes it up.
 
 ### Parser
 
@@ -179,50 +272,133 @@ write_frontmatter(&fm, "body\n");
 
 ## 4. Operations
 
-### `ingest` — adding raw sources (M6.25 BUG #2)
+### `ingest` — adding raw sources
 
-`kms::ingest(kref, source_path, alias, force)` does a **two-step split**:
+`kms::ingest(kref, source_path, alias, force)` — a thin wrapper over
+`ingest_with_origin(…, origin, origin_ref, converted_from)`, which the URL and
+PDF variants call with their own provenance — does four things:
 
 1. Copy raw bytes to `sources/<alias>.<ext>` (immutable; never re-touched by LLM tools)
-2. Write a stub page `pages/<alias>.md` with frontmatter pointing back at the source:
+2. Record provenance in `sources/_catalog.json` (origin kind, origin ref, date, bytes, sha256, conversion)
+3. **Derive** `pages/<alias>.md` from the source's own structure
+4. Index the source into BM25 and regenerate `index.md`
+
+The derived page:
 
 ```markdown
 ---
 category: uncategorized
-created: 2026-05-03
+created: 2026-08-30
+origin: /abs/path/to/source.md
 sources: <alias>
-updated: 2026-05-03
+status: derived
+updated: 2026-08-30
 ---
-# <alias>
+# <source's own title>
 
-Stub page — raw source at `sources/<alias>.<ext>`. Summary line: <first content line>
+> Derived from [`sources/<alias>.<ext>`](../sources/<alias>.<ext>) on <date>.
+> This page has not been curated yet — replace the body with a synthesis
+> and drop `status: derived` from the frontmatter when you do.
 
-_Replace this stub with a curated summary, key takeaways, cross-references to other pages, etc._
+<first substantive paragraph of the source, up to 600 chars>
+
+## Outline of the source
+
+- Setup
+- Usage
+  - Flags
+
+## Provenance
+
+- Copied from `/abs/path/to/source.md`
+- Archived at [`sources/<alias>.md`](../sources/<alias>.md) · 14 KB · 320 lines
+- sha256 `9f2c1a…`
+
+Search inside the full source with `KmsSearch(pattern: "…", scope: "sources")`,
+or read it with `KmsRead(kind: "source", page: "<alias>.md")`.
 ```
 
-The LLM enriches the stub via `KmsWrite`. Pre-M6.25 ingest copied the source straight into `pages/`, conflating layer 1 (raw) with layer 2 (synthesis) — fixed in M6.25 ([dev-log/143](../dev-log/143-kms-m6-25-llm-wiki-alignment.md)).
+Outline extraction is per format: ATX headings for markdown (fenced code
+skipped), underline-rule sections for RST, top-level keys with their shapes for
+JSON, lead paragraph only for anything else.
 
-`force=true` re-runs the copy + stub write AND triggers the re-ingest cascade (§4.6).
+**Why this replaced the stub.** Ingest used to write one fixed body —
+`Stub page — raw source at …` — for every source, and nothing indexed or read
+`sources/`. So an ingest produced: an index bullet carrying the source's first
+raw line (`<!doctype html>` for a URL), a page with no content, and a document
+no search could reach. `status: derived` marks the page as machine-generated so
+the index can flag it and lint can list the curation backlog.
 
-Allowed source extensions: `md`, `markdown`, `txt`, `rst`, `log`, `json` (`INGEST_EXTENSIONS`). Anything else → "not supported — allowed: …" error. URL + PDF flow through dedicated wrappers (§4.2 + §4.3).
+`force=true` re-archives, re-derives, AND triggers the re-ingest cascade (§4.6).
 
-### `ingest_url` — fetching remote sources (M6.25 BUG #8)
+**Alias collisions are checked across every extension.** `notes.txt` and
+`notes.md` both claim the alias `notes`, which would map two documents onto one
+page and one search identity; the second is refused unless `--force`, which
+replaces rather than accumulating.
+
+**Duplicate detection.** The archived bytes are hashed; an ingest whose content
+matches an existing source reports `duplicate_of` instead of silently doubling
+the archive.
+
+Allowed source extensions: `md`, `markdown`, `txt`, `rst`, `log`, `json`
+(`INGEST_EXTENSIONS`). `SOURCE_EXTENSIONS` is the wider set a file in
+`sources/` may carry on disk (adds `html`, `htm`, `csv`, `yaml`, `yml`,
+`toml`). URL + PDF flow through dedicated wrappers (§4.2 + §4.3).
+
+### `ingest_dir` — seeding from a folder
+
+```rust
+kms::ingest_dir(kref, dir, force) -> Result<BulkIngestResult>
+```
+
+`/kms ingest <kms> <dir>` walks the directory (depth ≤ 6, ≤ 500 files, skipping
+dotfiles / `node_modules` / `target` / symlinks) and ingests every file with a
+supported extension. Aliases are **path-derived** — `docs/api/auth.md` under
+root `docs` becomes `api-auth` — so same-named files in sibling directories stay
+distinct. One bad file is recorded in `skipped` rather than aborting the batch.
+
+Bulk callers hold an `IndexBatch` guard: `index.md` regeneration reads every
+page, and running it once per file would make a 500-file ingest quadratic. The
+guard defers it and rebuilds once on drop (including on unwind).
+
+### `ingest_url` — fetching remote sources
 
 ```rust
 kms::ingest_url(kref, url, alias, force).await
 ```
 
-Fetches via `reqwest::Client::builder().timeout(30s)`, prepends a `<!-- fetched from {url} on {date} -->` banner to the response body, stages to a temp `.md` file, routes through standard `ingest()`. Status check rejects non-2xx.
+Fetches via `reqwest::Client::builder().timeout(30s)`; non-2xx is rejected.
 
-Alias derivation: explicit `--alias` wins; otherwise the last path segment (stripped of query string). Sanitized via `sanitize_alias` (`[A-Za-z0-9_-]` only; trim outer `_`).
+**HTML is converted to Markdown** (`crate::html_md`) when the response's
+content-type says HTML, or when it is absent and the body sniffs as HTML.
+The converter drops `script`/`style`/`nav`/`footer`/`aside`/`form` subtrees,
+prefers a `<main>`/`<article>` scope when the page marks one, and emits
+headings, lists, links, code fences, blockquotes and GFM tables. Non-HTML
+responses (markdown, JSON, plain text) are archived byte-exact.
 
-### `ingest_pdf` — extracting PDF text (M6.25 BUG #8)
+The archived file gets YAML frontmatter carrying `source_url`, `fetched`,
+`title` (from `<title>` or the first `<h1>`) and `converted_from`; the same
+provenance lands in `_catalog.json` with `Origin::Url`.
+
+Pre-fix this wrote the response bytes verbatim into `sources/<alias>.md`, so
+every web ingest archived a `<!doctype html>` blob: unreadable in the viewer,
+worthless as a BM25 document (hits scored on `div`/`class` noise), and the
+index summary became whatever the first line of the HTML happened to be.
+
+Alias derivation: explicit `--alias` wins; otherwise the last path segment
+(stripped of query string). Sanitized via `sanitize_alias`.
+
+### `ingest_pdf` — extracting PDF text
 
 ```rust
 kms::ingest_pdf(kref, pdf_path, alias, force).await
 ```
 
-Spawns `pdftotext -layout -enc UTF-8 <path> -` in a `tokio::task::spawn_blocking` (same shape as `PdfReadTool`), prepends `<!-- extracted from PDF '<path>' on <date> -->`, stages to temp, routes through `ingest()`. Requires `poppler-utils` installed locally.
+Spawns `pdftotext -layout -enc UTF-8 <path> -` in a `tokio::task::spawn_blocking`
+(same shape as `PdfReadTool`), applies `normalize_thai_spacing`, writes the
+result with `source_pdf` / `extracted` / `converted_from: application/pdf`
+frontmatter, and routes through `ingest_with_origin` as `Origin::Pdf`. Requires
+`poppler-utils` installed locally.
 
 Alias: explicit `--alias` wins; otherwise the file stem.
 
@@ -254,18 +430,31 @@ If the page exists with frontmatter: bumps `updated:`, appends chunk after a sep
 kms::lint(kref) -> Result<LintReport>
 ```
 
-Pure-read; no mutation. Walks `pages/`, returns six issue categories:
+Pure-read; no mutation. Walks `pages/` and `sources/`:
 
 | Field | Meaning |
 |---|---|
-| `broken_links: Vec<(page, target)>` | `[label](pages/x.md)` where `pages/x.md` doesn't exist |
+| `broken_links: Vec<(page, target)>` | `[label](pages/x.md)` **or** `[[x]]` where `pages/x.md` doesn't exist |
 | `orphan_pages: Vec<String>` | Page on disk with no inbound link from any other page |
 | `index_orphans: Vec<String>` | Index entry with no underlying file |
 | `missing_in_index: Vec<String>` | Page on disk with no index entry |
 | `missing_frontmatter: Vec<String>` | Page with no `---\n…\n---\n` block |
 | `missing_required_fields: Vec<(stem, source_key, field)>` | Page violates a `frontmatter_required` rule from `manifest.json`. `source_key` is `"global"` or the page's `category:` value, indicating which manifest rule fired. |
+| `orphan_sources: Vec<String>` | Archived source no page cites — ingested material nothing was built from |
+| `dangling_source_refs: Vec<(page, source)>` | Page's `sources:` names a file that isn't in `sources/` |
+| `derived_pages: Vec<String>` | Pages still `status: derived` — a backlog, **not** counted in `total_issues()` |
 
-`LintReport::total_issues()` sums all. `format_lint_report(name, &report)` (in `shell_dispatch.rs`) renders the user-facing summary with per-category counts.
+**Wikilinks count as inbound links.** They did not before, and `auto_link` — the
+KMS's own linker — writes exactly `[[slug]]`, so running `/kms link --apply`
+linked the whole vault and lint still reported every page as an orphan. The
+graph view already read wikilinks; lint was the odd reader out.
+
+**Source citation is recognised in both conventions**: frontmatter
+`sources: <stem>` (what ingest writes) and a relative `](../sources/<file>)`
+link (what the research pipeline writes). Non-file provenance values —
+`session-…`, `memory`, bare URLs, `[]` — are not treated as missing archives.
+
+`LintReport::total_issues()` sums all but `derived_pages`. `format_lint_report(name, &report)` renders the user-facing summary with per-category counts.
 
 The `missing_required_fields` check is gated on `kref.read_manifest()`. Absent manifest, malformed JSON, or empty `frontmatter_required` map → check is skipped silently (legacy-KMS contract). Pages already flagged for `missing_frontmatter` are *not* double-reported here — frontmatter absence is one bug; once fixed, the per-field check can fire on the next lint.
 
@@ -621,8 +810,8 @@ When at least one KMS is in `kms_active`, **five tools** register into the `Tool
 
 | Tool | Approval | Purpose |
 |---|---|---|
-| `KmsRead` | No | Read a single page |
-| `KmsSearch` | No | Two modes: `pattern:` (regex line grep, byte-identical pre-Tier-2 output) OR `query:` (BM25 ranked, requires `kms_search_index` feature). Optional `tags:` / `category:` / `limit:` filter the `query:` path. Mutually exclusive — `pattern` and `query` together return a clear error. See §"dev-plan/36 BM25 search architecture" below. |
+| `KmsRead` | No | Read a single file. `kind: "page"` (default) reads a curated page; `kind: "source"` reads raw archived material, resolving a bare stem across every `SOURCE_EXTENSIONS` entry. Source reads are capped at 40 KB (under the agent loop's 50 KB `TOOL_RESULT_CONTEXT_LIMIT`, so the result lands in context whole) with an explicit truncation notice naming the recovery path. |
+| `KmsSearch` | No | Two modes: `pattern:` (regex line grep) OR `query:` (BM25 ranked, requires `kms_search_index` feature). **Both cover `pages/` and `sources/`**; `scope: "all" \| "pages" \| "sources"` narrows. Optional `tags:` / `category:` / `limit:` filter the `query:` path. Mutually exclusive — `pattern` and `query` together return a clear error. See §"dev-plan/36 BM25 search architecture" below. |
 | `KmsWrite` | **Yes** | Create or replace a page |
 | `KmsAppend` | **Yes** | Append to a page |
 | `KmsDelete` | **Yes** | Remove a page (last resort; framed as "prefer KmsWrite to merge or supersede" in the system-prompt Tools block) |
@@ -763,11 +952,15 @@ Mutated only via `ProjectConfig::set_active_kms(Vec<String>)`, called by `/kms u
 
 ```
 crates/core/src/
-├── kms.rs (~2100 LOC)                  ── core: KmsRef, KmsManifest, scopes, create/resolve,
-│                                          ingest + ingest_url + ingest_pdf,
+├── kms.rs                              ── core: KmsRef, KmsManifest, scopes, create/resolve,
+│                                          sources_dir/source_path/list_sources,
+│                                          ingest + ingest_dir + ingest_url + ingest_pdf,
+│                                          outline_source + derive_page_body,
 │                                          write_page + append_to_page,
 │                                          parse/write_frontmatter,
-│                                          lint + LintReport (six categories),
+│                                          lint + LintReport (page + source health),
+│                                          scan_index_entries + rebuild_index + IndexBatch,
+│                                          reindex + ReindexReport,
 │                                          system_prompt_section + categorized index,
 │                                          mark_dependent_pages_stale + scan_stale_markers,
 │                                          Migration + migrations() + migrate +
@@ -775,8 +968,16 @@ crates/core/src/
 │                                          export_okf + import_okf + OKF adapter helpers (§16)
 ├── gui.rs (selected lines)             ── kms_export_okf / kms_import_okf IPC arms (native
 │                                          folder picker → export_okf / import_okf); §16
+├── kms_sources.rs                      ── source provenance catalogue: SourceRecord, Origin,
+│                                          load/upsert/forget, hash_file/find_by_hash,
+│                                          reconcile, citation_map, render_index_block
+├── html_md.rs                          ── dependency-free HTML → Markdown, used by ingest_url
+│                                          so a fetched page archives as readable prose
+│                                          instead of tag soup
 ├── tools/
-│   └── kms.rs (430 LOC)                ── KmsRead, KmsSearch, KmsWrite, KmsAppend, KmsDelete
+│   └── kms.rs                          ── KmsRead (page|source), KmsSearch (SearchScope),
+│                                          KmsWrite, KmsWriteSource, KmsAppend, KmsDelete,
+│                                          KmsCreate
 ├── shell_dispatch.rs (selected lines)  ── /kms slash handlers (GUI), format_lint_report,
 │                                          format_wrap_up_report, format_migration_report,
 │                                          has_actionable_issues, compose_kms_linker_prompt,
@@ -1049,9 +1250,14 @@ search PR can land without disk-schema migration.
 
 ### Schema + field boosts
 
+**Index version 2** adds the source layer. Existing on-disk indexes
+auto-rebuild on the next query (stale-manifest detection, below).
+
 | Field    | Type | Stored | Indexed   | Boost (query-time) |
 |----------|------|--------|-----------|--------------------|
-| page     | text | yes    | raw       | — (identity)       |
+| docid    | text | no     | raw       | — (identity)       |
+| kind     | text | yes    | raw       | — (filter: page \| source) |
+| page     | text | yes    | raw       | — (display name)   |
 | title    | text | yes    | tokenized | 4.0                |
 | topic    | text | yes    | tokenized | 2.0                |
 | body     | text | no     | tokenized | 1.0                |
@@ -1060,10 +1266,24 @@ search PR can land without disk-schema migration.
 | sources  | text | no     | raw, multi| — (filter)         |
 | updated  | i64  | yes    | INDEXED + FAST | — (Tier 4 recency boost) |
 
-Body is **indexed but NOT stored** — page content lives on disk;
-duplicating it into the index would double disk usage. Snippet
-generation in `tools/kms.rs::format_hits` re-reads page bodies from
-disk for the top-K hits only.
+Identity is `docid` = `"<kind>\u{1}<name>"`, not the bare page name.
+A page and a source legitimately share a stem — that is exactly what
+`/kms ingest` produces — so keying deletes on the page name alone made
+one clobber the other. `page` holds the display name: the page stem for
+a page, the filename *with* extension for a source.
+
+Sources are indexed with the same schema. A source with no frontmatter
+gets a de-slugged `title:` (`auth-token-refresh.md` → "auth token
+refresh") so its own filename is a searchable handle, and its body is
+capped at `SOURCE_INDEX_MAX_BYTES` (2 MB) — an ingested multi-MB log
+still indexes rather than choking the rebuild, and a source that isn't
+valid UTF-8 is skipped with a warning instead of failing the whole
+rebuild.
+
+Body is **indexed but NOT stored** — content lives on disk; duplicating
+it into the index would double disk usage. Snippet generation in
+`tools/kms.rs::format_hits` re-reads from disk (`pages/` or `sources/`
+per the hit's kind) for the top-K hits only.
 
 Field boosts are applied **at query time** via `QueryParser::
 set_field_boost`, not baked into the schema. This lets us revisit
@@ -1166,9 +1386,22 @@ Build wiring:
 ### `/kms reindex <name>` slash command
 
 `SlashCommand::KmsReindex(name)`; handlers in `repl.rs` (CLI) +
-`shell_dispatch.rs` (GUI / `--serve`). Drops `.index/` and calls
-`full_rebuild`. Operator-only (no `KmsReindex` model-callable
-tool — the auto-build-on-stale path covers self-healing).
+`shell_dispatch.rs` (GUI / `--serve`) both call `kms::reindex(&kref)`,
+which regenerates **all three** derived artefacts:
+
+1. `kms_sources::reconcile` — backfill catalogue records for sources
+   dropped in by hand, drop records whose file is gone, refresh
+   size/hash where they no longer match
+2. `kms::rebuild_index` — regenerate `index.md` from disk
+3. `kms_search_index::full_rebuild` — drop `.index/` and re-index both
+   layers
+
+Steps 1–2 work in builds without the `kms_search_index` feature; the
+report says so rather than failing. Previously reindex rebuilt the BM25
+index alone, so a hand-edited page, a merge, or a source dropped in by
+hand left `index.md` and the catalogue permanently wrong with no repair
+path. Operator-only (no model-callable tool — the auto-build-on-stale
+path covers self-healing).
 
 ### Deterministic pre-retrieval (auto-RAG)
 

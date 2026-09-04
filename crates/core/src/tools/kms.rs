@@ -41,9 +41,13 @@ impl Tool for KmsReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a single page from an attached knowledge base. Use after \
-         spotting a relevant entry in the KMS index that the user's \
-         question touches on."
+        "Read one file from an attached knowledge base. `kind: \"page\"` \
+         (default) reads a curated wiki page; `kind: \"source\"` reads the \
+         raw archived material under `sources/` that a page was built \
+         from — use it when a page cites a source you need the detail of, \
+         or when KmsSearch returns a `[source]` / `sources/…` hit. Source \
+         names may carry an extension (`spec.txt`); the bare stem also \
+         resolves."
     }
 
     fn input_schema(&self) -> Value {
@@ -51,7 +55,8 @@ impl Tool for KmsReadTool {
             "type": "object",
             "properties": {
                 "kms":  {"type": "string", "description": "KMS name (from the active list)"},
-                "page": {"type": "string", "description": "Page name (with or without .md)"}
+                "page": {"type": "string", "description": "Page name (with or without .md), or source file name when kind=source"},
+                "kind": {"type": "string", "enum": ["page", "source"], "description": "Which layer to read. Default \"page\"."}
             },
             "required": ["kms", "page"]
         })
@@ -60,11 +65,24 @@ impl Tool for KmsReadTool {
     async fn call(&self, input: Value) -> Result<String> {
         let kms_name = req_str(&input, "kms")?;
         let page = req_str(&input, "page")?;
+        let kind = input
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("page");
         let Some(kref) = crate::kms::resolve(kms_name) else {
             return Err(Error::Tool(format!(
                 "no KMS named '{kms_name}' (check /kms list)"
             )));
         };
+        if matches!(kind, "source" | "sources") {
+            return read_source(&kref, page);
+        }
+        if !matches!(kind, "page" | "pages") {
+            return Err(Error::Tool(format!(
+                "KmsRead: invalid kind '{kind}' — use \"page\" or \"source\""
+            )));
+        }
         let path = kref.page_path(page)?;
         let body = std::fs::read_to_string(&path)
             .map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
@@ -87,6 +105,42 @@ impl Tool for KmsReadTool {
         })
     }
 }
+
+/// Read a file out of `sources/`. Raw archived material is unbounded
+/// in size (an ingested log, a PDF text dump), so the read is capped
+/// and a truncation notice is prepended — the model gets the head of
+/// the document plus an explicit instruction on how to reach the rest,
+/// rather than a silently-clipped body it will treat as complete.
+fn read_source(kref: &crate::kms::KmsRef, name: &str) -> Result<String> {
+    let path = crate::kms::source_path(kref, name)?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
+    let file = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string());
+    let header = format!("[source: sources/{file} — raw archived material, not curated]\n\n");
+    if raw.len() <= SOURCE_READ_MAX_BYTES {
+        return Ok(format!("{header}{raw}"));
+    }
+    let mut end = SOURCE_READ_MAX_BYTES;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(format!(
+        "{header}[truncated: showing first {} KB of {} KB. To reach the rest, \
+         KmsSearch(kms, pattern: \"<term>\", scope: \"sources\") for the section you need.]\n\n{}",
+        SOURCE_READ_MAX_BYTES / 1024,
+        raw.len() / 1024,
+        &raw[..end],
+    ))
+}
+
+/// Cap for a single `KmsRead(kind: "source")`. Sits under the agent
+/// loop's `TOOL_RESULT_CONTEXT_LIMIT` (50 KB) so a source read lands
+/// in context whole instead of being spilled to disk with only a
+/// preview left behind.
+const SOURCE_READ_MAX_BYTES: usize = 40 * 1024;
 
 /// Inspect a page's frontmatter and return a one-line `[note: …]`
 /// banner if it looks stale or unverified. `verified: YYYY-MM-DD`
@@ -151,16 +205,21 @@ impl Tool for KmsSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search one knowledge base. Two modes, exactly one of which \
+        "Search one knowledge base across BOTH layers — curated `pages/` \
+         and raw archived `sources/`. Two modes, exactly one of which \
          must be provided:\n\
-         - `query`: natural-language BM25 search across page title \
-         (×4 boost), topic (×2), and body. Returns ranked hits with \
-         snippet previews. Optional `tags` / `category` filters narrow \
-         the candidate set. Requires the `kms_search_index` feature \
-         build; falls back to regex with an advisory when unavailable.\n\
-         - `pattern`: regex grep across page bodies, returns matching \
-         lines as `page:line:text`. Use for exact-shape lookups (find \
-         a specific TODO marker, function name, error code)."
+         - `query`: natural-language BM25 search across title (×4 boost), \
+         topic (×2), and body. Returns ranked hits marked `[page]` or \
+         `[source]` with snippet previews. Optional `tags` / `category` \
+         filters narrow the candidate set. Requires the `kms_search_index` \
+         feature build; falls back to regex with an advisory when \
+         unavailable.\n\
+         - `pattern`: regex grep, returns matching lines as \
+         `pages/<stem>:line:text` or `sources/<file>:line:text`. Use for \
+         exact-shape lookups (a TODO marker, function name, error code).\n\
+         Follow a `[source]` / `sources/…` hit with \
+         `KmsRead(kind: \"source\", page: \"<stem>\")`. Use `scope` to \
+         restrict a search to one layer; the default searches both."
     }
 
     fn input_schema(&self) -> Value {
@@ -170,6 +229,7 @@ impl Tool for KmsSearchTool {
                 "kms":      {"type": "string", "description": "KMS name (see /kms list)"},
                 "query":    {"type": "string", "description": "Natural-language search query (BM25). Mutually exclusive with `pattern`."},
                 "pattern":  {"type": "string", "description": "Regex pattern (line grep). Mutually exclusive with `query`."},
+                "scope":    {"type": "string", "enum": ["all", "pages", "sources"], "description": "Which layer to search. `all` (default) covers curated pages AND raw archived sources; `pages` = curated only; `sources` = raw archive only."},
                 "tags":     {"type": "array", "items": {"type": "string"}, "description": "Optional: limit `query` results to pages tagged with ANY of these. Ignored for `pattern`."},
                 "category": {"type": "string", "description": "Optional: limit `query` results to pages whose frontmatter `category:` matches exactly."},
                 "limit":    {"type": "integer", "description": "Max hits for `query` (default 10, capped at 50)."}
@@ -188,6 +248,7 @@ impl Tool for KmsSearchTool {
 
         let query = input.get("query").and_then(|v| v.as_str()).map(str::trim);
         let pattern = input.get("pattern").and_then(|v| v.as_str()).map(str::trim);
+        let scope = SearchScope::parse(input.get("scope").and_then(|v| v.as_str()))?;
         match (
             query.filter(|s| !s.is_empty()),
             pattern.filter(|s| !s.is_empty()),
@@ -201,61 +262,230 @@ impl Tool for KmsSearchTool {
                 "KmsSearch: provide either `query` (BM25 ranked) or `pattern` (regex line grep)"
                     .into(),
             )),
-            (Some(q), None) => kms_search_query_path(&kref, kms_name, q, &input),
-            (None, Some(p)) => kms_search_pattern_path(&kref, kms_name, p),
+            (Some(q), None) => kms_search_query_path(&kref, kms_name, q, &input, scope),
+            (None, Some(p)) => kms_search_pattern_scoped(&kref, kms_name, p, scope),
         }
     }
 }
 
-/// Existing regex line-grep path — byte-identical to pre-Tier-2
-/// behaviour for scripts memoising the `page:line:text` format.
+/// Which layer a search covers. `sources/` used to be unreachable from
+/// every search path — regex walked `pages/` only and the BM25 index
+/// never saw a source document — so anything `/kms ingest` archived
+/// was undiscoverable by the model that was supposed to use it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScope {
+    Pages,
+    Sources,
+    All,
+}
+
+impl SearchScope {
+    fn parse(raw: Option<&str>) -> Result<Self> {
+        match raw.map(str::trim).unwrap_or("all") {
+            "" | "all" | "both" => Ok(SearchScope::All),
+            "pages" | "page" => Ok(SearchScope::Pages),
+            "sources" | "source" => Ok(SearchScope::Sources),
+            other => Err(Error::Tool(format!(
+                "KmsSearch: invalid scope '{other}' — use \"pages\", \"sources\", or \"all\""
+            ))),
+        }
+    }
+
+    fn covers_pages(self) -> bool {
+        matches!(self, SearchScope::Pages | SearchScope::All)
+    }
+
+    fn covers_sources(self) -> bool {
+        matches!(self, SearchScope::Sources | SearchScope::All)
+    }
+}
+
+/// Max matching lines returned per file, so one pathological page
+/// (a log ingested as a source, a table of every SKU) can't crowd
+/// every other file out of the result.
+const PATTERN_MATCHES_PER_FILE: usize = 12;
+/// Max matching lines returned overall. The pre-fix path was
+/// unbounded — a `pattern: "."` against a KMS holding an ingested
+/// PDF returned the whole corpus into the model's context.
+const PATTERN_MATCHES_TOTAL: usize = 200;
+/// Matching lines longer than this are trimmed around the match.
+const PATTERN_LINE_MAX: usize = 300;
+
+/// Regex line-grep across `pages/` and (new) `sources/`. Hits are
+/// prefixed with their layer — `pages/<stem>:<line>:<text>` /
+/// `sources/<stem>.<ext>:<line>:<text>` — so the model can tell a
+/// curated page from raw archived material and knows which
+/// `KmsRead(kind:)` to follow up with.
 fn kms_search_pattern_path(
     kref: &crate::kms::KmsRef,
     kms_name: &str,
     pattern: &str,
 ) -> Result<String> {
+    kms_search_pattern_scoped(kref, kms_name, pattern, SearchScope::All)
+}
+
+fn kms_search_pattern_scoped(
+    kref: &crate::kms::KmsRef,
+    kms_name: &str,
+    pattern: &str,
+    scope: SearchScope,
+) -> Result<String> {
     let re = Regex::new(pattern).map_err(|e| Error::Tool(format!("regex: {e}")))?;
-    let pages_dir = kref.pages_dir();
-    // Refuse to walk if `pages/` itself is a symlink. Entry-level
-    // symlink filtering below can't save us from a `pages -> /etc`
-    // symlink because /etc's contents aren't themselves symlinks.
-    if let Ok(md) = std::fs::symlink_metadata(&pages_dir) {
-        if md.file_type().is_symlink() {
-            return Err(Error::Tool(format!(
-                "kms '{kms_name}' has a symlinked pages/ directory — refusing to read"
-            )));
-        }
-    }
-    let Ok(entries) = std::fs::read_dir(&pages_dir) else {
-        return Ok(String::new());
-    };
-    let mut results: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        // Skip symlinks to prevent `ln -s ~/.ssh/id_rsa pages/leak.md`
-        // style exfiltration via grep.
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if !path.extension().map(|e| e == "md").unwrap_or(false) {
-            continue;
-        }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
+
+    // (sort_key, rendered_line) so output orders by layer → stem →
+    // line NUMBER. The old code sorted the rendered strings, which
+    // put line 10 before line 2 inside the same page.
+    let mut results: Vec<((u8, String, usize), String)> = Vec::new();
+    let mut total = 0usize;
+    let mut truncated_files: Vec<String> = Vec::new();
+    let mut capped = false;
+
+    let mut scan = |label: &str,
+                    layer: u8,
+                    sort_stem: String,
+                    path: &std::path::Path,
+                    results: &mut Vec<((u8, String, usize), String)>,
+                    total: &mut usize|
+     -> bool {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return true;
         };
-        let page_name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let mut per_file = 0usize;
         for (i, line) in contents.lines().enumerate() {
-            if re.is_match(line) {
-                results.push(format!("{}:{}:{}", page_name, i + 1, line));
+            if !re.is_match(line) {
+                continue;
+            }
+            if per_file >= PATTERN_MATCHES_PER_FILE {
+                truncated_files.push(label.to_string());
+                return true;
+            }
+            if *total >= PATTERN_MATCHES_TOTAL {
+                return false;
+            }
+            results.push((
+                (layer, sort_stem.clone(), i + 1),
+                format!("{label}:{}:{}", i + 1, trim_match_line(line, &re)),
+            ));
+            per_file += 1;
+            *total += 1;
+        }
+        true
+    };
+
+    if scope.covers_pages() {
+        let pages_dir = kref.pages_dir();
+        // Refuse to walk if `pages/` itself is a symlink. Entry-level
+        // symlink filtering below can't save us from a `pages -> /etc`
+        // symlink because /etc's contents aren't themselves symlinks.
+        if let Ok(md) = std::fs::symlink_metadata(&pages_dir) {
+            if md.file_type().is_symlink() {
+                return Err(Error::Tool(format!(
+                    "kms '{kms_name}' has a symlinked pages/ directory — refusing to read"
+                )));
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&pages_dir) {
+            let mut paths: Vec<(String, std::path::PathBuf)> = Vec::new();
+            for entry in entries.flatten() {
+                // Skip symlinks to prevent `ln -s ~/.ssh/id_rsa
+                // pages/leak.md` style exfiltration via grep.
+                let Ok(ft) = entry.file_type() else { continue };
+                if ft.is_symlink() {
+                    continue;
+                }
+                let path = entry.path();
+                if !path.extension().map(|e| e == "md").unwrap_or(false) {
+                    continue;
+                }
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                paths.push((stem, path));
+            }
+            paths.sort();
+            for (stem, path) in paths {
+                if !scan(
+                    &format!("pages/{stem}"),
+                    0,
+                    stem.clone(),
+                    &path,
+                    &mut results,
+                    &mut total,
+                ) {
+                    capped = true;
+                    break;
+                }
             }
         }
     }
-    results.sort();
-    Ok(results.join("\n"))
+
+    if !capped && scope.covers_sources() {
+        let sources_dir = kref.sources_dir();
+        if let Ok(md) = std::fs::symlink_metadata(&sources_dir) {
+            if md.file_type().is_symlink() {
+                return Err(Error::Tool(format!(
+                    "kms '{kms_name}' has a symlinked sources/ directory — refusing to read"
+                )));
+            }
+        }
+        for src in crate::kms::list_sources(kref) {
+            let path = sources_dir.join(src.file_name());
+            if !scan(
+                &format!("sources/{}", src.file_name()),
+                1,
+                src.stem.clone(),
+                &path,
+                &mut results,
+                &mut total,
+            ) {
+                capped = true;
+                break;
+            }
+        }
+    }
+
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out: Vec<String> = results.into_iter().map(|(_, line)| line).collect();
+    truncated_files.sort();
+    truncated_files.dedup();
+    if !truncated_files.is_empty() {
+        out.push(format!(
+            "\n[{} file(s) had more than {PATTERN_MATCHES_PER_FILE} matches — showing the first {PATTERN_MATCHES_PER_FILE} of each: {}]",
+            truncated_files.len(),
+            truncated_files.join(", "),
+        ));
+    }
+    if capped {
+        out.push(format!(
+            "[result cap {PATTERN_MATCHES_TOTAL} reached — narrow the pattern or set scope: \"pages\"]"
+        ));
+    }
+    Ok(out.join("\n"))
+}
+
+/// Keep a matching line readable in tool output: a line under the cap
+/// passes through unchanged, a longer one is windowed around the first
+/// match so the interesting part survives instead of the first 300
+/// bytes of a minified blob.
+fn trim_match_line(line: &str, re: &Regex) -> String {
+    let line = line.trim_end();
+    if line.chars().count() <= PATTERN_LINE_MAX {
+        return line.to_string();
+    }
+    let hit = re.find(line).map(|m| m.start()).unwrap_or(0);
+    // Convert the byte offset to a char index, then window around it.
+    let hit_chars = line[..hit].chars().count();
+    let half = PATTERN_LINE_MAX / 2;
+    let start = hit_chars.saturating_sub(half);
+    let taken: String = line.chars().skip(start).take(PATTERN_LINE_MAX).collect();
+    let lead = if start > 0 { "…" } else { "" };
+    let tail = if start + PATTERN_LINE_MAX < line.chars().count() {
+        "…"
+    } else {
+        ""
+    };
+    format!("{lead}{taken}{tail}")
 }
 
 /// BM25 path — only available when the `kms_search_index` Cargo
@@ -269,13 +499,14 @@ fn kms_search_query_path(
     _kms_name: &str,
     query: &str,
     input: &Value,
+    scope: SearchScope,
 ) -> Result<String> {
     // dev-plan/41: a shared KMS is mounted read-only, so the BM25 index
     // (written under `<root>/.index`) can't be built there — auto-rebuild
     // would EROFS. Fall back to a read-only literal line-grep so `query:`
     // still works on shared KMSes (degraded: no ranking, but no writes).
     if kref.read_only() {
-        return kms_search_pattern_path(kref, _kms_name, &regex::escape(query));
+        return kms_search_pattern_scoped(kref, _kms_name, &regex::escape(query), scope);
     }
 
     // Parse optional filters.
@@ -328,8 +559,13 @@ fn kms_search_query_path(
     let idx = crate::kms_search_index::get_or_open(&kref.root)
         .map_err(|e| Error::Tool(format!("KmsSearch: open index: {e}")))?;
     let cat_ref = category.filter(|s| !s.is_empty());
+    let kind_filter = match scope {
+        SearchScope::All => None,
+        SearchScope::Pages => Some(crate::kms_search_index::DocKind::Page),
+        SearchScope::Sources => Some(crate::kms_search_index::DocKind::Source),
+    };
     let hits = idx
-        .search(query, &tags, cat_ref, limit)
+        .search_scoped(query, &tags, cat_ref, limit, kind_filter)
         .map_err(|e| Error::Tool(format!("KmsSearch: query: {e}")))?;
 
     Ok(format_hits(&advisory, &hits))
@@ -341,6 +577,7 @@ fn kms_search_query_path(
     _kms_name: &str,
     _query: &str,
     _input: &Value,
+    _scope: SearchScope,
 ) -> Result<String> {
     Err(Error::Tool(
         "KmsSearch `query:` requires the kms_search_index feature; \
@@ -416,7 +653,7 @@ pub fn run_slash_search(name: &str, query: &str, is_pattern: bool) -> String {
                 "kms": kref.name,
                 "query": query,
             });
-            match kms_search_query_path(kref, &kref.name, query, &input) {
+            match kms_search_query_path(kref, &kref.name, query, &input, SearchScope::All) {
                 Ok(s) => s,
                 Err(e) => format!("(error: {e})"),
             }
@@ -442,7 +679,19 @@ fn format_hits(advisory: &str, hits: &[crate::kms_search_index::SearchHit]) -> S
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("[score {:.2}] page: {}\n", h.score, h.page));
+        // The layer is load-bearing for the follow-up read: a `page`
+        // hit is `KmsRead(page: …)`, a `source` hit needs
+        // `KmsRead(kind: "source", page: …)` — and the name carries
+        // its extension.
+        match h.kind {
+            crate::kms_search_index::DocKind::Page => {
+                out.push_str(&format!("[score {:.2}] page: {}\n", h.score, h.page))
+            }
+            crate::kms_search_index::DocKind::Source => out.push_str(&format!(
+                "[score {:.2}] source: {}  (read with KmsRead kind:\"source\")\n",
+                h.score, h.page
+            )),
+        }
         if let Some(title) = &h.title {
             out.push_str(&format!("  title: {title}\n"));
         }
@@ -988,6 +1237,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_reaches_the_source_layer() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        std::fs::create_dir_all(k.sources_dir()).unwrap();
+        std::fs::write(k.sources_dir().join("spec.txt"), "raw archived text").unwrap();
+
+        // Bare stem and full filename both resolve.
+        for name in ["spec", "spec.txt"] {
+            let out = KmsReadTool
+                .call(json!({"kms": "nb", "page": name, "kind": "source"}))
+                .await
+                .unwrap();
+            assert!(out.contains("raw archived text"), "{out}");
+            assert!(out.contains("[source: sources/spec.txt"), "{out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_rejects_unknown_kind() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        std::fs::write(k.pages_dir().join("p.md"), "body").unwrap();
+        let err = KmsReadTool
+            .call(json!({"kms": "nb", "page": "p", "kind": "wat"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid kind"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_source_truncates_with_a_recovery_hint() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        std::fs::create_dir_all(k.sources_dir()).unwrap();
+        std::fs::write(k.sources_dir().join("big.log"), "x".repeat(200_000)).unwrap();
+        let out = KmsReadTool
+            .call(json!({"kms": "nb", "page": "big", "kind": "source"}))
+            .await
+            .unwrap();
+        assert!(out.contains("truncated"), "{out}");
+        assert!(out.contains("scope: "), "no recovery hint: {out}");
+        assert!(
+            out.len() < 60_000,
+            "exceeded the read cap: {} bytes",
+            out.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn pattern_search_covers_the_source_layer() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        std::fs::create_dir_all(k.sources_dir()).unwrap();
+        std::fs::write(k.pages_dir().join("p.md"), "curated marker\n").unwrap();
+        std::fs::write(k.sources_dir().join("s.txt"), "archived marker\n").unwrap();
+
+        let all = KmsSearchTool
+            .call(json!({"kms": "nb", "pattern": "marker"}))
+            .await
+            .unwrap();
+        assert!(all.contains("pages/p:1:"), "{all}");
+        assert!(all.contains("sources/s.txt:1:"), "{all}");
+
+        let pages_only = KmsSearchTool
+            .call(json!({"kms": "nb", "pattern": "marker", "scope": "pages"}))
+            .await
+            .unwrap();
+        assert!(pages_only.contains("pages/p"), "{pages_only}");
+        assert!(!pages_only.contains("sources/"), "{pages_only}");
+
+        let sources_only = KmsSearchTool
+            .call(json!({"kms": "nb", "pattern": "marker", "scope": "sources"}))
+            .await
+            .unwrap();
+        assert!(sources_only.contains("sources/s.txt"), "{sources_only}");
+        assert!(!sources_only.contains("pages/"), "{sources_only}");
+    }
+
+    #[tokio::test]
+    async fn pattern_search_rejects_bad_scope() {
+        let _home = scoped_home();
+        create("nb", KmsScope::User).unwrap();
+        let err = KmsSearchTool
+            .call(json!({"kms": "nb", "pattern": "x", "scope": "everything"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid scope"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn pattern_search_orders_by_line_number_not_lexically() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        let mut body = String::new();
+        for i in 1..=12 {
+            body.push_str(&format!("hit {i}\n"));
+        }
+        std::fs::write(k.pages_dir().join("p.md"), body).unwrap();
+        let out = KmsSearchTool
+            .call(json!({"kms": "nb", "pattern": "^hit"}))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        // Sorting the rendered strings put line 10 before line 2.
+        assert!(lines[0].starts_with("pages/p:1:"), "{out}");
+        assert!(lines[1].starts_with("pages/p:2:"), "{out}");
+        assert!(lines[9].starts_with("pages/p:10:"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn pattern_search_caps_matches_per_file() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        let body = "noise\n".repeat(500);
+        std::fs::write(k.pages_dir().join("p.md"), body).unwrap();
+        let out = KmsSearchTool
+            .call(json!({"kms": "nb", "pattern": "noise"}))
+            .await
+            .unwrap();
+        let hits = out.lines().filter(|l| l.starts_with("pages/p:")).count();
+        // Unbounded before — a broad pattern returned the whole corpus
+        // straight into the model's context.
+        assert_eq!(hits, 12, "{out}");
+        assert!(
+            out.contains("more than 12 matches"),
+            "no truncation note: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pattern_search_windows_very_long_lines() {
+        let _home = scoped_home();
+        let k = create("nb", KmsScope::User).unwrap();
+        let line = format!("{}NEEDLE{}", "a".repeat(2000), "b".repeat(2000));
+        std::fs::write(k.pages_dir().join("p.md"), line).unwrap();
+        let out = KmsSearchTool
+            .call(json!({"kms": "nb", "pattern": "NEEDLE"}))
+            .await
+            .unwrap();
+        assert!(out.contains("NEEDLE"), "match window lost the match: {out}");
+        assert!(
+            out.chars().count() < 500,
+            "line not windowed: {}",
+            out.len()
+        );
+    }
+
+    #[tokio::test]
     async fn read_unknown_kms_errors() {
         let _home = scoped_home();
         let err = KmsReadTool
@@ -1007,7 +1406,9 @@ mod tests {
             .call(json!({"kms": "nb", "pattern": "hello"}))
             .await
             .unwrap();
-        assert_eq!(out, "a:3:hello world");
+        // Hits are layer-prefixed so a curated page is distinguishable
+        // from raw archived material in the same result set.
+        assert_eq!(out, "pages/a:3:hello world");
     }
 
     #[tokio::test]
@@ -1138,13 +1539,13 @@ mod tests {
         assert!(out.contains("no KMS named 'nope'"), "got: {out}");
     }
 
-    /// `pattern:` output stays byte-identical to pre-Tier-2 for
-    /// scripts that memoised the format. (The same fixture as
-    /// `search_returns_page_line_matches` above; re-asserted here
-    /// alongside `query:` to make the back-compat contract obvious
-    /// in one place.)
+    /// `pattern:` hit format. This deliberately BROKE the old
+    /// `<stem>:<line>:<text>` shape: once `sources/` joined the search,
+    /// a bare stem was ambiguous (a page and a source may share one)
+    /// and the caller had no way to know which `KmsRead(kind:)` to
+    /// follow up with. The layer prefix is now part of the contract.
     #[tokio::test]
-    async fn pattern_path_output_unchanged() {
+    async fn pattern_hits_are_layer_prefixed() {
         let _home = scoped_home();
         let k = create("nb", KmsScope::User).unwrap();
         std::fs::write(k.pages_dir().join("p.md"), "one\ntwo\nfind-me\n").unwrap();
@@ -1152,7 +1553,7 @@ mod tests {
             .call(json!({"kms": "nb", "pattern": "find-me"}))
             .await
             .unwrap();
-        assert_eq!(out, "p:3:find-me");
+        assert_eq!(out, "pages/p:3:find-me");
     }
 
     // ─── M6.25 BUG #1: write/append tools ─────────────────────────────────

@@ -57,7 +57,14 @@ const TOKENIZER_NAME: &str = "thai_en";
 /// indexes auto-rebuild on next open (Tier 3 stale-manifest
 /// detection). Start at 1; increment when we change the schema
 /// or tokenizer in a non-backward-compatible way.
-pub const INDEX_VERSION: u32 = 1;
+pub const INDEX_VERSION: u32 = 2;
+
+/// Bytes of a single source file fed to the indexer. Sources are raw
+/// archived material — an ingested log or CSV can be tens of MB, and
+/// indexing the whole thing buys nothing (BM25 saturates long before)
+/// while costing memory and index size. Pages are never capped; they
+/// are hand/LLM-authored and bounded by construction.
+const SOURCE_INDEX_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// What changed on a KMS page so the indexer knows whether to
 /// upsert (re-add document) or delete (remove document by page
@@ -67,6 +74,33 @@ pub const INDEX_VERSION: u32 = 1;
 pub enum Op {
     Upsert,
     Delete,
+}
+
+/// Which layer a document belongs to. Pre-v2 the index held pages
+/// only, so `sources/` — the raw material `/kms ingest` archives —
+/// was unreachable through BM25 as well as through regex. Both
+/// layers are indexed now and hits carry their kind so the caller
+/// can route the follow-up read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocKind {
+    Page,
+    Source,
+}
+
+impl DocKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DocKind::Page => "page",
+            DocKind::Source => "source",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "source" => DocKind::Source,
+            _ => DocKind::Page,
+        }
+    }
 }
 
 /// Errors the indexer can surface. Distinct from [`crate::error::Error`]
@@ -92,6 +126,12 @@ impl From<tantivy::TantivyError> for IndexError {
 /// Compiled schema + field handles. Kept as a struct so callers
 /// don't have to look up fields by name on every operation.
 struct Fields {
+    /// `"<kind>\u{1}<name>"` — the unique delete key. `page` alone
+    /// stopped being unique once sources joined the index (a page and
+    /// a source may share a stem), so identity moved here and `page`
+    /// became a display field.
+    docid: Field,
+    kind: Field,
     page: Field,
     title: Field,
     topic: Field,
@@ -103,11 +143,18 @@ struct Fields {
     updated: Field,
 }
 
+fn docid(kind: DocKind, name: &str) -> String {
+    format!("{}\u{1}{name}", kind.as_str())
+}
+
 fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
-    // `page` is the document identity — STRING (raw, single-value)
-    // so we can `delete_term(page)` exactly. Stored so search
-    // results can cite it.
+    // `docid` is the document identity — STRING (raw, single-value)
+    // so we can `delete_term(docid)` exactly. `page` carries the
+    // display name (page stem, or source filename with extension);
+    // `kind` tells the caller which layer to read it back from.
+    let docid = sb.add_text_field("docid", STRING);
+    let kind = sb.add_text_field("kind", STRING | STORED);
     let page = sb.add_text_field("page", STRING | STORED);
     // Title / topic / body use the shared text indexing pipeline
     // (custom tokenizer + lowercaser), so they all reference
@@ -150,6 +197,8 @@ fn build_schema() -> (Schema, Fields) {
     (
         schema,
         Fields {
+            docid,
+            kind,
             page,
             title,
             topic,
@@ -190,8 +239,12 @@ pub struct SearchIndex {
 pub struct SearchHit {
     /// BM25 score with the per-field boosts applied. Higher = better.
     pub score: f32,
-    /// Page name (stem, no `.md` extension). Use this with
-    /// `KmsRead(page: …)` to fetch the full content.
+    /// Which layer the hit came from. Routes the follow-up read:
+    /// `KmsRead(page: …)` for a page, `KmsRead(kind: "source", …)`
+    /// for a source.
+    pub kind: DocKind,
+    /// Page stem (no `.md`) for a page; source filename *with*
+    /// extension for a source.
     pub page: String,
     /// Page's frontmatter `title:` if present.
     pub title: Option<String>,
@@ -248,11 +301,28 @@ impl SearchIndex {
         frontmatter: &std::collections::BTreeMap<String, String>,
         body: &str,
     ) -> Result<(), IndexError> {
+        self.upsert(DocKind::Page, page_name, frontmatter, body)
+    }
+
+    /// Upsert a document in either layer. `name` is the page stem for
+    /// [`DocKind::Page`] and the source filename *including* extension
+    /// for [`DocKind::Source`] — the latter so `notes.txt` and
+    /// `notes.md` stay distinct documents and the hit can be read back
+    /// without re-guessing the extension.
+    pub fn upsert(
+        &self,
+        kind: DocKind,
+        name: &str,
+        frontmatter: &std::collections::BTreeMap<String, String>,
+        body: &str,
+    ) -> Result<(), IndexError> {
         let mut writer = self
             .writer
             .lock()
             .map_err(|e| IndexError::Tantivy(format!("writer mutex poisoned: {e}")))?;
-        writer.delete_term(Term::from_field_text(self.fields.page, page_name));
+        let id = docid(kind, name);
+        writer.delete_term(Term::from_field_text(self.fields.docid, &id));
+        let page_name = name;
 
         let title = frontmatter.get("title").map(String::as_str).unwrap_or("");
         let topic = frontmatter.get("topic").map(String::as_str).unwrap_or("");
@@ -265,6 +335,8 @@ impl SearchIndex {
         // Build doc. Tags + sources may be comma-separated strings
         // in frontmatter; split + add multi-value.
         let mut document = doc!(
+            self.fields.docid => id.as_str(),
+            self.fields.kind => kind.as_str(),
             self.fields.page => page_name,
             self.fields.title => title,
             self.fields.topic => topic,
@@ -285,11 +357,16 @@ impl SearchIndex {
 
     /// Delete a page by name. Commits before returning.
     pub fn delete_page(&self, page_name: &str) -> Result<(), IndexError> {
+        self.delete(DocKind::Page, page_name)
+    }
+
+    /// Delete a document in either layer. Commits before returning.
+    pub fn delete(&self, kind: DocKind, name: &str) -> Result<(), IndexError> {
         let mut writer = self
             .writer
             .lock()
             .map_err(|e| IndexError::Tantivy(format!("writer mutex poisoned: {e}")))?;
-        writer.delete_term(Term::from_field_text(self.fields.page, page_name));
+        writer.delete_term(Term::from_field_text(self.fields.docid, &docid(kind, name)));
         writer.commit()?;
         Ok(())
     }
@@ -316,6 +393,19 @@ impl SearchIndex {
         tags_filter: &[String],
         category_filter: Option<&str>,
         limit: usize,
+    ) -> Result<Vec<SearchHit>, IndexError> {
+        self.search_scoped(query_str, tags_filter, category_filter, limit, None)
+    }
+
+    /// `kind_filter: Some(kind)` restricts results to one layer;
+    /// `None` searches both.
+    pub fn search_scoped(
+        &self,
+        query_str: &str,
+        tags_filter: &[String],
+        category_filter: Option<&str>,
+        limit: usize,
+        kind_filter: Option<DocKind>,
     ) -> Result<Vec<SearchHit>, IndexError> {
         use tantivy::collector::TopDocs;
         use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
@@ -349,7 +439,8 @@ impl SearchIndex {
         // Compose with filters via BooleanQuery::Must. Tantivy
         // requires concrete Vec<(Occur, Box<dyn Query>)>; build
         // incrementally so we only allocate when filters are set.
-        let filters_active = !tags_filter.is_empty() || category_filter.is_some();
+        let filters_active =
+            !tags_filter.is_empty() || category_filter.is_some() || kind_filter.is_some();
         let final_query: Box<dyn Query> = if filters_active {
             let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             clauses.push((Occur::Must, base_query));
@@ -378,6 +469,13 @@ impl SearchIndex {
                 );
                 clauses.push((Occur::Must, Box::new(cq)));
             }
+            if let Some(k) = kind_filter {
+                let kq = TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.kind, k.as_str()),
+                    IndexRecordOption::Basic,
+                );
+                clauses.push((Occur::Must, Box::new(kq)));
+            }
             Box::new(BooleanQuery::new(clauses))
         } else {
             base_query
@@ -396,11 +494,15 @@ impl SearchIndex {
                 .doc(doc_address)
                 .map_err(|e| IndexError::Tantivy(format!("doc fetch: {e}")))?;
             let page = first_text(&retrieved, self.fields.page).unwrap_or_default();
+            let kind = first_text(&retrieved, self.fields.kind)
+                .map(|s| DocKind::parse(&s))
+                .unwrap_or(DocKind::Page);
             let title = first_text(&retrieved, self.fields.title);
             let topic = first_text(&retrieved, self.fields.topic);
-            let snippet_preview = self.read_snippet_preview(&page);
+            let snippet_preview = self.read_snippet_preview(kind, &page);
             hits.push(SearchHit {
                 score,
+                kind,
                 page,
                 title: title.filter(|s| !s.is_empty()),
                 topic: topic.filter(|s| !s.is_empty()),
@@ -414,18 +516,39 @@ impl SearchIndex {
     /// (frontmatter stripped) for the snippet preview. Returns an
     /// empty string on I/O error — snippet is best-effort, the
     /// page+score are the load-bearing fields.
-    fn read_snippet_preview(&self, page_stem: &str) -> String {
-        let path = self.kms_root.join("pages").join(format!("{page_stem}.md"));
+    fn read_snippet_preview(&self, kind: DocKind, name: &str) -> String {
+        let path = match kind {
+            DocKind::Page => self.kms_root.join("pages").join(format!("{name}.md")),
+            // Source names carry their extension already.
+            DocKind::Source => self.kms_root.join("sources").join(name),
+        };
         let Ok(raw) = std::fs::read_to_string(&path) else {
             return String::new();
         };
         let (_fm, body) = crate::kms::parse_frontmatter(&raw);
-        // Take the first ~200 chars, clamped to a char boundary +
-        // single-line. Multi-line / Markdown rendering belongs in
-        // the calling tool's formatting code, not here.
+        // First line of real prose, ~200 chars, single-line. Headings,
+        // rules, callout blockquotes and HTML banners are skipped: the
+        // preview used to be "first non-empty line", which for a page
+        // is the injected `# <title>` and for an ingested source is its
+        // own heading — restating the hit's name and telling the caller
+        // nothing about whether to open it.
+        let mut in_fence = false;
         let oneline: String = body
             .lines()
-            .find(|l| !l.trim().is_empty())
+            .map(str::trim)
+            .filter(|l| {
+                if l.starts_with("```") || l.starts_with("~~~") {
+                    in_fence = !in_fence;
+                    return false;
+                }
+                !in_fence
+                    && !l.is_empty()
+                    && !l.starts_with('#')
+                    && !l.starts_with('>')
+                    && !l.starts_with("---")
+                    && !l.starts_with("<!--")
+            })
+            .next()
             .unwrap_or("")
             .chars()
             .take(200)
@@ -542,6 +665,60 @@ fn on_page_mutated_inner(kms_root: &Path, page_name: &str, op: Op) -> Result<(),
     }
 }
 
+/// Same contract as [`on_page_mutated`] for the `sources/` layer.
+/// `file_name` includes the extension (`spec.txt`, not `spec`).
+pub fn on_source_mutated(kms_root: &Path, file_name: &str, op: Op) {
+    if let Err(e) = on_source_mutated_inner(kms_root, file_name, op) {
+        eprintln!(
+            "\x1b[33m[kms-search-index] {} source='{}' error: {}\x1b[0m",
+            kms_root.display(),
+            file_name,
+            e
+        );
+    }
+}
+
+fn on_source_mutated_inner(kms_root: &Path, file_name: &str, op: Op) -> Result<(), IndexError> {
+    let idx = get_or_open(kms_root)?;
+    match op {
+        Op::Delete => idx.delete(DocKind::Source, file_name),
+        Op::Upsert => {
+            let path = kms_root.join("sources").join(file_name);
+            let (fm, body) = read_source_for_index(&path)?;
+            idx.upsert(DocKind::Source, file_name, &fm, &body)
+        }
+    }
+}
+
+/// Read a source for indexing: frontmatter (research sources and
+/// post-v0.119 ingests carry it), body capped at
+/// [`SOURCE_INDEX_MAX_BYTES`], and a synthesised `title:` fallback so
+/// a bare `notes.txt` still matches on its own name.
+fn read_source_for_index(
+    path: &Path,
+) -> Result<(std::collections::BTreeMap<String, String>, String), IndexError> {
+    let raw = std::fs::read_to_string(path)?;
+    let (mut fm, body) = crate::kms::parse_frontmatter(&raw);
+    if !fm.contains_key("title") {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            // Slugs read as one token to the tokenizer; give the
+            // title field the de-slugged words too so a query for
+            // "auth token refresh" matches `auth-token-refresh.md`.
+            fm.insert("title".into(), stem.replace(['-', '_'], " "));
+        }
+    }
+    let body = if body.len() > SOURCE_INDEX_MAX_BYTES {
+        let mut end = SOURCE_INDEX_MAX_BYTES;
+        while end > 0 && !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body[..end].to_string()
+    } else {
+        body
+    };
+    Ok((fm, body))
+}
+
 /// Tier 1.C: full rebuild from scratch. Drops `.index/`, walks
 /// `<kms_root>/pages/`, re-indexes every page. Used by the
 /// `/kms reindex` slash command in Tier 3 and by the auto-recovery
@@ -557,25 +734,59 @@ pub fn full_rebuild(kms_root: &Path) -> Result<usize, IndexError> {
         std::fs::remove_dir_all(&index_dir)?;
     }
     let idx = get_or_open(kms_root)?;
-    let pages_dir = kms_root.join("pages");
-    if !pages_dir.exists() {
-        return Ok(0);
-    }
     let mut count = 0;
-    for entry in std::fs::read_dir(&pages_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("md") {
-            continue;
+    let pages_dir = kms_root.join("pages");
+    if pages_dir.exists() {
+        for entry in std::fs::read_dir(&pages_dir)? {
+            let entry = entry?;
+            if entry.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let raw = std::fs::read_to_string(&path)?;
+            let (fm, body) = crate::kms::parse_frontmatter(&raw);
+            idx.upsert_page(&stem, &fm, &body)?;
+            count += 1;
         }
-        let stem = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let raw = std::fs::read_to_string(&path)?;
-        let (fm, body) = crate::kms::parse_frontmatter(&raw);
-        idx.upsert_page(&stem, &fm, &body)?;
-        count += 1;
+    }
+    // Sources (index v2+). A source that isn't valid UTF-8 is skipped
+    // rather than failing the whole rebuild — one bad archive must not
+    // leave the KMS unsearchable.
+    let sources_dir = kms_root.join("sources");
+    if sources_dir.exists() {
+        for entry in std::fs::read_dir(&sources_dir)? {
+            let entry = entry?;
+            if entry.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
+                continue;
+            }
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let ext = ext.to_ascii_lowercase();
+            if !crate::kms::SOURCE_EXTENSIONS.iter().any(|e| *e == ext) {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            match read_source_for_index(&path) {
+                Ok((fm, body)) => {
+                    idx.upsert(DocKind::Source, file_name, &fm, &body)?;
+                    count += 1;
+                }
+                Err(e) => eprintln!(
+                    "\x1b[33m[kms-search-index] skipping source '{file_name}': {e}\x1b[0m"
+                ),
+            }
+        }
     }
     Ok(count)
 }
@@ -682,7 +893,115 @@ mod tests {
     /// Uses `get_or_open` (the production path) — tests that bypass
     /// it via `SearchIndex::open_or_create` directly would collide
     /// with the registry's cached writer.
+
     #[test]
+    fn full_rebuild_indexes_sources_alongside_pages() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("pages")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sources")).unwrap();
+        std::fs::write(
+            tmp.path().join("pages/note.md"),
+            "---\ntitle: Note\n---\n\ncurated prose\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("sources/raw-spec.txt"),
+            "the widget frobnicator handles retries\n",
+        )
+        .unwrap();
+
+        let n = full_rebuild(tmp.path()).unwrap();
+        assert_eq!(n, 2, "both layers indexed");
+
+        let idx = get_or_open(tmp.path()).unwrap();
+        // The archived source is findable. Before v2 the index held
+        // pages only, so ingested material was unreachable by BM25 as
+        // well as by regex.
+        let hits = idx.search("frobnicator", &[], None, 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].kind, DocKind::Source);
+        assert_eq!(hits[0].page, "raw-spec.txt");
+    }
+
+    #[test]
+    fn source_and_page_can_share_a_stem() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("pages")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sources")).unwrap();
+        // Exactly what `/kms ingest` produces: a page and a source
+        // under the same alias. Document identity used to be the bare
+        // page name, so one would have deleted the other.
+        std::fs::write(tmp.path().join("pages/spec.md"), "shared marker page\n").unwrap();
+        std::fs::write(tmp.path().join("sources/spec.md"), "shared marker source\n").unwrap();
+
+        full_rebuild(tmp.path()).unwrap();
+        let idx = get_or_open(tmp.path()).unwrap();
+        let hits = idx.search("marker", &[], None, 10).unwrap();
+        assert_eq!(hits.len(), 2, "one clobbered the other: {hits:?}");
+    }
+
+    #[test]
+    fn kind_filter_narrows_to_one_layer() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("pages")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sources")).unwrap();
+        std::fs::write(tmp.path().join("pages/a.md"), "kubernetes notes\n").unwrap();
+        std::fs::write(tmp.path().join("sources/b.md"), "kubernetes manual\n").unwrap();
+        full_rebuild(tmp.path()).unwrap();
+        let idx = get_or_open(tmp.path()).unwrap();
+
+        let pages = idx
+            .search_scoped("kubernetes", &[], None, 10, Some(DocKind::Page))
+            .unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].page, "a");
+
+        let sources = idx
+            .search_scoped("kubernetes", &[], None, 10, Some(DocKind::Source))
+            .unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].page, "b.md");
+
+        assert_eq!(idx.search("kubernetes", &[], None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn source_stem_words_are_searchable() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("sources")).unwrap();
+        std::fs::write(
+            tmp.path().join("sources/auth-token-refresh.md"),
+            "body with no matching words\n",
+        )
+        .unwrap();
+        full_rebuild(tmp.path()).unwrap();
+        let idx = get_or_open(tmp.path()).unwrap();
+        // A source with no frontmatter gets a de-slugged title so its
+        // own filename is a searchable handle.
+        let hits = idx.search("token refresh", &[], None, 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+    }
+
+    #[test]
+    fn oversized_source_is_truncated_not_rejected() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("sources")).unwrap();
+        let mut big = "filler ".repeat(400_000); // ~2.8 MB
+        big.push_str("needle-at-the-end");
+        std::fs::write(tmp.path().join("sources/huge.log"), &big).unwrap();
+
+        let n = full_rebuild(tmp.path()).unwrap();
+        assert_eq!(n, 1, "oversized source still indexed");
+        let idx = get_or_open(tmp.path()).unwrap();
+        assert!(!idx.search("filler", &[], None, 5).unwrap().is_empty());
+        // Past the cap, so not indexed — the point is that the rebuild
+        // succeeded rather than choking on the file.
+        assert!(idx
+            .search("needle-at-the-end", &[], None, 5)
+            .unwrap()
+            .is_empty());
+    }
+
     /// `search()` had no coverage, so the tantivy 0.26 collector change
     /// (`TopDocs::with_limit` is a builder now; ordering comes from
     /// `order_by_score`) would only have been caught by the compiler —

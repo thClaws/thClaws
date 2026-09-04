@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.119.0] — 2026-09-04
+
+iApp joins the image providers as the one backend that renders Thai text properly, `/extract` now names where it wrote, and the knowledge sources grow a provenance catalogue.
+
+### Added
+- **iApp is available as an image provider — the one that gets Thai text right.** `TextToImage` / `ImageToImage` gain `text` (up to 4 lines) and `font` (19 Thai faces): iApp *typesets* those lines instead of leaving the diffusion model to draw them, which is what stops Thai script coming back as mangled glyphs. Both modes work — a fresh image, or an edit that keeps the original composition. Needs `IAPP_API_KEY`, settable in Settings alongside the other service keys; bring-your-own-key for now.
+- **Media Studio offers iApp**, with the Thai text and font fields appearing only when it's the selected model — and the `qwen-image-3.0` pair, which had been missing from the picker since it shipped.
+- **`sources/` gets a provenance catalogue and a real ingest path.** Source material is catalogued with where it came from and pulled in through a proper ingest path.
+
+### Changed
+- **The model catalogue now prices image generation across the board.** The two Gemini image models had no rows at all; they and iApp are priced from their vendors' published rates, with Appendix A regenerated to match.
+
+### Fixed
+- **`/extract` names its output folder in the chat result.** The chat only shows the first line of a background agent's result, so a run that opened with prose left you with no path — the folder is now on that line, ready to open in the Files tab.
+
 ## [0.118.0] — 2026-08-29
 
 Teammates launch reliably on Windows, user-pointed providers own their model lists, and the model catalogue gets its pre-release refresh.

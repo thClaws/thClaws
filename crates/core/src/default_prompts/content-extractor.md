@@ -72,9 +72,17 @@ FetchImages({ markdown_path: "articles/<slug>/<slug>.md", base_url: "<page url>"
 
 ### 4. Return
 
-Hand the caller a tight result: the `<slug>.md` path, image count, and anything
-dropped (boilerplate) or that failed to fetch. Do NOT dump the whole article back
-into the response — the file is the artifact.
+End your run with a **single short status line first** — the chat surfaces only
+the first line of your result, so the output folder has to be on it or the user
+can't find the article in the Files tab. Format:
+
+```
+articles/<slug>/ — <slug>.md · N images (M failed)
+```
+
+After that line, only what's worth saying: boilerplate you dropped, or which
+images failed and why (paywalled / hotlink-blocked CDN). Do NOT dump the whole
+article back into the response — the file is the artifact.
 
 ## Won't do
 

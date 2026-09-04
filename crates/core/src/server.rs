@@ -2170,10 +2170,15 @@ mod tests {
         .await
         .expect("ws send shell_input");
 
-        // Drain frames for up to 3s collecting `type` values; assert
-        // the canonical sequence shows up.
+        // Drain frames collecting `type` values; assert the canonical
+        // sequence shows up. The deadline is a *ceiling*, not a wait —
+        // the loop breaks the moment `chat_done` lands, so a generous
+        // one costs a passing run nothing. 3s was tight enough to lose
+        // roughly one run in five (~1 in 3 under the full suite's load),
+        // and the failure read as "saw: [initial_state]" — nothing had
+        // arrived yet, not a wrong value.
         let mut seen: Vec<String> = Vec::new();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
                 Ok(Some(Ok(WsMessage::Text(text)))) => {

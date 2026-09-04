@@ -4,7 +4,13 @@
 //! These were Gemini-only (`tools/gemini_image.rs`); they now resolve a
 //! `model` (+ optional `provider`) to a backend via [`crate::media`] and
 //! call through the `ImageProvider` trait. Backends: `gemini`
-//! (gemini-3.1-flash-image / -pro-image) and `openai` (gpt-image-2).
+//! (gemini-3.1-flash-image / -pro-image), `openai` (gpt-image-2), `qwen`
+//! (qwen-image-2.0/3.0) and `iapp` (iapp-image-generation).
+//!
+//! `text` + `font` are iApp-only passthroughs — literal copy the
+//! provider TYPESETS rather than the model drawing it. They ride on
+//! `ImageRequest` because that is the seam both tools already build; the
+//! other providers ignore them.
 //!
 //! Both tools stay **opt-in**: registered only when
 //! `imageToolsEnabled: true` in `.thclaws/settings.json`. They no longer
@@ -26,6 +32,22 @@ use crate::types::ToolResultContent;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+/// String-array param as `Vec<String>`, tolerating the single-string
+/// form — models routinely send `"text": "one line"` where the schema
+/// asks for an array, and rejecting that would be a pointless retry.
+fn opt_lines(input: &Value, key: &str) -> Vec<String> {
+    match input.get(key) {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+        Some(Value::String(s)) if !s.trim().is_empty() => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
 
 fn opt(input: &Value, key: &str) -> String {
     input
@@ -68,9 +90,33 @@ Gemini: `flash` (default; gemini-3.1-flash-image) or `pro` (gemini-3-pro-image).
 OpenAI: `gpt-image-2` (alias `openai`). Qwen: `qwen-image-3.0` (alias `qwen-3`) or \
 `qwen-image-3.0-pro` — newest, best at dense layouts and small text; `qwen-image-2.0` \
 (alias `qwen`) / `-pro` remain. Strong at multi-image editing + text rendering. \
-Default: flash.";
-const PROVIDER_DESC: &str = "Optional explicit provider (`gemini` | `openai` | `qwen`). \
-Usually omit — it's inferred from `model`.";
+iApp: `iapp` (iapp-image-generation) — Thai-first; the only backend that typesets \
+Thai copy correctly, via the `text` + `font` params. Default: flash.";
+const PROVIDER_DESC: &str = "Optional explicit provider (`gemini` | `openai` | `qwen` \
+| `iapp`). Usually omit — it's inferred from `model`.";
+
+/// Schema fragment for the iApp-only text overlay. Shared by both tools
+/// so the font list can't drift between them; the enum comes straight
+/// from the provider's `FONTS` so it can't drift from what the API takes.
+fn text_overlay_schema() -> (Value, Value) {
+    let text = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "iApp only — literal lines of copy to TYPESET into the image \
+    (max 4 lines, 120 chars each). Use this for Thai text instead of describing it in the \
+    prompt: iApp sets it in a real font, while every diffusion model (including the other \
+    providers here) mangles Thai script. Ignored by gemini/openai/qwen."
+    });
+    let font = json!({
+        "type": "string",
+        "description": "iApp only — typeface for `text`. Default kanit-bold. Modern: \
+    kanit(-bold), prompt(-bold), athiti-bold, k2d-bold. Formal/document: sarabun(-bold), \
+    notosans. Serif: pridi, taviraj, notoserif. Friendly/rounded: mitr, itim. Technical: \
+    chakrapetch-bold. Handwriting/script: mali, sriracha, charm. Decorative: srisakdi.",
+        "enum": crate::media::providers::iapp::FONTS,
+    });
+    (text, font)
+}
 
 // ─── TextToImage ─────────────────────────────────────────────────
 
@@ -83,7 +129,8 @@ impl Tool for TextToImageTool {
     }
     fn description(&self) -> &'static str {
         "Generate a brand-new image from a text prompt. Multi-provider: \
-         Gemini (`flash` default, `pro`) or OpenAI (`gpt-image-2`). Output is \
+         Gemini (`flash` default, `pro`), OpenAI (`gpt-image-2`), Qwen, or iApp \
+         (`iapp` — Thai-first, typesets Thai copy via `text`/`font`). Output is \
          written to `output/img-<ts>-<sha8>.<ext>` and returned inline as an \
          image block. Requires `imageToolsEnabled: true` in \
          `.thclaws/settings.json`, plus the chosen provider's API key in env \
@@ -93,6 +140,7 @@ impl Tool for TextToImageTool {
          provider's nearest size/quality."
     }
     fn input_schema(&self) -> Value {
+        let (text, font) = text_overlay_schema();
         json!({
             "type": "object",
             "properties": {
@@ -101,7 +149,7 @@ impl Tool for TextToImageTool {
                     "description": "Description of the image. Be specific about subject, style, composition, colors. A 2–3 sentence brief beats a one-word tag."
                 },
                 "model": { "type": "string", "description": MODEL_DESC },
-                "provider": { "type": "string", "description": PROVIDER_DESC, "enum": ["gemini", "openai", "qwen"] },
+                "provider": { "type": "string", "description": PROVIDER_DESC, "enum": ["gemini", "openai", "qwen", "iapp"] },
                 "aspect_ratio": {
                     "type": "string",
                     "description": "Output aspect ratio. Default 16:9.",
@@ -109,9 +157,11 @@ impl Tool for TextToImageTool {
                 },
                 "size": {
                     "type": "string",
-                    "description": "Output size tier. Default 1K.",
+                    "description": "Output size tier. Default 1K. Ignored by iApp, whose sizes follow the aspect ratio.",
                     "enum": ["512", "1K", "2K"]
-                }
+                },
+                "text": text,
+                "font": font
             },
             "required": ["prompt"]
         })
@@ -139,6 +189,12 @@ impl Tool for TextToImageTool {
                 aspect
             },
             size: if size.is_empty() { "1K".into() } else { size },
+            text: opt_lines(&input, "text"),
+            font: input
+                .get("font")
+                .and_then(|v| v.as_str())
+                .filter(|f| !f.trim().is_empty())
+                .map(|f| f.to_string()),
         };
         let out = provider.generate(&req).await?;
         let path = save_image(&out.bytes, sniff_ext(&out.bytes))?;
@@ -157,7 +213,8 @@ impl Tool for ImageToImageTool {
     }
     fn description(&self) -> &'static str {
         "Edit or transform an existing image using a text prompt (edit mode). \
-         Multi-provider: Gemini (`flash`/`pro`), OpenAI (`gpt-image-2`), or Qwen \
+         Multi-provider: Gemini (`flash`/`pro`), OpenAI (`gpt-image-2`), iApp \
+         (`iapp`, Thai text), or Qwen \
          (`qwen-image-3.0`/`-pro`, newest; `qwen-image-2.0`/`-pro` also available — \
          strong at edits + text). Pass \
          `input_path` (a path under the workspace) + a `prompt` describing the \
@@ -168,6 +225,7 @@ impl Tool for ImageToImageTool {
          composition best."
     }
     fn input_schema(&self) -> Value {
+        let (text, font) = text_overlay_schema();
         json!({
             "type": "object",
             "properties": {
@@ -180,9 +238,11 @@ impl Tool for ImageToImageTool {
                     "description": "What to change. Be explicit about what should STAY the same — vague prompts produce drift."
                 },
                 "model": { "type": "string", "description": MODEL_DESC },
-                "provider": { "type": "string", "description": PROVIDER_DESC, "enum": ["gemini", "openai", "qwen"] },
+                "provider": { "type": "string", "description": PROVIDER_DESC, "enum": ["gemini", "openai", "qwen", "iapp"] },
                 "aspect_ratio": { "type": "string", "enum": ["1:1", "3:4", "4:3", "9:16", "16:9"] },
-                "size": { "type": "string", "enum": ["512", "1K", "2K"] }
+                "size": { "type": "string", "enum": ["512", "1K", "2K"] },
+                "text": text,
+                "font": font
             },
             "required": ["input_path", "prompt"]
         })
@@ -234,6 +294,12 @@ impl Tool for ImageToImageTool {
                 aspect
             },
             size: if size.is_empty() { "1K".into() } else { size },
+            text: opt_lines(&input, "text"),
+            font: input
+                .get("font")
+                .and_then(|v| v.as_str())
+                .filter(|f| !f.trim().is_empty())
+                .map(|f| f.to_string()),
         };
         let out = provider.generate(&req).await?;
         let out_path = save_image(&out.bytes, sniff_ext(&out.bytes))?;

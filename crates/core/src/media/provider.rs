@@ -33,6 +33,14 @@ pub struct ImageRequest {
     pub aspect_ratio: String,
     /// One of `512` `1K` `2K`.
     pub size: String,
+    /// Literal text lines to render *into* the image, typeset by the
+    /// provider rather than hallucinated by the diffusion model. Only
+    /// iApp has this; every other provider ignores it and relies on the
+    /// prompt. Empty ⇒ no text overlay.
+    pub text: Vec<String>,
+    /// Typeface id for [`Self::text`] (iApp only, e.g. `kanit-bold`).
+    /// `None` ⇒ the provider's default face.
+    pub font: Option<String>,
 }
 
 /// Result of a successful generation — the raw bytes of the first image.
@@ -272,8 +280,10 @@ pub fn resolve_endpoint(
 }
 
 /// First non-empty env var among `vars`, with wrapping-quote strip —
-/// the same defensive sanitisation provider keys get.
-fn resolve_native_key(vars: &[&str]) -> Option<String> {
+/// the same defensive sanitisation provider keys get. Shared with
+/// providers that have no gateway route yet (iApp) and so resolve a
+/// native key directly instead of going through [`resolve_endpoint`].
+pub(crate) fn resolve_native_key(vars: &[&str]) -> Option<String> {
     for var in vars {
         if let Ok(raw) = std::env::var(var) {
             let trimmed = raw.trim();

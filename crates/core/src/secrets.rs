@@ -133,6 +133,10 @@ pub const SERVICE_KEYS: &[(&str, &str)] = &[
     // LTX_API_KEY off the process env (`media::provider::resolve_endpoint`),
     // so it has to reach env the same way the search keys do.
     ("ltx", "LTX_API_KEY"),
+    // iApp image generation is BYOK-only (no gateway route), so the key
+    // has to reach the process env for `IappImageProvider::generate` to
+    // find it — same path as LTX above.
+    ("iapp", "IAPP_API_KEY"),
 ];
 
 /// Look up the env var for a non-LLM service key by account name.
@@ -476,8 +480,10 @@ mod tests {
         // Service keys (web search) surface in the same modal.
         assert!(names.contains(&"tavily"));
         assert!(names.contains(&"brave-search"));
-        // …and so do non-search runtime services like the LTX video key.
+        // …and so do non-search runtime services like the LTX video key
+        // and the iApp image key.
         assert!(names.contains(&"ltx"));
+        assert!(names.contains(&"iapp"));
     }
 
     #[test]
@@ -492,6 +498,9 @@ mod tests {
         let ltx = s.iter().find(|k| k.provider == "ltx").unwrap();
         assert_eq!(ltx.kind, "service");
         assert_eq!(ltx.env_var, "LTX_API_KEY");
+        let iapp = s.iter().find(|k| k.provider == "iapp").unwrap();
+        assert_eq!(iapp.kind, "service");
+        assert_eq!(iapp.env_var, "IAPP_API_KEY");
         let anthropic = s.iter().find(|k| k.provider == "anthropic").unwrap();
         assert_eq!(anthropic.kind, "provider");
     }

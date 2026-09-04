@@ -19,15 +19,21 @@ const MODELS = {
     { value: "flash", label: "Gemini 3.1 Flash Image (fast)" },
     { value: "pro", label: "Gemini 3 Pro Image" },
     { value: "gpt-image-2", label: "OpenAI GPT Image 2" },
+    { value: "qwen-image-3.0", label: "Qwen Image 3.0" },
+    { value: "qwen-image-3.0-pro", label: "Qwen Image 3.0 Pro" },
     { value: "qwen-image-2.0", label: "Qwen Image 2.0" },
     { value: "qwen-image-2.0-pro", label: "Qwen Image 2.0 Pro" },
+    { value: "iapp", label: "iApp Image — Thai text" },
   ],
   image2image: [
     { value: "flash", label: "Gemini 3.1 Flash Image (fast)" },
     { value: "pro", label: "Gemini 3 Pro Image" },
     { value: "gpt-image-2", label: "OpenAI GPT Image 2" },
+    { value: "qwen-image-3.0", label: "Qwen Image 3.0" },
+    { value: "qwen-image-3.0-pro", label: "Qwen Image 3.0 Pro" },
     { value: "qwen-image-2.0", label: "Qwen Image 2.0" },
     { value: "qwen-image-2.0-pro", label: "Qwen Image 2.0 Pro" },
+    { value: "iapp", label: "iApp Image — Thai text" },
   ],
   text2video: [
     { value: "fast", label: "Veo 3.1 Fast" },
@@ -112,6 +118,10 @@ const durationSel = $("duration");
 const resolutionField = $("resolution-field");
 const resolutionSel = $("resolution");
 const fpsField = $("fps-field");
+const iappTextField = $("iapp-text-field");
+const iappTextEl = $("iapp-text");
+const iappFontField = $("iapp-font-field");
+const iappFontSel = $("iapp-font");
 const fpsSel = $("fps");
 const audioField = $("audio-field");
 const audioEl = $("generate-audio");
@@ -180,6 +190,21 @@ function applyLtxOnlyFields() {
   }
 }
 
+/// The picked model is iApp — the only image backend that TYPESETS text
+/// rather than letting the diffusion model draw it.
+function isIapp() {
+  return !isVideo() && !isSpeech() && String(modelSel.value || "").startsWith("iapp");
+}
+
+/// `text` + `font` exist only on iApp. Showing them for Gemini/OpenAI/Qwen
+/// would promise Thai copy those models can only garble, so they follow the
+/// model picker the same way the LTX-only knobs do.
+function applyIappOnlyFields() {
+  const iapp = isIapp();
+  iappTextField.hidden = !iapp;
+  iappFontField.hidden = !iapp;
+}
+
 function setStatus(text, kind) {
   statusEl.textContent = text;
   statusEl.className = "status" + (kind ? " " + kind : "");
@@ -225,6 +250,7 @@ function applyMode() {
   }
 
   applyLtxOnlyFields();
+  applyIappOnlyFields();
 
   // Speech has no prompt to enhance — the text IS the deliverable.
   enhanceBtn.hidden = isSpeech();
@@ -591,6 +617,22 @@ async function generate() {
     }
   } else {
     args.size = $("size").value;
+    if (isIapp()) {
+      // Only iApp reads these; sending them to Gemini/OpenAI/Qwen would be noise.
+      const lines = iappTextEl.value
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (lines.length > 4) {
+        setStatus("iApp renders at most 4 lines of text.", "error");
+        iappTextEl.focus();
+        return;
+      }
+      if (lines.length) {
+        args.text = lines;
+        args.font = iappFontSel.value;
+      }
+    }
   }
 
   if (needsInput()) {
@@ -769,7 +811,10 @@ searchEl.addEventListener("input", () => {
   renderGallery();
 });
 
-modelSel.addEventListener("change", applyLtxOnlyFields);
+modelSel.addEventListener("change", () => {
+  applyLtxOnlyFields();
+  applyIappOnlyFields();
+});
 generateBtn.addEventListener("click", generate);
 enhanceBtn.addEventListener("click", enhancePrompt);
 clearEnhancedBtn.addEventListener("click", discardEnhanced);

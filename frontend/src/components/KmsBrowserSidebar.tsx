@@ -7,6 +7,7 @@ import {
   Link2,
   Network,
   Plus,
+  Search,
 } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { KmsCreateModal, type KmsCreateMode } from "./KmsCreateModal";
@@ -31,6 +32,11 @@ import { KmsCreateModal, type KmsCreateMode } from "./KmsCreateModal";
 type BrowseFile = {
   name: string;
   bytes: number;
+  /// On-disk extension. Always "md" for pages; sources carry whatever
+  /// they were ingested as, shown as a badge so a `.json` archive is
+  /// distinguishable from a `.md` one at a glance. Optional so an
+  /// older backend that doesn't send it still renders.
+  ext?: string;
 };
 
 type FileKind = "page" | "source";
@@ -73,6 +79,9 @@ export function KmsBrowserSidebar({
     selected.name === name;
   const [pages, setPages] = useState<BrowseFile[] | null>(null);
   const [sources, setSources] = useState<BrowseFile[]>([]);
+  /// Name filter. A KMS of any real size is unbrowsable by scrolling,
+  /// and the sidebar had no way to narrow the list at all.
+  const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
   // Page create / rename / delete modal (null = closed). The backend
@@ -122,6 +131,14 @@ export function KmsBrowserSidebar({
     send({ type: "kms_browse", name: kmsName });
     return unsub;
   }, [kmsName]);
+
+  const needle = filter.trim().toLowerCase();
+  const matches = (f: BrowseFile) =>
+    needle === "" ||
+    f.name.toLowerCase().includes(needle) ||
+    (f.ext ?? "").toLowerCase().includes(needle);
+  const shownPages = (pages ?? []).filter(matches);
+  const shownSources = sources.filter(matches);
 
   if (dismissed) {
     return (
@@ -196,6 +213,32 @@ export function KmsBrowserSidebar({
         </div>
       </div>
 
+      <div className="px-2 py-1.5 border-b" style={{ borderColor: "var(--border)" }}>
+        <div className="relative">
+          <Search
+            size={11}
+            className="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"
+            style={{ color: "var(--text-secondary)" }}
+          />
+          <input
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setFilter("");
+            }}
+            placeholder="Filter pages & sources…"
+            spellCheck={false}
+            className="w-full rounded pl-6 pr-2 py-1 text-xs outline-none"
+            style={{
+              background: "var(--bg-secondary, rgba(255,255,255,0.05))",
+              color: "var(--text-primary)",
+              border: "1px solid var(--border)",
+            }}
+          />
+        </div>
+      </div>
+
       <div className="flex-1 overflow-auto">
         {error && (
           <div
@@ -253,17 +296,21 @@ export function KmsBrowserSidebar({
             </button>
             <Section
               icon={<FileText size={11} />}
-              title={`Pages (${pages.length})`}
+              title={
+                filter
+                  ? `Pages (${shownPages.length}/${pages.length})`
+                  : `Pages (${pages.length})`
+              }
             >
-              {pages.length === 0 ? (
+              {shownPages.length === 0 ? (
                 <div
                   className="px-3 py-1 text-xs italic"
                   style={{ color: "var(--text-secondary)" }}
                 >
-                  No pages yet
+                  {pages.length === 0 ? "No pages yet" : "No matching pages"}
                 </div>
               ) : (
-                pages.map((p) => (
+                shownPages.map((p) => (
                   <FileRow
                     key={p.name}
                     file={p}
@@ -281,17 +328,23 @@ export function KmsBrowserSidebar({
             </Section>
             <Section
               icon={<Link2 size={11} />}
-              title={`Sources (${sources.length})`}
+              title={
+                filter
+                  ? `Sources (${shownSources.length}/${sources.length})`
+                  : `Sources (${sources.length})`
+              }
             >
-              {sources.length === 0 ? (
+              {shownSources.length === 0 ? (
                 <div
                   className="px-3 py-1 text-xs italic"
                   style={{ color: "var(--text-secondary)" }}
                 >
-                  No cached sources
+                  {sources.length === 0
+                    ? "No cached sources"
+                    : "No matching sources"}
                 </div>
               ) : (
-                sources.map((s) => (
+                shownSources.map((s) => (
                   <FileRow
                     key={s.name}
                     file={s}
@@ -435,9 +488,26 @@ function FileRow({
         if (!active)
           (e.currentTarget as HTMLButtonElement).style.background = activeBg;
       }}
-      title={active ? `${file.name} (currently viewing)` : file.name}
+      title={
+        active
+          ? `${file.name}${file.ext ? "." + file.ext : ""} (currently viewing)`
+          : `${file.name}${file.ext ? "." + file.ext : ""}`
+      }
     >
       <span className="truncate flex-1 text-xs">{file.name}</span>
+      {file.ext && file.ext !== "md" && (
+        <span
+          className="ml-2 shrink-0 rounded px-1"
+          style={{
+            fontSize: "9px",
+            color: "var(--text-secondary)",
+            border: "1px solid var(--border)",
+            textTransform: "uppercase",
+          }}
+        >
+          {file.ext}
+        </span>
+      )}
       <span
         className="ml-2 shrink-0"
         style={{

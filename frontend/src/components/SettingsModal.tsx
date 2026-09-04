@@ -68,6 +68,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   serpapi: "SerpAPI (Google Search)",
   hal: "HAL Public API (YouTube transcript + Web scrape)",
   ltx: "LTX (video generation + native audio)",
+  iapp: "iApp (Thai image generation)",
 };
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {

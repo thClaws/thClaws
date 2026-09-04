@@ -3109,7 +3109,8 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                     parts.drain(i..=i + 1);
                 } else {
                     return SlashCommand::Unknown(
-                        "usage: /kms ingest <kms> <file-or-url> [as <alias>] [--force]".into(),
+                        "usage: /kms ingest <kms> <file-or-dir-or-url> [as <alias>] [--force]"
+                            .into(),
                     );
                 }
             }
@@ -3150,7 +3151,9 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                     }
                 }
                 _ => SlashCommand::Unknown(
-                    "usage: /kms ingest <kms> <file-or-url-or-$> [as <alias>] [--force]".into(),
+                    "usage: /kms ingest <kms> <file-or-dir-or-url-or-$> [as <alias>] [--force]\n\
+                     a directory ingests every supported file under it (alias derived from the path)"
+                        .into(),
                 ),
             }
         }
@@ -10061,6 +10064,25 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             .unwrap_or_else(|_| std::path::PathBuf::from("."))
                             .join(&source)
                     };
+                    // A directory ingests every supported file under it.
+                    if source.is_dir() {
+                        match crate::kms::ingest_dir(&k, &source, force) {
+                            Ok(r) => {
+                                println!(
+                                    "{COLOR_GREEN}ingested {} → {}{COLOR_RESET}",
+                                    source.display(),
+                                    r.summary()
+                                );
+                                for (path, why) in r.skipped.iter().take(10) {
+                                    println!("{COLOR_DIM}  skipped {path}: {why}{COLOR_RESET}");
+                                }
+                            }
+                            Err(e) => println!(
+                                "{COLOR_YELLOW}directory ingest failed: {e}{COLOR_RESET}"
+                            ),
+                        }
+                        continue;
+                    }
                     match crate::kms::ingest(&k, &source, alias.as_deref(), force) {
                         Ok(r) => {
                             let verb = if r.overwrote { "replaced" } else { "ingested" };
@@ -10075,9 +10097,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 String::new()
                             };
                             println!(
-                                "{COLOR_DIM}{verb} → {} — {}{images}{cascade}{COLOR_RESET}",
+                                "{COLOR_DIM}{verb} → {} — {}{images}{cascade}{}{COLOR_RESET}",
                                 r.target.display(),
                                 r.summary,
+                                r.notes(),
                             );
                         }
                         Err(e) => {
@@ -10220,28 +10243,15 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         println!("{COLOR_YELLOW}no KMS named '{name}'{COLOR_RESET}");
                         continue;
                     };
-                    #[cfg(feature = "kms_search_index")]
-                    {
-                        println!("{COLOR_DIM}/kms reindex {name} — rebuilding…{COLOR_RESET}");
-                        match crate::kms_search_index::full_rebuild(&k.root) {
-                            Ok(n) => println!(
-                                "{COLOR_GREEN}/kms reindex {name} — indexed {n} page(s){COLOR_RESET}"
-                            ),
-                            Err(e) => println!(
-                                "{COLOR_YELLOW}/kms reindex {name} failed: {e}{COLOR_RESET}"
-                            ),
+                    println!("{COLOR_DIM}/kms reindex {name} — rebuilding…{COLOR_RESET}");
+                    match crate::kms::reindex(&k) {
+                        Ok(r) => println!(
+                            "{COLOR_GREEN}/kms reindex {name} — {}{COLOR_RESET}",
+                            r.summary()
+                        ),
+                        Err(e) => {
+                            println!("{COLOR_YELLOW}/kms reindex {name} failed: {e}{COLOR_RESET}")
                         }
-                    }
-                    #[cfg(not(feature = "kms_search_index"))]
-                    {
-                        let _ = k;
-                        println!(
-                            "{COLOR_YELLOW}/kms reindex requires the kms_search_index \
-                             feature; this binary was built without it. The released \
-                             thClaws binaries include it — `cargo install thclaws-core \
-                             --features kms_search_index` or use the official \
-                             release.{COLOR_RESET}"
-                        );
                     }
                 }
                 // M6.25 BUG #3: lint (CLI).

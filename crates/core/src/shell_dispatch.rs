@@ -2192,6 +2192,25 @@ pub async fn dispatch(
             } else {
                 state.cwd.join(&source)
             };
+            // A directory ingests every supported file under it. Seeding
+            // a KMS from a notes folder or a docs tree was otherwise a
+            // shell loop over single-file ingests.
+            if source.is_dir() {
+                match crate::kms::ingest_dir(&k, &source, force) {
+                    Ok(r) => {
+                        let mut msg = format!("ingested {} → {}", source.display(), r.summary());
+                        for (path, why) in r.skipped.iter().take(10) {
+                            msg.push_str(&format!("\n  skipped {path}: {why}"));
+                        }
+                        if r.skipped.len() > 10 {
+                            msg.push_str(&format!("\n  … and {} more", r.skipped.len() - 10));
+                        }
+                        emit(events_tx, msg);
+                    }
+                    Err(e) => emit(events_tx, format!("directory ingest failed: {e}")),
+                }
+                return;
+            }
             match crate::kms::ingest(&k, &source, alias.as_deref(), force) {
                 Ok(r) => {
                     let verb = if r.overwrote { "replaced" } else { "ingested" };
@@ -2208,9 +2227,10 @@ pub async fn dispatch(
                     emit(
                         events_tx,
                         format!(
-                            "{verb} → {} — {}{images}{cascade}",
+                            "{verb} → {} — {}{images}{cascade}{}",
                             r.target.display(),
-                            r.summary
+                            r.summary,
+                            r.notes()
                         ),
                     );
                 }
@@ -2239,9 +2259,10 @@ pub async fn dispatch(
                     emit(
                         events_tx,
                         format!(
-                            "{verb} {url} → {} — {}{cascade}",
+                            "{verb} {url} → {} — {}{cascade}{}",
                             r.target.display(),
-                            r.summary
+                            r.summary,
+                            r.notes()
                         ),
                     );
                 }
@@ -2280,10 +2301,11 @@ pub async fn dispatch(
                     emit(
                         events_tx,
                         format!(
-                            "{verb} {} → {} — {}{cascade}",
+                            "{verb} {} → {} — {}{cascade}{}",
                             source.display(),
                             r.target.display(),
-                            r.summary
+                            r.summary,
+                            r.notes()
                         ),
                     );
                 }
@@ -2602,33 +2624,16 @@ pub async fn dispatch(
             emit(events_tx, out);
         }
         SlashCommand::KmsReindex(name) => {
-            // dev-plan/36 Tier 3.B: rebuild the BM25 index from
-            // pages/ on disk. Mirrors the CLI handler in repl.rs.
+            // Rebuilds all three derived artefacts (source catalogue,
+            // index.md, BM25 index). Mirrors the CLI handler in repl.rs.
             let Some(k) = crate::kms::resolve(&name) else {
                 emit(events_tx, format!("no KMS named '{name}'"));
                 return;
             };
-            #[cfg(feature = "kms_search_index")]
-            {
-                emit(events_tx, format!("/kms reindex {name} — rebuilding…"));
-                match crate::kms_search_index::full_rebuild(&k.root) {
-                    Ok(n) => emit(
-                        events_tx,
-                        format!("/kms reindex {name} — indexed {n} page(s)"),
-                    ),
-                    Err(e) => emit(events_tx, format!("/kms reindex {name} failed: {e}")),
-                }
-            }
-            #[cfg(not(feature = "kms_search_index"))]
-            {
-                let _ = k;
-                emit(
-                    events_tx,
-                    "/kms reindex requires the kms_search_index feature; \
-                     this binary was built without it. Use the official \
-                     thClaws release (which ships with the feature on)."
-                        .to_string(),
-                );
+            emit(events_tx, format!("/kms reindex {name} — rebuilding…"));
+            match crate::kms::reindex(&k) {
+                Ok(r) => emit(events_tx, format!("/kms reindex {name} — {}", r.summary())),
+                Err(e) => emit(events_tx, format!("/kms reindex {name} failed: {e}")),
             }
         }
         SlashCommand::KmsLint(name) => {

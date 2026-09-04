@@ -68,10 +68,12 @@ pub mod goal_state;
 pub mod gui;
 pub mod gui_shell;
 pub mod hooks;
+pub mod html_md;
 pub mod instructions;
 #[cfg(feature = "gui")]
 pub mod ipc;
 pub mod kms;
+pub mod kms_sources;
 // dev-plan/36 Tier 1: BM25-ranked KMS search + native Thai segmenter.
 // Both gated behind the `kms_search_index` Cargo feature (opt-in
 // forever per D3) so users / operators without KMSes don't pay the

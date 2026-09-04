@@ -150,6 +150,7 @@ pub async fn spawn_side_channel(
     // event) so we can still test it after the match to decide whether
     // to refresh the KMS sidebar.
     let agent_name_for_refresh = agent_name.clone();
+    let is_artifact_agent = agent_name == ARTIFACT_AGENT;
     let events_tx_for_task = events_tx.clone();
     let cancel_for_task = cancel.clone();
 
@@ -159,6 +160,7 @@ pub async fn spawn_side_channel(
         let mut stream = Box::pin(stream);
         let mut full_text = String::new();
         let mut errored: Option<String> = None;
+        let mut artifact_dir_seen: Option<String> = None;
 
         loop {
             let next = tokio::select! {
@@ -185,6 +187,11 @@ pub async fn spawn_side_channel(
                     // side-channel agents show WHAT each step is doing, not just
                     // that a tool ran.
                     let label = crate::tool_display::tool_label(&name, &input);
+                    if is_artifact_agent {
+                        if let Some(dir) = artifact_dir(&name, &input) {
+                            artifact_dir_seen = Some(dir);
+                        }
+                    }
                     let _ = events_tx_for_task.send(ViewEvent::SideChannelToolCall {
                         id: id_for_task.clone(),
                         tool_name: name,
@@ -209,11 +216,15 @@ pub async fn spawn_side_channel(
                 });
             }
             None => {
+                let result_text = match artifact_dir_seen.as_deref() {
+                    Some(dir) => ensure_dir_first_line(&full_text, dir),
+                    None => full_text,
+                };
                 let _ = events_tx_for_task.send(ViewEvent::SideChannelDone {
                     id: id_for_task.clone(),
                     agent_name: agent_name_for_task,
                     duration_ms,
-                    result_text: full_text,
+                    result_text,
                 });
             }
         }
@@ -352,6 +363,56 @@ fn grant_file_tools_for_sidechannel(def: &mut crate::agent_defs::AgentDef) {
         if !denied && !present {
             def.tools.push(t.to_string());
         }
+    }
+}
+
+/// Agent whose result the GUI is expected to open in the Files tab, so
+/// its output folder has to survive the chat's first-line-only render.
+const ARTIFACT_AGENT: &str = "content-extractor";
+
+/// Folder an artifact-producing run landed in — the parent of a `.md`
+/// path it wrote (or handed to `FetchImages`). `articles/<slug>/<slug>.md`
+/// and the `FetchImages` rewrite of the same file both yield the slug
+/// folder, so the last one seen is the article's home.
+fn artifact_dir(name: &str, input: &serde_json::Value) -> Option<String> {
+    let key = match name {
+        "Write" | "Edit" => "file_path",
+        "FetchImages" => "markdown_path",
+        _ => return None,
+    };
+    let path = input
+        .get(key)
+        .or_else(|| input.get("path"))
+        .and_then(|v| v.as_str())?;
+    if !path.to_ascii_lowercase().ends_with(".md") {
+        return None;
+    }
+    let parent = std::path::Path::new(path).parent()?.to_str()?;
+    (!parent.is_empty()).then(|| parent.to_string())
+}
+
+/// Splice the output folder onto the first line of a side-channel result.
+///
+/// `ChatView` renders only the first non-blank line of `result_text`, so an
+/// agent that opens with prose leaves the user no path to open. The prompt
+/// asks for a leading status line; this makes it hold even when the model
+/// ignores it. A first line that already names the folder is left alone.
+fn ensure_dir_first_line(result: &str, dir: &str) -> String {
+    let body = result.trim_start();
+    if body.is_empty() {
+        return format!("{dir}/");
+    }
+    let (first, rest) = match body.split_once('\n') {
+        Some((f, r)) => (f, Some(r)),
+        None => (body, None),
+    };
+    if first.contains(dir) {
+        return result.to_string();
+    }
+    let head = format!("{dir}/ — {}", first.trim());
+    match rest {
+        Some(rest) => format!("{head}\n{rest}"),
+        None => head,
     }
 }
 
@@ -688,5 +749,64 @@ mod tests {
         grant_file_tools_for_sidechannel(&mut denied);
         assert!(!denied.tools.contains(&"Write".to_string()));
         assert!(!denied.tools.contains(&"Edit".to_string()));
+    }
+
+    /// `/extract`'s folder has to reach the chat's first-line-only render
+    /// even when the model opens with prose instead of the status line.
+    #[test]
+    fn artifact_dir_first_line_is_spliced_in() {
+        let prose = "I clipped the article for you.\nImages: 8 downloaded.";
+        assert_eq!(
+            ensure_dir_first_line(prose, "articles/thai-nlp"),
+            "articles/thai-nlp/ — I clipped the article for you.\nImages: 8 downloaded."
+        );
+
+        // Already led with the folder → left exactly as the agent wrote it.
+        let good = "articles/thai-nlp/ — thai-nlp.md · 8 images (1 failed)";
+        assert_eq!(ensure_dir_first_line(good, "articles/thai-nlp"), good);
+
+        // Empty result still names the folder.
+        assert_eq!(
+            ensure_dir_first_line("   \n\n", "articles/x"),
+            "articles/x/"
+        );
+
+        // Single line, no trailing body.
+        assert_eq!(
+            ensure_dir_first_line("done", "articles/x"),
+            "articles/x/ — done"
+        );
+    }
+
+    #[test]
+    fn artifact_dir_reads_the_md_parent_only() {
+        use serde_json::json;
+
+        assert_eq!(
+            artifact_dir("Write", &json!({"file_path": "articles/loops/loops.md"})),
+            Some("articles/loops".to_string())
+        );
+        assert_eq!(
+            artifact_dir(
+                "FetchImages",
+                &json!({"markdown_path": "articles/loops/loops.md"})
+            ),
+            Some("articles/loops".to_string())
+        );
+        // Non-markdown artifacts (the saved raw source) don't name the folder.
+        assert_eq!(
+            artifact_dir("Write", &json!({"file_path": "articles/loops/source.html"})),
+            None
+        );
+        // A bare filename has no parent to report.
+        assert_eq!(
+            artifact_dir("Write", &json!({"file_path": "notes.md"})),
+            None
+        );
+        // Unrelated tools are ignored.
+        assert_eq!(
+            artifact_dir("WebFetch", &json!({"url": "https://x/y.md"})),
+            None
+        );
     }
 }
