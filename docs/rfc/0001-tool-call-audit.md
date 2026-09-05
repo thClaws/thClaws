@@ -1,6 +1,6 @@
 # RFC 0001 — Client-side tool-call audit (`policies.audit`)
 
-**Status:** Accepted design, not yet implemented · **Tracking:** [#203](https://github.com/thClaws/thClaws/issues/203) · **Phase:** 5 (see [ENTERPRISE.md](../../ENTERPRISE.md#status-by-phase))
+**Status:** Implemented (ships in v0.120.0; `crates/core/src/audit/`) · **Tracking:** [#203](https://github.com/thClaws/thClaws/issues/203) · **Phase:** 5 (see [ENTERPRISE.md](../../ENTERPRISE.md#status-by-phase))
 
 This is the version of the Phase 5 proposal from #203 that maintainers
 will merge. It fixes a few assumptions that did not match the code and
@@ -96,7 +96,7 @@ that every emitted record validates.
 | `actor` | object | ✓ | `{kind: "sso" \| "multiuser" \| "os", id: string}` — `sso` = email/sub from the active OIDC session; `multiuser` = `x-thclaws-user`; `os` = login name |
 | `host` | object | ✓ | `{engine: "0.120.0", policy_fp: "<sha256 prefix>", machine: "<stable hash>"}` |
 | `decision` | enum | tool events | `allow` · `allow_for_session` · `deny` |
-| `decided_by` | enum | tool events | `auto` · `repl` · `gui` · `bot:line` · `bot:telegram` · `hook` · `policy` |
+| `decided_by` | enum | tool events | `auto` · `repl` · `gui` · `bot:line` · `bot:telegram` · `bot:messenger` · `hook` · `policy` (programmatic sinks) |
 | `deny_reason` | string | deny only | hook stderr / policy message, ≤256 bytes |
 | `confine` | object | Bash only | `{mode: "workspace" \| "strict" \| "off", enforced: bool}` — `enforced:false` = platform confiner unavailable, ran unconfined |
 | `targets` | string[] | file tools | workspace-relative paths touched (Write/Edit/Read/Glob targets); no content |
@@ -150,7 +150,7 @@ JSON Schema (draft 2020-12):
     "host": {"type": "object", "required": ["engine"], "additionalProperties": false,
              "properties": {"engine": {"type": "string"}, "policy_fp": {"type": "string"}, "machine": {"type": "string"}}},
     "decision": {"enum": ["allow", "allow_for_session", "deny"]},
-    "decided_by": {"enum": ["auto", "repl", "gui", "bot:line", "bot:telegram", "hook", "policy"]},
+    "decided_by": {"enum": ["auto", "repl", "gui", "bot:line", "bot:telegram", "bot:messenger", "hook", "policy"]},
     "deny_reason": {"type": "string", "maxLength": 256},
     "confine": {"type": "object", "required": ["mode", "enforced"], "additionalProperties": false,
                 "properties": {"mode": {"enum": ["workspace", "strict", "off"]}, "enforced": {"type": "boolean"}}},
@@ -175,13 +175,14 @@ JSON Schema (draft 2020-12):
 
 ## Work split
 
-Maintainers are implementing v1 end to end (schema, record type, sink
-trait, `file` + `http` sinks, `AuditPolicy`, the emit sites in
-`agent.rs`, gateway correlation headers, `/policy status`) so the
-hosted and desktop paths land together. That PR will be linked from
-#203 when it opens.
+v1 is implemented by the maintainers end to end and ships in v0.120.0:
+`crates/core/src/audit/` (`record.rs`, `record.v1.schema.json`,
+`sink.rs`, `file.rs`, `http.rs`), `policy::AuditPolicy`, the emit sites
+in `agent.rs`, gateway correlation headers on the org-gateway provider,
+`Tool::audit_summary` for Bash / Write / Edit / Read / MCP, and
+`/policy status`.
 
-Open for contribution once v1 is merged:
+Open for contribution:
 
 | Piece | Notes |
 |---|---|
