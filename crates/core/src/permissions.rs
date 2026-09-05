@@ -238,6 +238,12 @@ pub trait ApprovalSink: Send + Sync {
     /// M6.20 BUG M2. Default is a no-op for sinks that don't track
     /// session-scoped state (Auto/Deny/Scripted).
     fn reset_session_flag(&self) {}
+
+    /// `decided_by` value for the audit record (RFC 0001). Programmatic
+    /// sinks report `policy`.
+    fn audit_kind(&self) -> &'static str {
+        "policy"
+    }
 }
 
 /// Always-allow sink. Matches `PermissionMode::Auto` behavior but can also be
@@ -246,6 +252,10 @@ pub struct AutoApprover;
 
 #[async_trait]
 impl ApprovalSink for AutoApprover {
+    fn audit_kind(&self) -> &'static str {
+        "auto"
+    }
+
     async fn approve(&self, _req: &ApprovalRequest) -> ApprovalDecision {
         ApprovalDecision::Allow
     }
@@ -322,6 +332,10 @@ impl Default for ReplApprover {
 
 #[async_trait]
 impl ApprovalSink for ReplApprover {
+    fn audit_kind(&self) -> &'static str {
+        "repl"
+    }
+
     fn reset_session_flag(&self) {
         self.session_allowed.store(false, Ordering::Relaxed);
     }
@@ -439,6 +453,10 @@ impl GuiApprover {
 
 #[async_trait]
 impl ApprovalSink for GuiApprover {
+    fn audit_kind(&self) -> &'static str {
+        "gui"
+    }
+
     fn reset_session_flag(&self) {
         self.session_allowed.store(false, Ordering::Relaxed);
     }

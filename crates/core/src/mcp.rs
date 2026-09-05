@@ -1378,6 +1378,18 @@ impl Tool for McpTool {
         self.name
     }
 
+    fn audit_kind(&self) -> crate::audit::AuditToolKind {
+        crate::audit::AuditToolKind::Mcp
+    }
+
+    fn audit_mcp_server(&self) -> Option<&str> {
+        self.name.split(MCP_NAME_SEPARATOR).next()
+    }
+
+    fn audit_summary(&self, _input: &Value) -> Option<crate::tools::AuditSummary> {
+        Some(crate::tools::AuditSummary::text(self.bare))
+    }
+
     fn description(&self) -> &'static str {
         self.description
     }

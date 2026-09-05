@@ -148,6 +148,13 @@ impl Tool for ReadTool {
         "Read"
     }
 
+    fn audit_summary(&self, input: &Value) -> Option<super::AuditSummary> {
+        input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|p| super::AuditSummary::targets([p.to_string()]))
+    }
+
     fn parallelizable(&self) -> bool {
         true
     }

@@ -11,6 +11,13 @@ impl Tool for EditTool {
         "Edit"
     }
 
+    fn audit_summary(&self, input: &Value) -> Option<super::AuditSummary> {
+        input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|p| super::AuditSummary::targets([p.to_string()]))
+    }
+
     fn description(&self) -> &'static str {
         "Replace exactly one occurrence of `old_string` with `new_string` in a file. \
          Errors if `old_string` is not found or appears more than once, unless \

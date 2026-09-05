@@ -4023,6 +4023,7 @@ async fn handle_isolated_line(
     // Restore the real agent + session; drop the throwaway.
     state.agent = saved_agent;
     state.session = saved_session;
+    crate::audit::set_session(&state.session.id);
     if let Some(store) = state.session_store.as_ref() {
         let _ = store.delete(&throwaway_id);
     }

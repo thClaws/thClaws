@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thclaws.ai/schemas/audit.v1.json",
+  "type": "object",
+  "required": ["v", "ts", "event", "session_id", "turn", "actor", "host"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {"const": 1},
+    "ts": {"type": "string", "format": "date-time"},
+    "event": {"enum": ["tool_call", "tool_denied", "session_start", "session_end"]},
+    "session_id": {"type": "string"},
+    "turn": {"type": "integer", "minimum": 0},
+    "tool_use_id": {"type": "string"},
+    "tool": {"type": "string"},
+    "tool_kind": {"enum": ["builtin", "mcp", "plugin", "workflow"]},
+    "mcp_server": {"type": "string"},
+    "actor": {"type": "object", "required": ["kind", "id"], "additionalProperties": false,
+              "properties": {"kind": {"enum": ["sso", "multiuser", "os"]}, "id": {"type": "string"}}},
+    "host": {"type": "object", "required": ["engine"], "additionalProperties": false,
+             "properties": {"engine": {"type": "string"}, "policy_fp": {"type": "string"}, "machine": {"type": "string"}}},
+    "decision": {"enum": ["allow", "allow_for_session", "deny"]},
+    "decided_by": {"enum": ["auto", "repl", "gui", "bot:line", "bot:telegram", "bot:messenger", "hook", "policy"]},
+    "deny_reason": {"type": "string", "maxLength": 256},
+    "confine": {"type": "object", "required": ["mode", "enforced"], "additionalProperties": false,
+                "properties": {"mode": {"enum": ["workspace", "strict", "off"]}, "enforced": {"type": "boolean"}}},
+    "targets": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
+    "summary": {"type": "string", "maxLength": 256},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "is_error": {"type": "boolean"},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "dropped": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+  },
+  "allOf": [
+    {"if": {"properties": {"event": {"enum": ["tool_call", "tool_denied"]}}},
+     "then": {"required": ["tool_use_id", "tool", "tool_kind", "decision", "decided_by", "input_sha256"]}},
+    {"if": {"properties": {"event": {"const": "tool_call"}}},
+     "then": {"required": ["output_sha256", "is_error", "duration_ms"]}},
+    {"if": {"properties": {"event": {"const": "tool_denied"}}},
+     "then": {"properties": {"decision": {"const": "deny"}}}}
+  ]
+}

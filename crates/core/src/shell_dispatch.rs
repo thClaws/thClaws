@@ -1452,6 +1452,9 @@ pub async fn dispatch(
         }
 
         // ─── sso (EE Phase 4) ───────────────────────────────────────
+        SlashCommand::PolicyStatus => {
+            emit(events_tx, crate::policy::status_text());
+        }
         SlashCommand::Sso { sub } => {
             let policy = crate::policy::active()
                 .and_then(|a| a.policy.policies.sso.as_ref())

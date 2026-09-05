@@ -112,6 +112,16 @@ pub fn mode() -> ConfineMode {
     settings().mode
 }
 
+/// `(mode, enforced)` for the audit record: `enforced` is false when the
+/// mode is `off`, the platform has no confiner, or the confiner bailed at
+/// runtime and Bash fell back to unconfined.
+pub fn enforcement_state() -> (ConfineMode, bool) {
+    let m = mode();
+    let platform_ok = cfg!(any(target_os = "macos", target_os = "linux"));
+    let failed = CONFINE_RUNTIME_FAILED.load(std::sync::atomic::Ordering::Relaxed);
+    (m, m != ConfineMode::Off && platform_ok && !failed)
+}
+
 fn expand(s: &String) -> PathBuf {
     if let Some(rest) = s.strip_prefix("~/") {
         if let Some(h) = crate::util::home_dir() {

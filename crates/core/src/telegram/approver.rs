@@ -265,6 +265,10 @@ impl TelegramApprover {
 
 #[async_trait]
 impl ApprovalSink for TelegramApprover {
+    fn audit_kind(&self) -> &'static str {
+        "bot:telegram"
+    }
+
     async fn approve(&self, req: &ApprovalRequest) -> ApprovalDecision {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();

@@ -37,7 +37,7 @@ DB เก็บเป็น microcent ต่อ 1k token (`µ¢/kt`) สูต�
 
 context ที่มี **`?`** คือค่าที่ provider ไม่เคยประกาศ — เป็นค่า default ของ provider นั้นที่ใส่ไว้เพราะถ้าเว้นว่างจะทำให้ตัวเลือกโมเดลพัง ให้ถือเป็นขอบล่าง ไม่ใช่สเปกจริง
 
-630 โมเดล จาก 14 provider
+633 โมเดล จาก 14 provider
 
 ### Anthropic
 
@@ -121,6 +121,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `gpt-5.6-luna` | 1.05M | $0.25 | — | $1.50 |
 | `gpt-5.6-sol` | 1.05M | $5.00 | — | $25.00 |
 | `gpt-5.6-terra` | 1.05M | $2.50 | — | $15.00 |
+| `gpt-6-astra` | 922k | $12.50 | — | $62.50 |
 | `o1` | 200k | $18.75 | $9.38 | $75.00 |
 | `o1-2024-12-17` | 200k | $18.75 | $9.38 | $75.00 |
 | `o1-mini` | 128k | $1.38 | — | $5.50 |
@@ -231,11 +232,11 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `deepseek/deepseek-v3.1-terminus` | 164k | $0.34 | — | $1.25 |
 | `deepseek/deepseek-v3.2` | 131k | $0.34 | — | $0.50 |
 | `deepseek/deepseek-v3.2-exp` | 164k | $0.34 | — | $0.51 |
-| `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.22 |
+| `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.21 |
 | `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.08 | — | $0.22 |
-| `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.55 | — | $1.65 |
-| `deepseek/deepseek-v4-pro` | 1.04858M | $1.30 | — | $2.61 |
-| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $1.39 | — | $4.18 |
+| `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.28 | — | $0.83 |
+| `deepseek/deepseek-v4-pro` | 1.04858M | $1.06 | — | $2.12 |
+| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $0.72 | — | $2.17 |
 | `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
 | `google/gemini-2.5-flash` | 1.04858M | $0.38 | — | $3.12 |
 | `google/gemini-2.5-flash-lite` | 1.04858M | $0.12 | $0.01 | $0.50 |
@@ -265,13 +266,13 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `google/gemma-4-31b-it:free` | 262k | free | — | free |
 | `gryphe/mythomax-l2-13b` | 4k | $0.07 | — | $0.07 |
 | `ibm-granite/granite-4.0-h-micro` | 131k | $0.02 | — | $0.14 |
-| `ibm-granite/granite-4.1-8b` | 131k | $0.06 | — | $0.12 |
 | `ibm-granite/granite-4.2-8b` | 131k | $0.12 | — | $0.19 |
 | `inception/mercury-2` | 128k | $0.31 | $0.03 | $0.94 |
 | `inception/mercury-2.5-preview` | 260k | $0.05 | — | $0.19 |
 | `inclusionai/ling-3.0-flash` | 262k | $0.03 | — | $0.08 |
 | `inclusionai/ling-3.0-flash-fin` | 262k | $0.07 | — | $0.22 |
 | `inclusionai/ling-3.0-flash-fin:free` | 262k | free | — | free |
+| `inclusionai/ling-3.0-flash-sante:free` | 262k | free | — | free |
 | `kwaipilot/kat-coder-pro-v2` | 256k | $0.38 | — | $1.50 |
 | `kwaipilot/kat-coder-pro-v2.5` | 256k | $0.93 | — | $3.70 |
 | `liquid/lfm-2.5-2.6b:free` | 66k | free | — | free |
@@ -388,6 +389,8 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `openai/gpt-5.6-sol-pro` | 1.05M | $2.50 | — | $12.50 |
 | `openai/gpt-5.6-terra` | 1.05M | $2.50 | — | $15.00 |
 | `openai/gpt-5.6-terra-pro` | 1.05M | $2.50 | — | $15.00 |
+| `openai/gpt-6-astra` | 1.05M | $12.50 | — | $62.50 |
+| `openai/gpt-6-astra-pro` | 1.05M | $12.50 | — | $62.50 |
 | `openai/gpt-chat-latest` | 400k | $6.25 | — | $37.50 |
 | `openai/gpt-oss-120b` | 131k | $0.05 | — | $0.21 |
 | `openai/gpt-oss-20b` | 131k | $0.04 | — | $0.16 |
@@ -423,7 +426,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen2.5-vl-72b-instruct` | 32k | $1.00 | — | $1.25 |
 | `qwen/qwen3-14b` | 41k | $0.15 | — | $0.30 |
 | `qwen/qwen3-235b-a22b` | 131k | $0.57 | — | $2.27 |
-| `qwen/qwen3-235b-a22b-2507` | 262k | $0.11 | — | $0.44 |
+| `qwen/qwen3-235b-a22b-2507` | 262k | $0.11 | — | $0.69 |
 | `qwen/qwen3-235b-a22b-thinking-2507` | 131k | $0.29 | — | $2.88 |
 | `qwen/qwen3-30b-a3b` | 41k | $0.15 | — | $0.62 |
 | `qwen/qwen3-30b-a3b-instruct-2507` | 262k | $0.06 | — | $0.24 |
@@ -448,13 +451,13 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen3-vl-8b-thinking` | 131k | $0.22 | — | $2.62 |
 | `qwen/qwen3.5-122b-a10b` | 262k | $0.36 | — | $3.00 |
 | `qwen/qwen3.5-27b` | 262k | $0.24 | — | $1.95 |
-| `qwen/qwen3.5-35b-a3b` | 262k | $0.31 | — | $1.56 |
+| `qwen/qwen3.5-35b-a3b` | 262k | $0.10 | — | $0.94 |
 | `qwen/qwen3.5-397b-a17b` | 262k | $0.69 | — | $4.38 |
 | `qwen/qwen3.5-9b` | 262k | $0.12 | — | $0.19 |
 | `qwen/qwen3.5-flash-02-23` | 1M | $0.08 | — | $0.33 |
 | `qwen/qwen3.5-plus-02-15` | 1M | $0.33 | — | $1.95 |
 | `qwen/qwen3.5-plus-20260420` | 1M | $0.38 | — | $2.25 |
-| `qwen/qwen3.6-27b` | 262k | $0.75 | — | $4.50 |
+| `qwen/qwen3.6-27b` | 262k | $0.38 | — | $2.50 |
 | `qwen/qwen3.6-35b-a3b` | 262k | $0.12 | — | $1.12 |
 | `qwen/qwen3.6-flash` | 1M | $0.23 | — | $1.41 |
 | `qwen/qwen3.6-max-preview` | 262k | $1.28 | — | $7.70 |
@@ -465,7 +468,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen3.8-2.4t-a95b` | 1.04858M | $2.50 | — | $7.50 |
 | `qwen/qwen3.8-27b` | 1M | $0.53 | — | $3.75 |
 | `qwen/qwen3.8-flash` | 1M | $0.19 | — | $0.59 |
-| `qwen/qwen3.8-max` | 1M | $2.50 | — | $7.50 |
+| `qwen/qwen3.8-max-0902` | 1M | $2.50 | — | $7.50 |
 | `rekaai/reka-edge` | 16k | $0.12 | — | $0.12 |
 | `rekaai/reka-flash-3` | 66k | $0.12 | — | $0.25 |
 | `relace/relace-apply-3` | 256k | $1.06 | — | $1.56 |
@@ -481,7 +484,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `tencent/hy-mt2-1.8b` | 8k | $0.05 | — | $0.22 |
 | `tencent/hy-mt2-30b-a3b` | 8k | $0.09 | — | $0.37 |
 | `tencent/hy-mt2-7b` | 8k | $0.09 | — | $0.37 |
-| `tencent/hy3` | 262k | $0.17 | — | $0.66 |
+| `tencent/hy3` | 262k | $0.10 | — | $0.41 |
 | `tencent/hy3-preview` | 262k | $0.22 | — | $0.75 |
 | `tencent/hy4-preview` | 1.04858M | $1.04 | — | $3.13 |
 | `thedrummer/cydonia-24b-v4.1` | 131k | $0.38 | — | $0.62 |
@@ -524,7 +527,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `~anthropic/claude-sonnet-latest` | 1M | $2.50 | — | $12.50 |
 | `~google/gemini-flash-latest` | 1.04858M | $0.94 | $0.04 | $4.69 |
 | `~google/gemini-pro-latest` | 1.04858M | $2.50 | $0.16 | $15.00 |
-| `~moonshotai/kimi-latest` | 256k | $3.12 | — | $17.50 |
+| `~moonshotai/kimi-latest` | 256k | $3.19 | — | $15.94 |
 | `~openai/gpt-latest` | 1.05M | $2.50 | — | $12.50 |
 | `~openai/gpt-mini-latest` | 400k | $0.94 | — | $5.62 |
 

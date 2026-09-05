@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.120.0] — 2026-09-06
+
+Enterprise policies gain a client-side audit trail, and teammates are reaped cleanly on Windows.
+
+### Added
+- **`policies.audit` — client-side tool-call audit (Enterprise Phase 5).** A signed org policy can now record every tool call the agent makes: which tool, who approved it (`auto`, `repl`, `gui`, a LINE/Telegram bot, or a `pre_tool_use` hook), the Bash confine mode and whether it was actually enforced, the files a Write/Edit/Read touched, a 256-byte summary, timing, and SHA-256 digests of the input and output. Payloads never leave the session JSONL — the digests let an auditor verify a record against it. Denied calls are recorded too. Sinks: `file` (JSONL, strftime path rotation) and `http` (batched NDJSON to a collector, same `{{env:…}}` / `{{sso_token}}` auth templates as `gateway`). Fail-open: a sink outage never blocks a tool call; dropped counts are reported. With `correlate_gateway` the org-gateway provider sends `x-thclaws-session` / `x-thclaws-turn` so gateway and client logs join. Design: RFC 0001 in `docs/rfc/` and the `policies.audit` section of `ENTERPRISE.md`. (#203)
+- **`/policy status`** shows the active org policy — source file, issuer, expiry, which blocks are on — and each audit sink with its dropped-record count. REPL and GUI.
+
+### Fixed
+- **Teammates are reaped on Windows when the lead exits.** The lead now kills the background teammate processes it spawned through their own handles instead of relying on `pkill`, which doesn't exist on Windows; a mid-task teammate that rejects the graceful shutdown no longer lingers as an orphan. `pkill` remains as a Unix-only backstop for tmux panes and resumed teams. (#202)
+
+### Changed
+- **The model catalogue is refreshed ahead of the release**, with Appendix A regenerated to match.
+
 ## [0.119.0] — 2026-09-04
 
 iApp joins the image providers as the one backend that renders Thai text properly, `/extract` now names where it wrote, and the knowledge sources grow a provenance catalogue.

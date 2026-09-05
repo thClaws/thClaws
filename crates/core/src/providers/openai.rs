@@ -56,6 +56,9 @@ pub struct OpenAIProvider {
     /// Optional `tool_choice` body value (e.g. `"required"`). `None` omits
     /// it, leaving the provider's default (auto).
     tool_choice: Option<Value>,
+    /// Attach `x-thclaws-session` / `x-thclaws-turn` (audit RFC 0001).
+    /// Set only on the org-gateway provider built by `build_provider`.
+    gateway_correlation: bool,
 }
 
 impl OpenAIProvider {
@@ -70,7 +73,15 @@ impl OpenAIProvider {
             model_override: None,
             injected_tools: Vec::new(),
             tool_choice: None,
+            gateway_correlation: false,
         }
+    }
+
+    /// Send audit correlation headers with every request (org gateway
+    /// only; the audit layer decides whether they are actually on).
+    pub fn with_gateway_correlation(mut self) -> Self {
+        self.gateway_correlation = true;
+        self
     }
 
     /// Replace the request model with `model` before the wire call (the
@@ -470,10 +481,15 @@ impl OpenAIProvider {
     /// out so `stream` can issue a second attempt (image-stripped retry)
     /// without duplicating the header/auth wiring.
     async fn send_body(&self, body: &Value) -> Result<reqwest::Response> {
-        crate::multi_tenant::attach_member(self.client.post(&self.base_url))
+        let mut rb = crate::multi_tenant::attach_member(self.client.post(&self.base_url))
             .header(self.auth_header_name(), self.auth_header_value())
-            .header("content-type", "application/json")
-            .json(body)
+            .header("content-type", "application/json");
+        if self.gateway_correlation {
+            for (k, v) in crate::audit::correlation_headers() {
+                rb = rb.header(k, v);
+            }
+        }
+        rb.json(body)
             .send()
             .await
             .map_err(|e| Error::Provider(format!("http: {e}")))

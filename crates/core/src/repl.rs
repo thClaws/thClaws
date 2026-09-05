@@ -461,6 +461,8 @@ pub enum SlashCommand {
     Sso {
         sub: SsoSubcommand,
     },
+    /// `/policy` / `/policy status` — active org policy + audit sinks
+    PolicyStatus,
     SkillInstall {
         git_url: String,
         name: Option<String>,
@@ -1733,6 +1735,12 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
                 let a = args.trim();
                 a == "--fix" || a == "fix"
             },
+        },
+        "policy" => match args.trim() {
+            "" | "status" => SlashCommand::PolicyStatus,
+            other => SlashCommand::Unknown(format!(
+                "unknown /policy subcommand: '{other}' (try /policy status)"
+            )),
         },
         "sso" => match args.trim() {
             "" | "status" => SlashCommand::Sso {
@@ -3891,6 +3899,9 @@ pub fn built_in_commands() -> &'static [BuiltInCommand] {
         // Research
         BuiltInCommand { name: "research", description: "Background research → KMS",                  category: "Research", usage: "<query> | list | status <id> | show <id> | cancel <id> | wait <id>" },
 
+        // Enterprise
+        BuiltInCommand { name: "policy", description: "Active org policy + audit sinks",              category: "Enterprise", usage: "status" },
+
         // Deploy
         BuiltInCommand { name: "deploy",   description: "Ship .thclaws/ to a remote pod (dev-plan/28)", category: "Deploy", usage: "[--pod URL] [--token T] [--dry-run] [--full] [--no-restart]" },
 
@@ -4262,7 +4273,11 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // Empty string is fine — OpenAIProvider always sends some
             // Authorization, and gateways without auth ignore it.
             let auth = crate::providers::gateway::resolve_auth_header().unwrap_or_default();
-            return Ok(Arc::new(OpenAIProvider::new(auth).with_base_url(chat_url)));
+            return Ok(Arc::new(
+                OpenAIProvider::new(auth)
+                    .with_base_url(chat_url)
+                    .with_gateway_correlation(),
+            ));
         }
     }
 
@@ -7109,6 +7124,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             );
                             // M6.34 TEAM3: scoped to this lead's team_dir.
                             crate::team::kill_my_teammates();
+                            crate::audit::shutdown();
                             println!("{COLOR_DIM}bye{COLOR_RESET}");
                             return Ok(());
                         }
@@ -9172,6 +9188,9 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             "{COLOR_YELLOW}usage: /plan [enter | exit | status]{COLOR_RESET}"
                         ),
                     }
+                }
+                SlashCommand::PolicyStatus => {
+                    println!("{COLOR_DIM}{}{COLOR_RESET}", crate::policy::status_text());
                 }
                 SlashCommand::Sso { sub } => {
                     let active = crate::policy::active();
@@ -12501,6 +12520,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
     // Kill any teammate processes spawned by this session.
     // M6.34 TEAM3: scoped to this lead's team_dir.
     crate::team::kill_my_teammates();
+    crate::audit::shutdown();
     println!("{COLOR_DIM}bye{COLOR_RESET}");
     Ok(())
 }

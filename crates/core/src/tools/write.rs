@@ -12,6 +12,13 @@ impl Tool for WriteTool {
         "Write"
     }
 
+    fn audit_summary(&self, input: &Value) -> Option<super::AuditSummary> {
+        input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|p| super::AuditSummary::targets([p.to_string()]))
+    }
+
     fn description(&self) -> &'static str {
         "Write the given content to a file. Creates parent directories as needed. \
          Overwrites any existing file at the path."

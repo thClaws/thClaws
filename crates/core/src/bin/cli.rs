@@ -104,6 +104,7 @@ async fn main() {
         eprintln!("\x1b[31m{}\x1b[0m", e.refuse_message());
         std::process::exit(2);
     }
+    thclaws_core::audit::init();
 
     let cli = Cli::parse();
     // Workspace layout migration (v1 flat → v2 `state/`) before any
@@ -169,4 +170,5 @@ async fn main() {
             std::process::exit(1);
         }
     }
+    thclaws_core::audit::shutdown();
 }

@@ -94,6 +94,42 @@ fn lead_team_dir_slot() -> &'static std::sync::Mutex<Option<String>> {
     LEAD_TEAM_DIR.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// `Child` handles of every teammate this lead spawned as a background
+/// process (the no-tmux path). `kill_my_teammates()` reaps these
+/// directly, which works on every platform — the `pkill -f` fallback
+/// only exists on Unix, so before this a mid-task teammate that rejected
+/// the graceful shutdown was orphaned on Windows (#202).
+static SPAWNED_CHILDREN: std::sync::OnceLock<std::sync::Mutex<Vec<std::process::Child>>> =
+    std::sync::OnceLock::new();
+
+fn spawned_children() -> &'static std::sync::Mutex<Vec<std::process::Child>> {
+    SPAWNED_CHILDREN.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+fn register_spawned_child(child: std::process::Child) {
+    if let Ok(mut g) = spawned_children().lock() {
+        g.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        g.push(child);
+    }
+}
+
+/// Hard-kill every registered background teammate still running and
+/// reap it. Returns how many were killed.
+fn kill_spawned_children() -> usize {
+    let Ok(mut g) = spawned_children().lock() else {
+        return 0;
+    };
+    let mut killed = 0;
+    for mut c in g.drain(..) {
+        if matches!(c.try_wait(), Ok(None)) {
+            let _ = c.kill();
+            let _ = c.wait();
+            killed += 1;
+        }
+    }
+    killed
+}
+
 /// Record the lead's absolute team_dir for later teammate cleanup.
 /// Idempotent — calling multiple times overwrites (lead may swap
 /// projects mid-session via ChangeCwd).
@@ -131,27 +167,27 @@ pub fn resolved_team_dir() -> PathBuf {
     std::env::current_dir().map(|c| c.join(&rel)).unwrap_or(rel)
 }
 
-/// Kill every teammate process spawned by THIS lead session. Matches
-/// `pkill -f --team-dir <abs-path>` so we only target processes whose
-/// argv contains the exact `--team-dir <our team_dir>` flag pair —
-/// teammates of other projects (different team_dir) are untouched.
-///
-/// No-op when `LEAD_TEAM_DIR` was never set (we're not the lead, or
-/// teamEnabled was off). Best-effort — pkill failures are swallowed.
+/// Kill every teammate process spawned by THIS lead session. Graceful
+/// `ShutdownRequest` first, then hard-kill the `Child` handles we hold
+/// from the background spawn path (cross-platform), then on Unix a
+/// `pkill -f --team-dir <abs-path>` backstop for teammates we hold no
+/// handle for (tmux panes, or a lead that resumed an older team) — the
+/// flag pair is specific enough to never hit another session's
+/// teammates (M6.34 TEAM3; teamEnabled off ⇒ nothing to match).
+/// Best-effort — kill failures are swallowed.
 pub fn kill_my_teammates() {
-    let dir = match lead_team_dir_slot().lock().ok().and_then(|g| g.clone()) {
-        Some(d) => d,
-        None => return,
-    };
-    let team_dir = std::path::PathBuf::from(&dir);
-    let mb = Mailbox::new(team_dir.clone());
-    let config = TeamConfig::load(&team_dir.join("config.json")).ok();
+    let dir = lead_team_dir_slot().lock().ok().and_then(|g| g.clone());
+    let team_ctx = dir.as_ref().map(|d| {
+        let team_dir = std::path::PathBuf::from(d);
+        let config = TeamConfig::load(&team_dir.join("config.json")).ok();
+        (Mailbox::new(team_dir), config)
+    });
 
     // Graceful first: broadcast a ShutdownRequest so an idle teammate can
     // flush state and self-exit via its poll loop, then give a short grace
-    // before the hard pkill fallback. (Previously the handshake was dead
+    // before the hard fallback. (Previously the handshake was dead
     // code — nothing ever SENT a ShutdownRequest.)
-    if let Some(ref config) = config {
+    if let Some((mb, Some(config))) = team_ctx.as_ref() {
         for member in &config.members {
             let msg = TeamMessage::new("lead", &make_shutdown_request("lead"));
             let _ = mb.write_to_mailbox(&member.name, msg);
@@ -159,25 +195,34 @@ pub fn kill_my_teammates() {
         std::thread::sleep(std::time::Duration::from_millis(1200));
     }
 
-    // Hard fallback: kill any teammate still running. Match `--team-dir
-    // <abs path>` in cmdline. Most processes never carry that flag pair so
-    // the match is highly specific. The `--` end-of-options marker is
-    // REQUIRED: the pattern starts with `--`, which pkill's getopt otherwise
-    // parses as an unknown long option (no teammates get killed, issue #163
-    // Bug 2).
-    let pattern = format!("--team-dir {}", dir);
-    let _ = std::process::Command::new("pkill")
-        .args(["-f", "--", &pattern])
-        .status();
+    // Hard fallback 1: the handles we own. A teammate mid-task answers
+    // the request with ShutdownRejected and keeps polling; this is the
+    // only thing that reaps it on Windows (#202).
+    kill_spawned_children();
+
+    // Hard fallback 2 (Unix only — no pkill on Windows): anything still
+    // carrying `--team-dir <abs path>` in its cmdline. The `--`
+    // end-of-options marker is REQUIRED: the pattern starts with `--`,
+    // which pkill's getopt otherwise parses as an unknown long option (no
+    // teammates get killed, issue #163 Bug 2).
+    #[cfg(unix)]
+    if let Some(ref dir) = dir {
+        let pattern = format!("--team-dir {}", dir);
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "--", &pattern])
+            .status();
+    }
 
     // Mark killed teammates stopped and reclaim any tasks they still owned,
     // so a later respawn / resume doesn't see tasks stranded InProgress.
-    if let Some(ref config) = config {
-        for member in &config.members {
-            let _ = mb.write_status(&member.name, "stopped", None);
+    if let Some((mb, config)) = team_ctx {
+        if let Some(config) = config {
+            for member in &config.members {
+                let _ = mb.write_status(&member.name, "stopped", None);
+            }
         }
+        let _ = mb.reap_stale_tasks();
     }
-    let _ = mb.reap_stale_tasks();
 }
 
 /// True when (a) a git merge is currently in progress in the repo that
@@ -2009,31 +2054,38 @@ impl Tool for SpawnTeammateTool {
         const BOOT_TIMEOUT: std::time::Duration =
             std::time::Duration::from_secs(if cfg!(windows) { 25 } else { 8 });
         let deadline = std::time::Instant::now() + BOOT_TIMEOUT;
-        loop {
+        let result = loop {
             if let Some(st) = self.mailbox.read_status(name) {
                 if st.status != "spawning" && st.last_heartbeat >= spawn_t {
-                    return Ok(format!(
+                    break Ok(format!(
                         "Teammate '{name}' spawned {spawn_desc} and is live."
                     ));
                 }
             }
             if let Some(child) = bg_child.as_mut() {
                 if let Ok(Some(exit)) = child.try_wait() {
-                    return Err(Error::Tool(format!(
+                    break Err(Error::Tool(format!(
                         "teammate '{name}' exited immediately ({exit}) — never booted.\noutput.log tail:\n{}",
                         self.output_tail(name)
                     )));
                 }
             }
             if std::time::Instant::now() >= deadline {
-                return Err(Error::Tool(format!(
+                break Err(Error::Tool(format!(
                     "teammate '{name}' launched but never entered its poll loop within {}s (status still 'spawning') — likely failed to start.\noutput.log tail:\n{}",
                     BOOT_TIMEOUT.as_secs(),
                     self.output_tail(name)
                 )));
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+        // Keep the handle even on a probe timeout: a slow booter that
+        // outlives the deadline is exactly the process that would
+        // otherwise be orphaned at lead exit (#202).
+        if let Some(child) = bg_child.take() {
+            register_spawned_child(child);
         }
+        result
     }
 }
 
@@ -2575,6 +2627,52 @@ pub fn register_team_tools(registry: &mut ToolRegistry, my_name: &str) -> Arc<Ma
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// #202: a registered background teammate that is still running gets
+    /// hard-killed and reaped by the handle, no `pkill` involved; one
+    /// that already exited is pruned without being counted.
+    #[test]
+    fn kill_spawned_children_reaps_live_handles_only() {
+        fn sleeper(secs: &str) -> std::process::Child {
+            let mut c = if cfg!(windows) {
+                let mut c = std::process::Command::new("cmd");
+                c.args(["/C", &format!("ping -n {} 127.0.0.1 >nul", secs)]);
+                c
+            } else {
+                let mut c = std::process::Command::new("sleep");
+                c.arg(secs);
+                c
+            };
+            c.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        }
+        let _ = kill_spawned_children();
+
+        let mut done = sleeper("0");
+        let _ = done.wait();
+        register_spawned_child(done);
+        let live = sleeper("30");
+        let live_id = live.id();
+        register_spawned_child(live);
+        assert_eq!(spawned_children().lock().unwrap().len(), 1);
+
+        assert_eq!(kill_spawned_children(), 1);
+        assert!(spawned_children().lock().unwrap().is_empty());
+        #[cfg(unix)]
+        {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &live_id.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(!alive, "pid {live_id} should be dead after kill");
+        }
+        #[cfg(windows)]
+        let _ = live_id;
+    }
 
     /// The narrow "lead may resolve a merge conflict" exception is only
     /// active when BOTH (a) `.git/MERGE_HEAD` exists, AND (b) the target

@@ -44,6 +44,13 @@ impl Tool for BashTool {
         "Bash"
     }
 
+    fn audit_summary(&self, input: &Value) -> Option<super::AuditSummary> {
+        input
+            .get("command")
+            .and_then(Value::as_str)
+            .map(super::AuditSummary::text)
+    }
+
     fn description(&self) -> &'static str {
         "Run a shell command via `/bin/sh -c`. Captures stdout and stderr. \
          Default timeout: 120000ms (override with `timeout` in milliseconds, max 600000). \

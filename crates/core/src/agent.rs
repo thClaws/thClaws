@@ -1126,6 +1126,7 @@ impl Agent {
         &self,
         user_content: Vec<ContentBlock>,
     ) -> impl Stream<Item = Result<AgentEvent>> + Send + 'static {
+        crate::audit::begin_turn(matches!(self.origin, crate::permissions::AgentOrigin::Main));
         let provider = self.provider.clone();
         // Cache for a cross-provider skill swap, so the provider is built
         // once per turn rather than per iteration.
@@ -1736,24 +1737,26 @@ impl Agent {
                                 } else {
                                     None
                                 };
-                                let tool_result = match hook_denied {
+                                let started = std::time::Instant::now();
+                                let tool_result = match &hook_denied {
                                     Some(reason) => Err(crate::error::Error::Tool(format!(
                                         "blocked by policy: {reason}"
                                     ))),
-                                    None => tool.call_multimodal(input).await,
+                                    None => tool.call_multimodal(input.clone()).await,
                                 };
+                                let duration_ms = started.elapsed().as_millis() as u64;
                                 let ui_resource = if tool_result.is_ok() {
                                     tool.fetch_ui_resource().await
                                 } else {
                                     None
                                 };
-                                (id, name, tool_result, ui_resource)
+                                (id, name, tool_result, ui_resource, (tool, input, duration_ms, hook_denied))
                             }
                         });
                         // join_all preserves input order → result_blocks +
                         // events stay in the model's tool_use order.
                         let results = futures::future::join_all(futs).await;
-                        for (id, name, tool_result, ui_resource) in results {
+                        for (id, name, tool_result, ui_resource, (audit_tool, audit_input, duration_ms, hook_denied)) in results {
                             let (content, is_error) = match &tool_result {
                                 Ok(c) => {
                                     let truncated = match c {
@@ -1776,6 +1779,21 @@ impl Agent {
                             } else {
                                 content
                             };
+                            match &hook_denied {
+                                Some(reason) => crate::audit::record_denied(
+                                    &id, audit_tool.as_ref(), &audit_input, "hook", reason,
+                                ),
+                                None => crate::audit::record_tool_call(crate::audit::ToolCall {
+                                    tool_use_id: &id,
+                                    tool: audit_tool.as_ref(),
+                                    input: &audit_input,
+                                    decision: crate::audit::record::Decision::Allow,
+                                    decided_by: "auto",
+                                    output: &content.to_text(),
+                                    is_error,
+                                    duration_ms,
+                                }),
+                            }
                             if let Some(h) = &hooks {
                                 let preview = match &content {
                                     crate::types::ToolResultContent::Text(s) => s.clone(),
@@ -1988,6 +2006,7 @@ impl Agent {
                     let force_ask = ask_tools.iter().any(|t| t.as_str() == name);
                     let needs_approval = force_ask
                         || (permission_mode.asks_for_approval() && tool.requires_approval(input));
+                    let mut audit_decision = (crate::audit::record::Decision::Allow, "auto");
                     if needs_approval {
                         let req = ApprovalRequest {
                             tool_name: name.clone(),
@@ -2003,6 +2022,7 @@ impl Agent {
                             originator: origin.clone(),
                         };
                         let decision = approver.approve(&req).await;
+                        audit_decision = (crate::audit::decision_of(&decision), approver.audit_kind());
                         if matches!(decision, ApprovalDecision::Deny) {
                             // M6.35 HOOK3: surface explicit user denial
                             // to the configured permission_denied hook.
@@ -2014,6 +2034,9 @@ impl Agent {
                                 crate::hooks::fire_permission_denied(h, &name);
                             }
                             let denied = format!("denied by user: {name}");
+                            crate::audit::record_denied(
+                                &id, tool.as_ref(), input, approver.audit_kind(), &denied,
+                            );
                             result_blocks.push(ContentBlock::ToolResult {
                                 tool_use_id: id.clone(),
                                 content: denied.clone().into(),
@@ -2049,12 +2072,14 @@ impl Agent {
                     // tool queued before the approval modal pops. The
                     // dispatch site here just runs the call (unless the
                     // pre_tool_use gate denied it).
-                    let tool_result = match hook_denied {
+                    let started = std::time::Instant::now();
+                    let tool_result = match &hook_denied {
                         Some(reason) => {
                             Err(crate::error::Error::Tool(format!("blocked by policy: {reason}")))
                         }
                         None => tool.call_multimodal(input.clone()).await,
                     };
+                    let duration_ms = started.elapsed().as_millis() as u64;
 
                     let (content, is_error) = match &tool_result {
                         Ok(c) => {
@@ -2085,6 +2110,21 @@ impl Agent {
                     } else {
                         content
                     };
+                    match &hook_denied {
+                        Some(reason) => {
+                            crate::audit::record_denied(&id, tool.as_ref(), input, "hook", reason)
+                        }
+                        None => crate::audit::record_tool_call(crate::audit::ToolCall {
+                            tool_use_id: &id,
+                            tool: tool.as_ref(),
+                            input,
+                            decision: audit_decision.0,
+                            decided_by: audit_decision.1,
+                            output: &content.to_text(),
+                            is_error,
+                            duration_ms,
+                        }),
+                    }
 
                     // M6.35 HOOK1: post_tool_use (or _failure) fires
                     // after we've materialized the result content but

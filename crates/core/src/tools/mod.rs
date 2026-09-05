@@ -99,6 +99,30 @@ pub use xlsx_create::XlsxCreateTool;
 pub use xlsx_edit::XlsxEditTool;
 pub use xlsx_read::XlsxReadTool;
 
+/// What a tool reports about one call for the audit record. `targets`
+/// are workspace-relative paths; `summary` is clamped to 256 bytes and
+/// its first line by the audit layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditSummary {
+    pub targets: Vec<String>,
+    pub summary: Option<String>,
+}
+
+impl AuditSummary {
+    pub fn targets(paths: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            targets: paths.into_iter().collect(),
+            summary: None,
+        }
+    }
+    pub fn text(s: impl Into<String>) -> Self {
+        Self {
+            targets: Vec::new(),
+            summary: Some(s.into()),
+        }
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
@@ -119,6 +143,25 @@ pub trait Tool: Send + Sync {
     /// tools that mutate filesystem or system state.
     fn requires_approval(&self, _input: &Value) -> bool {
         false
+    }
+
+    /// Audit classification (RFC 0001). Builtins are the default; MCP
+    /// and workflow tools override.
+    fn audit_kind(&self) -> crate::audit::AuditToolKind {
+        crate::audit::AuditToolKind::Builtin
+    }
+
+    /// MCP server name for `audit_kind() == Mcp`.
+    fn audit_mcp_server(&self) -> Option<&str> {
+        None
+    }
+
+    /// Payload-free description of a call for the audit record: paths a
+    /// file tool touches, the first line of a shell command. Tools decide
+    /// what is safe to write; the audit layer only clamps length. Default:
+    /// nothing.
+    fn audit_summary(&self, _input: &Value) -> Option<AuditSummary> {
+        None
     }
 
     /// Whether this tool is safe to run **concurrently** with other

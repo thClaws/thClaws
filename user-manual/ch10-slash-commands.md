@@ -117,6 +117,7 @@ See [Chapter 9](ch09-knowledge-bases-kms.md) for the full KMS concept + workflow
 | `/research show ID` | Print synthesized result in chat |
 | `/research cancel ID` | Cancel a running job; partial result discarded |
 | `/research wait ID` | Block CLI prompt until terminal (CLI-only) |
+| `/policy` (or `/policy status`) | Active org policy: source file, issuer, expiry, which blocks are on, and audit sinks with their dropped-record counts (Enterprise) |
 
 See [Chapter 20](ch20-research.md) for the full pipeline + KMS layout + flag reference.
 

@@ -20,6 +20,7 @@ pub mod aiserver;
 /// OpenAI-compatible HTTP API surface mounted on `--serve` (see
 /// `dev-plan/19-thclaws-openai-compat.md`).
 pub mod api_v1;
+pub mod audit;
 /// Self-improving AI Agent — auto-learn pipeline that files each
 /// ended session as a page in a dedicated KMS and periodically
 /// reconciles it. See `dev-plan/27-self-improving-agent.md`.

@@ -291,8 +291,10 @@ pub struct SessionMeta {
 impl Session {
     pub fn new(model: impl Into<String>, cwd: impl Into<String>) -> Self {
         let now = now_secs();
+        let id = generate_id();
+        crate::audit::set_session(&id);
         Self {
-            id: generate_id(),
+            id,
             created_at: now,
             updated_at: now,
             model: model.into(),
@@ -1298,7 +1300,9 @@ impl SessionStore {
 
     pub fn load(&self, id: &str) -> Result<Session> {
         Self::validate_id(id)?;
-        Session::load_from(&self.path_for(id))
+        let s = Session::load_from(&self.path_for(id))?;
+        crate::audit::set_session(&s.id);
+        Ok(s)
     }
 
     /// Resolve a user-supplied identifier to a session id. Tries id match

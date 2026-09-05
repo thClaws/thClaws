@@ -115,6 +115,7 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | `/research show ID` | print synthesized result ใน chat |
 | `/research cancel ID` | cancel job ที่รัน; partial result ทิ้ง |
 | `/research wait ID` | block CLI prompt จน terminal (CLI-only) |
+| `/policy` (หรือ `/policy status`) | org policy ที่ active อยู่: ไฟล์ต้นทาง, issuer, วันหมดอายุ, block ไหนเปิดอยู่ และ audit sink พร้อมจำนวน record ที่ drop (Enterprise) |
 
 ดู [บทที่ 20](ch20-research.md) สำหรับ pipeline ฉบับเต็ม + KMS layout + flag reference
 

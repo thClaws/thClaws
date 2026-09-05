@@ -138,6 +138,10 @@ impl Tool for WorkflowRunTool {
         "WorkflowRun"
     }
 
+    fn audit_kind(&self) -> crate::audit::AuditToolKind {
+        crate::audit::AuditToolKind::Workflow
+    }
+
     fn description(&self) -> &'static str {
         "Author and run a JavaScript orchestration workflow in a sandboxed Boa \
          runtime to handle deterministic fan-out, multistep pipelines, or \

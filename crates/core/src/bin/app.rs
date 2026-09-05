@@ -748,6 +748,7 @@ async fn main() {
         eprintln!("\x1b[31m{}\x1b[0m", e.refuse_message());
         std::process::exit(2);
     }
+    thclaws_core::audit::init();
 
     let cli = Cli::parse();
 
@@ -1134,6 +1135,7 @@ async fn main() {
             eprintln!("\n\x1b[31merror: {e}\x1b[0m");
             std::process::exit(1);
         }
+        thclaws_core::audit::shutdown();
     } else {
         if let Err(e) = run_repl(config).await {
             eprintln!("\n\x1b[31merror: {e}\x1b[0m");
