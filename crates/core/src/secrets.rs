@@ -130,6 +130,7 @@ pub const SERVICE_KEYS: &[(&str, &str)] = &[
     ("brave-search", "BRAVE_SEARCH_API_KEY"),
     ("serpapi", "SERPAPI_API_KEY"),
     ("youcom", "YDC_API_KEY"),
+    ("serply", "SERPLY_API_KEY"),
     ("hal", "HAL_API_KEY"),
     // VideoGen's native LTX path + the filmscript harness both read
     // LTX_API_KEY off the process env (`media::provider::resolve_endpoint`),

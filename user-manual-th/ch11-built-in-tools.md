@@ -44,12 +44,12 @@ thClaws มาพร้อม built-in tools ประมาณสามสิ�
 | Tool | การอนุมัติ | สรุป |
 |---|---|---|
 | `WebFetch` | prompt | HTTP GET (จำกัด body 100 KB ต่อ section) ถ้ามี `HAL_API_KEY` → ยิงทั้ง HAL headless-browser scrape **และ** plain HTTP GET พร้อมกัน return เป็น response เดียวที่มี 2 section แยกป้าย (ดูด้านล่าง) |
-| `WebSearch` | prompt | ค้นเว็บผ่าน Tavily / Brave / SerpAPI (Google) / You.com / DuckDuckGo |
+| `WebSearch` | prompt | ค้นเว็บผ่าน Tavily / Brave / SerpAPI (Google) / You.com / Serply (Google) / DuckDuckGo |
 | `WebScrape` | prompt | HAL scrape ตรงๆ พร้อม parameter ขั้นสูง (`wait_for` CSS selector, `scroll_to_bottom`, `remove_selectors`, `output_format`) — จะปรากฏเฉพาะเมื่อมี `HAL_API_KEY` |
 | `YouTubeTranscript` | prompt | ดึง transcript ของวิดีโอ YouTube ผ่าน HAL (รองรับหลายภาษา + timestamps) — จะปรากฏเฉพาะเมื่อมี `HAL_API_KEY` |
 
 search provider จะถูกเลือกตาม `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`,
-`SERPAPI_API_KEY` หรือ `YDC_API_KEY` ที่ตั้งค่าไว้ หากไม่มีจะใช้ DuckDuckGo แทน (ไม่ต้องใช้ key แต่คุณภาพด้อยกว่า)
+`SERPAPI_API_KEY`, `YDC_API_KEY` หรือ `SERPLY_API_KEY` ที่ตั้งค่าไว้ หากไม่มีจะใช้ DuckDuckGo แทน (ไม่ต้องใช้ key แต่คุณภาพด้อยกว่า)
 สามารถบังคับด้วย `searchEngine: "tavily"` ใน settings ได้
 
 ### พฤติกรรม combine ของ `WebFetch` (เมื่อมี `HAL_API_KEY`)

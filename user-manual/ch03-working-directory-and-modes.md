@@ -314,7 +314,7 @@ template file that lists every field at its default value. Open
 | `maxTokens` | number | `32000` | (max output tokens per turn) |
 | `maxIterations` | number | `50` | (per-turn tool-call loop cap) |
 | `thinkingBudget` | number | *(unset = auto)* | [Chapter 6](ch06-providers-models-api-keys.md) — thinking level as a token budget: `0` off, `2048` low, `10000` medium, `32000` high; written by `/thinking` and the sidebar pills |
-| `searchEngine` | string | `"auto"` | (`auto` / `tavily` / `brave` / `serpapi` / `youcom` / `duckduckgo`) |
+| `searchEngine` | string | `"auto"` | (`auto` / `tavily` / `brave` / `serpapi` / `youcom` / `serply` / `duckduckgo`) |
 
 #### Permissions & tools
 

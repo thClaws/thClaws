@@ -5,7 +5,8 @@
 //!   2. Brave Search (`BRAVE_SEARCH_API_KEY`) — clean JSON, good quality
 //!   3. SerpAPI (`SERPAPI_API_KEY`) — real Google results as JSON
 //!   4. You.com (`YDC_API_KEY`) — clean JSON, snippets + descriptions
-//!   5. DuckDuckGo HTML scrape — no key needed, good enough fallback
+//!   5. Serply (`SERPLY_API_KEY`) - real Google results as JSON
+//!   6. DuckDuckGo HTML scrape — no key needed, good enough fallback
 //!
 //! Two layers of fallback:
 //! - **Config-time** — a missing API key skips that backend at chain-build
@@ -42,6 +43,7 @@ enum Backend {
     Brave(String),
     SerpApi(String),
     YouCom(String),
+    Serply(String),
     Ddg,
 }
 
@@ -54,6 +56,7 @@ impl Backend {
             Backend::Brave(_) => "brave",
             Backend::SerpApi(_) => "serpapi",
             Backend::YouCom(_) => "youcom",
+            Backend::Serply(_) => "serply",
             Backend::Ddg => "duckduckgo",
         }
     }
@@ -67,6 +70,7 @@ impl Backend {
             Backend::Brave(_) => "Brave Search",
             Backend::SerpApi(_) => "SerpAPI (Google)",
             Backend::YouCom(_) => "You.com",
+            Backend::Serply(_) => "Serply (Google)",
             Backend::Ddg => "DuckDuckGo",
         }
     }
@@ -84,7 +88,7 @@ pub struct WebSearchTool {
 }
 
 impl WebSearchTool {
-    /// `engine`: `"auto"` (detect from env), `"tavily"`, `"brave"`, `"serpapi"`, `"youcom"`, `"duckduckgo"`/`"ddg"`.
+    /// `engine`: `"auto"` (detect from env), `"tavily"`, `"brave"`, `"serpapi"`, `"youcom"`, `"serply"`, `"duckduckgo"`/`"ddg"`.
     pub fn new(engine: &str) -> Self {
         // M6.23 BUG WT1: explicit timeout on the shared client; all
         // three backends (Tavily/Brave/DDG) inherit it.
@@ -105,11 +109,12 @@ impl WebSearchTool {
     /// is the universal floor for any non-`"duckduckgo"`-pinned config.
     ///
     /// Pin behavior:
-    /// - `"auto"` / unset → Tavily (if key) → Brave (if key) → SerpAPI (if key) → You.com (if key) → DDG
+    /// - `"auto"` / unset → Tavily (if key) → Brave (if key) → SerpAPI (if key) → You.com (if key) → Serply (if key) → DDG
     /// - `"tavily"` → Tavily (if key) → DDG
     /// - `"brave"` → Brave (if key) → DDG
     /// - `"serpapi"` → SerpAPI (if key) → DDG
     /// - `"youcom"` → You.com (if key) → DDG
+    /// - `"serply"` → Serply (if key) → DDG
     /// - `"duckduckgo"` / `"ddg"` → DDG only (no fallback; user explicitly
     ///   chose the bottom of the chain)
     fn resolve_candidates(&self) -> Vec<Backend> {
@@ -120,6 +125,7 @@ impl WebSearchTool {
         let try_brave = matches!(engine, "auto" | "" | "brave");
         let try_serpapi = matches!(engine, "auto" | "" | "serpapi");
         let try_youcom = matches!(engine, "auto" | "" | "youcom" | "you.com");
+        let try_serply = matches!(engine, "auto" | "" | "serply");
         // DDG is the universal fallback for everything except a DDG pin
         // (where it's already the only candidate, no need to fall back to
         // itself) and... well, only that.
@@ -162,6 +168,14 @@ impl WebSearchTool {
             if let Ok(key) = std::env::var("YDC_API_KEY") {
                 if !key.is_empty() {
                     out.push(Backend::YouCom(key));
+                }
+            }
+        }
+        // Serply is BYOK-only as well (no gateway route); absence skips it.
+        if try_serply {
+            if let Ok(key) = std::env::var("SERPLY_API_KEY") {
+                if !key.is_empty() {
+                    out.push(Backend::Serply(key));
                 }
             }
         }
@@ -464,6 +478,68 @@ impl WebSearchTool {
         }
     }
 
+    async fn search_serply(
+        &self,
+        query: &str,
+        max: usize,
+        key: &str,
+        freshness: Option<&str>,
+    ) -> Result<String> {
+        // Serply = real Google results as JSON: GET /v1/search, key in the
+        // `x-api-key` header. `freshness` maps onto Google's `tbs=qdr:*`
+        // recency filter. The API caps `num` at 10, so ask for at most that
+        // and let `take(max)` trim the rest.
+        let num = max.min(10).to_string();
+        let mut params = vec![("q", query), ("num", num.as_str())];
+        let tbs = freshness.and_then(|f| match f {
+            "day" => Some("qdr:d"),
+            "week" => Some("qdr:w"),
+            "month" => Some("qdr:m"),
+            "year" => Some("qdr:y"),
+            _ => None,
+        });
+        if let Some(tbs) = tbs {
+            params.push(("tbs", tbs));
+        }
+        let resp = self
+            .client
+            .get("https://api.serply.io/v1/search")
+            .query(&params)
+            .header("x-api-key", key)
+            .header("accept", "application/json")
+            .header("user-agent", concat!("thclaws/", env!("CARGO_PKG_VERSION")))
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("serply: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::Tool(format!("serply HTTP {status}: {text}")));
+        }
+
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("serply json: {e}")))?;
+
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(results) = v.get("results").and_then(Value::as_array) {
+            for (i, r) in results.iter().take(max).enumerate() {
+                let title = r.get("title").and_then(Value::as_str).unwrap_or("");
+                let url = r.get("link").and_then(Value::as_str).unwrap_or("");
+                let snippet = r.get("description").and_then(Value::as_str).unwrap_or("");
+                parts.push(format!("{}. {} ({})\n   {}", i + 1, title, url, snippet));
+            }
+        }
+
+        if parts.is_empty() {
+            Ok("No results found.".into())
+        } else {
+            Ok(parts.join("\n\n"))
+        }
+    }
+
     async fn search_ddg(&self, query: &str, max: usize) -> Result<String> {
         let resp = self
             .client
@@ -527,7 +603,7 @@ impl Tool for WebSearchTool {
     fn description(&self) -> &'static str {
         "Search the web for information. Auto-selects the best available \
          backend: Tavily (TAVILY_API_KEY), Brave (BRAVE_SEARCH_API_KEY), \
-         SerpAPI/Google (SERPAPI_API_KEY), You.com (YDC_API_KEY), or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
+         SerpAPI/Google (SERPAPI_API_KEY), You.com (YDC_API_KEY), Serply/Google (SERPLY_API_KEY), or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
          The result begins with a `Source: <engine>` line — when summarizing \
          results to the user, mention which engine answered (e.g. \"via Tavily\" \
          or \"ผ่าน Tavily\"); cite the source so they understand the result quality."
@@ -539,7 +615,7 @@ impl Tool for WebSearchTool {
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
                 "max_results": {"type": "integer", "description": "Max results (default 5)"},
-                "freshness": {"type": "string", "description": "Only recent results: day | week | month | year (Tavily/Brave/You.com; ignored elsewhere)"}
+                "freshness": {"type": "string", "description": "Only recent results: day | week | month | year (Tavily/Brave/You.com/Serply; ignored elsewhere)"}
             },
             "required": ["query"]
         })
@@ -590,6 +666,10 @@ impl Tool for WebSearchTool {
                 Backend::SerpApi(key) => self.search_serpapi(query, max, key).await,
                 Backend::YouCom(key) => {
                     self.search_youcom(query, max, key, freshness.as_deref())
+                        .await
+                }
+                Backend::Serply(key) => {
+                    self.search_serply(query, max, key, freshness.as_deref())
                         .await
                 }
                 Backend::Ddg => self.search_ddg(query, max).await,
@@ -646,6 +726,7 @@ mod tests {
         prev_tavily: Option<String>,
         prev_brave: Option<String>,
         prev_youcom: Option<String>,
+        prev_serply: Option<String>,
     }
 
     impl Drop for EnvGuard {
@@ -662,6 +743,10 @@ mod tests {
                 Some(v) => std::env::set_var("YDC_API_KEY", v),
                 None => std::env::remove_var("YDC_API_KEY"),
             }
+            match &self.prev_serply {
+                Some(v) => std::env::set_var("SERPLY_API_KEY", v),
+                None => std::env::remove_var("SERPLY_API_KEY"),
+            }
         }
     }
 
@@ -673,11 +758,15 @@ mod tests {
         // explicitly after acquiring the guard.
         let prev_youcom = std::env::var("YDC_API_KEY").ok();
         std::env::remove_var("YDC_API_KEY");
+        // Same treatment for SERPLY_API_KEY.
+        let prev_serply = std::env::var("SERPLY_API_KEY").ok();
+        std::env::remove_var("SERPLY_API_KEY");
         EnvGuard {
             _lock: lock,
             prev_tavily: std::env::var("TAVILY_API_KEY").ok(),
             prev_brave: std::env::var("BRAVE_SEARCH_API_KEY").ok(),
             prev_youcom,
+            prev_serply,
         }
     }
 
@@ -828,6 +917,60 @@ mod tests {
     }
 
     #[test]
+    fn auto_with_only_serply_key_places_it_before_ddg() {
+        let _e = scoped_env();
+        std::env::remove_var("TAVILY_API_KEY");
+        std::env::remove_var("BRAVE_SEARCH_API_KEY");
+        std::env::set_var("SERPLY_API_KEY", "s");
+        let tool = WebSearchTool::new("auto");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["serply", "duckduckgo"]);
+    }
+
+    #[test]
+    fn auto_orders_serply_after_youcom() {
+        // Chain placement contract: Serply is the last keyed backend,
+        // directly above the DDG floor.
+        let _e = scoped_env();
+        std::env::remove_var("TAVILY_API_KEY");
+        std::env::remove_var("BRAVE_SEARCH_API_KEY");
+        std::env::set_var("YDC_API_KEY", "y");
+        std::env::set_var("SERPLY_API_KEY", "s");
+        let tool = WebSearchTool::new("auto");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["youcom", "serply", "duckduckgo"]);
+    }
+
+    #[test]
+    fn pinned_serply_with_key_falls_back_to_ddg() {
+        let _e = scoped_env();
+        std::env::set_var("TAVILY_API_KEY", "t");
+        std::env::set_var("SERPLY_API_KEY", "s");
+        let tool = WebSearchTool::new("serply");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        // Tavily NOT in chain (user pinned serply). DDG follows.
+        assert_eq!(chain, vec!["serply", "duckduckgo"]);
+    }
+
+    #[test]
+    fn pinned_serply_without_key_uses_only_ddg() {
+        let _e = scoped_env();
+        std::env::remove_var("SERPLY_API_KEY");
+        let tool = WebSearchTool::new("serply");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["duckduckgo"]);
+    }
+
+    #[test]
+    fn empty_serply_key_treated_as_absent() {
+        let _e = scoped_env();
+        std::env::set_var("SERPLY_API_KEY", "");
+        let tool = WebSearchTool::new("auto");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["duckduckgo"]);
+    }
+
+    #[test]
     fn pinned_ddg_uses_only_ddg_no_fallback() {
         // The user explicitly chose the bottom of the chain. There's
         // nothing to fall back to; respect their pin.
@@ -875,6 +1018,10 @@ mod tests {
         assert_eq!(Backend::Tavily(String::new()).display_name(), "Tavily");
         assert_eq!(Backend::Brave(String::new()).display_name(), "Brave Search");
         assert_eq!(Backend::YouCom(String::new()).display_name(), "You.com");
+        assert_eq!(
+            Backend::Serply(String::new()).display_name(),
+            "Serply (Google)"
+        );
         assert_eq!(Backend::Ddg.display_name(), "DuckDuckGo");
         // The short `name()` form is what we emit in error chains
         // (e.g. `tavily: HTTP 429`); keep it lowercase + dash-free
@@ -882,6 +1029,7 @@ mod tests {
         assert_eq!(Backend::Tavily(String::new()).name(), "tavily");
         assert_eq!(Backend::Brave(String::new()).name(), "brave");
         assert_eq!(Backend::YouCom(String::new()).name(), "youcom");
+        assert_eq!(Backend::Serply(String::new()).name(), "serply");
         assert_eq!(Backend::Ddg.name(), "duckduckgo");
     }
 }

@@ -90,7 +90,7 @@ pub struct AppConfig {
     #[serde(default = "default_stream_chunk_timeout_secs")]
     pub stream_chunk_timeout_secs: u64,
 
-    /// Search engine for WebSearch tool: "auto" (default), "tavily", "brave", "serpapi", "youcom", "duckduckgo".
+    /// Search engine for WebSearch tool: "auto" (default), "tavily", "brave", "serpapi", "youcom", "serply", "duckduckgo".
     pub search_engine: String,
 
     /// Allowed tool names (None = all). CLI: --allowed-tools
