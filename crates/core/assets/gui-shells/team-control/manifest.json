@@ -1,0 +1,10 @@
+{
+  "id": "team-control",
+  "name": "Team Control",
+  "version": "0.1.0",
+  "description": "Manage this bot's team, start independent agents, send targeted instructions and stop one agent without interrupting the others.",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "minBridgeVersion": "1",
+  "permissions": ["team.read", "team.message", "team.control", "team.manage"]
+}

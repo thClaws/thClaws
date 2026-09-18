@@ -112,34 +112,33 @@ export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
         type: `gui_shell_${data.type}`,
         id: data.requestId,
         sessionId: data.sessionId ?? TIER1_SESSION_ID,
-        shellId: data.shellId ?? shellId,
         ...payload,
+        // Bind privileged calls to this iframe, never its supplied identity.
+        shellId,
       });
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shellId, fullscreen, theme]);
 
   // Forward full-screen state changes into the iframe.
   useEffect(() => {
     sendFullscreen(fullscreen);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fullscreen]);
 
   // Forward theme changes into the iframe so the shell re-themes live
   // when the user switches Light/Dark/System in the main UI.
   useEffect(() => {
     sendTheme(theme);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme]);
 
   useEffect(() => {
     // backend -> iframe: forward gui_shell_event dispatches.
-    const unsub = subscribe((msg: any) => {
+    const unsub = subscribe((msg) => {
       const target = iframeRef.current?.contentWindow;
       if (!target) return;
       if (msg?.type === "gui_shell_event") {
+        if (msg.shellId && msg.shellId !== shellId) return;
         // Tier 1: no sessionId filtering — single shared session, every
         // active shell tab gets every event. Tier 2 adds per-tab session
         // ids and we filter here.
@@ -158,7 +157,7 @@ export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
       }
     });
     return unsub;
-  }, []);
+  }, [shellId]);
 
   // active is unused in Tier 1 — the iframe stays mounted whether or
   // not the tab is visible (cheap) so re-activating the tab doesn't

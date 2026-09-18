@@ -121,6 +121,8 @@ pub mod server;
 #[cfg(feature = "gui")]
 pub mod bots;
 pub mod session;
+#[cfg(feature = "gui")]
+mod session_view;
 pub mod shared;
 #[cfg(feature = "gui")]
 pub mod shared_session;

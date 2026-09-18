@@ -115,7 +115,7 @@ export function HostPanel({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-3">
-          <h2 className="font-semibold">Agents in this workspace</h2>
+          <h2 className="font-semibold">Bots in this workspace</h2>
           <button
             onClick={onClose}
             className="text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -123,6 +123,10 @@ export function HostPanel({
             ✕
           </button>
         </div>
+
+        <p className="mb-4 text-xs text-[var(--text-secondary)]">
+          Each bot has its own settings and sessions. Select a bot and open Team to see its lead and teammates.
+        </p>
 
         <ul className="mb-4 divide-y divide-[var(--border)]">
           {bots.map((b) => (
@@ -136,8 +140,8 @@ export function HostPanel({
                 onClick={() => restart(b.slug)}
                 title={
                   b.state === "crash_looped"
-                    ? "thClaws stopped retrying this agent; try again"
-                    : "Stop and start this agent"
+                    ? "thClaws stopped retrying this bot; try again"
+                    : "Stop and start this bot"
                 }
                 className="px-2 py-0.5 rounded text-xs border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--bg-tertiary)]"
               >
@@ -148,7 +152,7 @@ export function HostPanel({
                 onClick={() => remove(b.slug)}
                 title={
                   bots.length < 2
-                    ? "A workspace always has at least one agent"
+                    ? "A workspace always has at least one bot"
                     : "Remove from this workspace. Its folder — sessions, logins — stays on disk."
                 }
                 className="px-2 py-0.5 rounded text-xs border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--bg-tertiary)]"
@@ -160,7 +164,7 @@ export function HostPanel({
         </ul>
 
         <label className="block text-xs text-[var(--text-secondary)] mb-1">
-          Get from Agent Templates
+          Create a bot from Agent Templates
         </label>
         <div className="flex gap-2">
           <input
@@ -182,7 +186,7 @@ export function HostPanel({
         </div>
 
         <label className="block text-xs text-[var(--text-secondary)] mt-4 mb-1">
-          Or start a blank agent
+          Or create a blank bot
         </label>
         <div className="flex gap-2">
           <input
@@ -191,7 +195,7 @@ export function HostPanel({
             onKeyDown={(e) => {
               if (e.key === "Enter" && blankSlug.trim() && !busy) void addBlank();
             }}
-            placeholder="agent name, e.g. scratch"
+            placeholder="bot name, e.g. scratch"
             className="flex-1 px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-primary)]"
           />
           <button

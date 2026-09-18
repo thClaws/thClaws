@@ -39,6 +39,7 @@ export function BotRail({
       className="fixed left-0 top-0 bottom-0 z-40 flex flex-col items-center gap-1 py-2 px-1 border-r border-[var(--border)] bg-[var(--bg-secondary)]"
       style={{ width: "var(--rail-w)" }}
     >
+      <span className="text-[9px] text-[var(--text-secondary)]">BOTS</span>
       {bots.map((b) => {
         const isActive = b.slug === active;
         const broken = b.state === "crash_looped";
@@ -46,8 +47,8 @@ export function BotRail({
           <button
             key={b.slug}
             onClick={() => onSelect(b.slug)}
-            title={`${b.name} — ${b.state}`}
-            aria-label={b.name}
+            title={`Bot: ${b.name} — ${b.state}`}
+            aria-label={`Bot: ${b.name}`}
             aria-current={isActive ? "true" : undefined}
             className={
               "relative w-9 h-9 rounded-lg text-[11px] font-semibold transition-colors " +
@@ -80,16 +81,16 @@ export function BotRail({
       <div className="flex-1" />
       <button
         onClick={onOpenHost}
-        title="Workspace — add, remove or restart agents"
-        aria-label="Workspace settings"
+        title="Workspace — add, remove or restart bots"
+        aria-label="Manage bots"
         className="w-9 h-9 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] flex items-center justify-center"
       >
         <Settings2 size={16} />
       </button>
       <button
         onClick={onOpenHost}
-        title="Add an agent"
-        aria-label="Add an agent"
+        title="Add bot"
+        aria-label="Add bot"
         className="w-9 h-9 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] flex items-center justify-center"
       >
         <Plus size={16} />

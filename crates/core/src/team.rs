@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub mod management;
+
 pub const POLL_INTERVAL_MS: u64 = 1000;
 
 /// A teammate rewrites its status (heartbeat) every poll (~1s) even when
@@ -880,6 +882,97 @@ impl Mailbox {
         // one — the loop's first status write is "idle" (repl.rs).
         self.write_status(agent, "spawning", None)?;
         Ok(())
+    }
+
+    pub fn bind_session(&self, agent: &str, session_id: &str) -> Result<()> {
+        let path = self.session_binding_path(agent)?;
+        atomic_write(
+            &path,
+            &serde_json::json!({"session_id":session_id}).to_string(),
+        )
+    }
+
+    pub fn bound_session(&self, agent: &str) -> Option<String> {
+        let path = self.session_binding_path(agent).ok()?;
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        value["session_id"].as_str().map(str::to_string)
+    }
+
+    fn session_binding_path(&self, agent: &str) -> Result<PathBuf> {
+        if !is_valid_agent_name(agent) {
+            return Err(Error::Tool("invalid agent name".into()));
+        }
+        Ok(self.output_log_path(agent).with_file_name("session.json"))
+    }
+
+    pub fn session_events_path(&self, agent: &str, session_id: &str) -> Result<PathBuf> {
+        if !is_valid_agent_name(agent) || !is_valid_agent_name(session_id) {
+            return Err(Error::Tool("invalid agent/session name".into()));
+        }
+        Ok(self
+            .output_log_path(agent)
+            .with_file_name(format!("session-events-{session_id}.jsonl")))
+    }
+
+    /// Read complete journal rows only. A cursor cannot skip past an unfinished
+    /// row, so polling/reconnecting never loses the tail of a streamed event.
+    pub fn read_session_events(
+        &self,
+        agent: &str,
+        session_id: &str,
+        offset: u64,
+    ) -> Result<(u64, Vec<serde_json::Value>)> {
+        use std::io::{BufRead, Seek};
+        if self.bound_session(agent).as_deref() != Some(session_id) {
+            return Err(Error::Tool(
+                "Agent session changed; reopen it from the Team tab".into(),
+            ));
+        }
+        let file = std::fs::File::open(self.session_events_path(agent, session_id)?)?;
+        file.lock_shared()?;
+        if offset > file.metadata()?.len() {
+            return Err(Error::Tool("Session cursor expired".into()));
+        }
+        let mut reader = std::io::BufReader::new(file);
+        reader.seek(std::io::SeekFrom::Start(offset))?;
+        let mut next = offset;
+        let mut events = Vec::new();
+        loop {
+            let mut line = String::new();
+            let count = reader.read_line(&mut line)?;
+            if count == 0 || !line.ends_with('\n') {
+                break;
+            }
+            let row: Vec<serde_json::Value> = serde_json::from_str(&line)?;
+            events.extend(row);
+            next += count as u64;
+            if next - offset >= 512 * 1024 {
+                break;
+            }
+        }
+        Ok((next, events))
+    }
+
+    /// Consume only this teammate's queued turn-abort commands.
+    pub fn take_abort_request(&self, agent: &str) -> bool {
+        let ids: Vec<_> = self
+            .read_unread(agent)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(
+                    parse_protocol_message(m.content()),
+                    Some(ProtocolMessage::AbortTurn { .. })
+                )
+            })
+            .map(|m| m.id)
+            .collect();
+        if ids.is_empty() {
+            return false;
+        }
+        let _ = self.mark_as_read(agent, &ids);
+        true
     }
 
     /// Read all messages in an agent's inbox.

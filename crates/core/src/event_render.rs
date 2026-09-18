@@ -45,6 +45,8 @@ pub const HOST_RELOAD_FRAME_TYPE: &str = "host_reload_requested";
 /// terminal path (which xterm.js parses natively) is unaffected.
 pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
     match ev {
+        ViewEvent::SessionActionRejected { session_id, text } => vec![serde_json::json!({"type":"session_action_rejected","session_id":session_id,"text":text}).to_string()],
+        ViewEvent::SessionActivated(_) | ViewEvent::SessionViewRequest { .. } => Vec::new(),
         ViewEvent::UserPrompt(text) => vec![serde_json::json!({
             "type": "chat_user_message",
             "text": strip_ansi(text),
@@ -114,12 +116,11 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
         })
         .to_string()],
         ViewEvent::TurnDone => vec![serde_json::json!({"type": "chat_done"}).to_string()],
-        ViewEvent::BusyChanged => {
+        ViewEvent::BusyChanged(meta) => {
             // Snapshot busy state inline so subscribers don't need a
             // follow-up `gui_busy_query` round-trip. Time is emitted
             // as milliseconds-since-epoch — the frontend converts to
             // a relative "Xm Ys" elapsed for the chip label.
-            let meta = crate::agent_activity::busy_meta();
             let started_at_ms = meta.as_ref().and_then(|m| {
                 m.started_at
                     .duration_since(std::time::UNIX_EPOCH)
@@ -593,6 +594,7 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
     }
 
     let inner = match ev {
+        ViewEvent::SessionActivated(_) | ViewEvent::SessionViewRequest { .. } | ViewEvent::SessionActionRejected { .. } => None,
         ViewEvent::UserPrompt(text) => {
             let marker = "\x1b[2m> \x1b[0m";
             let indent = "  ";
@@ -651,7 +653,7 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
             ))
         }
         ViewEvent::TurnDone => None,
-        ViewEvent::BusyChanged => None,
+        ViewEvent::BusyChanged(_) => None,
         ViewEvent::HistoryReplaced(messages) => {
             let mut out = String::from("\x1b[3J\x1b[2J\x1b[H");
             for (i, m) in messages.iter().enumerate() {

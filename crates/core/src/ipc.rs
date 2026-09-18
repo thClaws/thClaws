@@ -82,6 +82,30 @@ fn ipc_session_store(ctx: &IpcContext) -> Option<crate::session::SessionStore> {
         })
 }
 
+fn ipc_team_mailbox(ctx: &IpcContext) -> crate::team::Mailbox {
+    team_mailbox_for_workspace(
+        ctx.shared
+            .session_roots
+            .as_ref()
+            .and_then(|r| r.workspace_root.as_deref()),
+        crate::team::resolved_team_dir,
+    )
+}
+
+fn team_mailbox_for_workspace(
+    isolated_workspace: Option<&std::path::Path>,
+    lead_team_dir: impl FnOnce() -> std::path::PathBuf,
+) -> crate::team::Mailbox {
+    // Hosted bots share a working directory for user files, but keep team
+    // state in their own bot directory. Use the lead's pinned mailbox, not
+    // current_workdir() or a guessed child folder. Explicit per-user roots
+    // still take precedence so multiuser requests cannot reach the owner.
+    let dir = isolated_workspace
+        .map(|root| root.join(crate::team::Mailbox::default_dir()))
+        .unwrap_or_else(lead_team_dir);
+    crate::team::Mailbox::new(dir)
+}
+
 /// Heartbeat schedule id, scoped per workspace: the ScheduleStore is a
 /// GLOBAL file, so a bare "heartbeat" id would collide across
 /// workspaces (and one workspace's shell could clobber another's).
@@ -504,6 +528,39 @@ fn rel_slide_pngs(workspace: &std::path::Path, pdf: &std::path::Path) -> Vec<Str
 
 pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
     let ty = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let target = msg
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    let busy = crate::agent_activity::busy_meta();
+    let execution = ctx.shared.execution_session_id.lock().unwrap().clone();
+    let active = busy
+        .as_ref()
+        .map(|m| m.session_id.as_str())
+        .unwrap_or(&execution);
+    let input = matches!(ty, "shell_input" | "chat_prompt" | "pty_write");
+    let control = ty.starts_with("plan_")
+        || ty.starts_with("goal_")
+        || matches!(
+            ty,
+            "shell_cancel"
+                | "user_input_inject"
+                | "approval_response"
+                | "ask_user_response"
+                | "workflow_decision"
+                | "plan_approve"
+                | "plan_reject"
+                | "plan_cancel"
+                | "goal_set"
+                | "goal_clear"
+                | "goal_continue"
+        );
+    if let Some(target) = target {
+        if target != active && (control || (input && busy.is_some())) {
+            (ctx.dispatch)(serde_json::json!({"type":"session_action_rejected", "session_id":target, "text":format!("Session {active} is the execution session. Return to it to control the task; wait for it to finish before sending here.")}).to_string());
+            return true;
+        }
+    }
     match ty {
         "app_close" => {
             (ctx.on_quit)();
@@ -521,7 +578,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .and_then(|v| v.as_array())
                 .map(|arr| !arr.is_empty())
                 .unwrap_or(false);
-            if has_attachments {
+            if has_attachments && target.is_none() {
                 // Defer to wry's rich handler so attachments aren't
                 // silently dropped. Web users hit only the plain-text
                 // path (no image-paste in browser yet).
@@ -534,7 +591,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
-            if trimmed.is_empty() {
+            if trimmed.is_empty() && !has_attachments {
                 return true;
             }
             // dev-plan/32 Tier 3 Terminal-tab approval intercept. The
@@ -567,7 +624,40 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     }
                 }
             }
-            let _ = ctx.shared.input_tx.send(ShellInput::Line(trimmed));
+            let input = if let Some(id) = target {
+                if ipc_session_store(ctx)
+                    .and_then(|store| store.load(id).ok())
+                    .is_some_and(|s| s.owner_agent.is_some())
+                {
+                    (ctx.dispatch)(serde_json::json!({"type":"session_action_rejected","session_id":id,"text":"This session belongs to a teammate. Open its current session from Team to send a message."}).to_string());
+                    return true;
+                }
+                let images: Vec<(String, String)> = msg
+                    .get("attachments")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .take(10)
+                    .filter_map(|a| {
+                        Some((
+                            a.get("mediaType")?.as_str()?.to_string(),
+                            a.get("data")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect();
+                if images.iter().map(|(_, data)| data.len()).sum::<usize>() > 67 * 1024 * 1024 {
+                    (ctx.dispatch)(serde_json::json!({"type":"session_action_rejected", "session_id":id, "text":"Attachments exceed the 67 MB limit."}).to_string());
+                    return true;
+                }
+                ShellInput::SessionInput {
+                    id: id.to_string(),
+                    text: trimmed,
+                    images,
+                }
+            } else {
+                ShellInput::Line(trimmed)
+            };
+            let _ = ctx.shared.input_tx.send(input);
         }
 
         "frontend_ready" => {
@@ -576,6 +666,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             // its initial snapshot. The wry path's send_event arm
             // synthesises the same JSON via gui.rs's event-loop.
             ctx.shared.ready_gate.signal();
+            // The worker may have activated before this client subscribed.
+            // Replay its identity and busy state on every handshake.
+            let id = ctx.shared.execution_session_id.lock().unwrap().clone();
+            if !id.is_empty() {
+                (ctx.dispatch)(
+                    serde_json::json!({"type":"session_execution","session_id":id}).to_string(),
+                );
+            }
+            for frame in crate::event_render::render_chat_dispatches(
+                &crate::shared_session::ViewEvent::BusyChanged(crate::agent_activity::busy_meta()),
+            ) {
+                (ctx.dispatch)(frame);
+            }
             (ctx.on_send_initial_state)();
         }
 
@@ -590,6 +693,13 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "allow_for_session" => crate::permissions::ApprovalDecision::AllowForSession,
                 _ => crate::permissions::ApprovalDecision::Deny,
             };
+            if let Some(target) = target {
+                if ctx.approver.unresolved_requests().iter().any(|r| {
+                    r.id == id && r.session_id.as_deref().is_some_and(|owner| owner != target)
+                }) {
+                    return true;
+                }
+            }
             ctx.approver.resolve(id, decision);
         }
 
@@ -2988,12 +3098,41 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         }
 
         "new_session" => {
-            let _ = ctx.shared.input_tx.send(ShellInput::NewSession);
-            // Mirror gui.rs's prior behavior — frontend expects an
-            // ack envelope so the modal closes + a terminal_clear so
-            // xterm.js wipes its scrollback.
-            (ctx.dispatch)(serde_json::json!({"type": "new_session_ack"}).to_string());
-            (ctx.dispatch)(serde_json::json!({"type": "terminal_clear"}).to_string());
+            if let Some(request_id) = msg.get("view_request").and_then(Value::as_str) {
+                let store = ipc_session_store(ctx);
+                let result = store
+                    .as_ref()
+                    .ok_or_else(|| "No session store".to_string())
+                    .and_then(|store| {
+                        let model = crate::config::AppConfig::load()
+                            .map(|c| c.model)
+                            .unwrap_or_default();
+                        let session = crate::session::Session::new_detached(
+                            model,
+                            ctx.shared
+                                .session_roots
+                                .as_ref()
+                                .and_then(|r| r.workspace_root.clone())
+                                .unwrap_or_else(crate::workdir::current_workdir)
+                                .to_string_lossy(),
+                        );
+                        session
+                            .write_header_if_missing(&store.path_for(&session.id))
+                            .map_err(|e| e.to_string())?;
+                        Ok(session)
+                    });
+                match result {
+                    Ok(session) => {
+                        let _ = ctx.shared.events_tx.send(crate::shared_session::ViewEvent::SessionListRefresh(crate::shared_session::build_session_list(&store, &execution)));
+                        let _ = ctx.shared.events_tx.send(crate::shared_session::ViewEvent::SessionViewRequest {session:Box::new(session), request_id:request_id.to_string()});
+                    }
+                    Err(error) => (ctx.dispatch)(serde_json::json!({"type":"session_view_error", "request_id":request_id, "text":error}).to_string()),
+                }
+            } else {
+                let _ = ctx.shared.input_tx.send(ShellInput::NewSession);
+                (ctx.dispatch)(serde_json::json!({"type":"new_session_ack"}).to_string());
+                (ctx.dispatch)(serde_json::json!({"type":"terminal_clear"}).to_string());
+            }
         }
 
         // ── Plan sidebar (M6.36 SERVE9b — migrated from gui.rs) ─────
@@ -5899,6 +6038,38 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         }
 
         // ── Team tab data (M6.36 SERVE9g) ──────────────────────────
+        "team_session_poll" => {
+            let agent = msg["team_agent"].as_str().unwrap_or("");
+            let id = msg["session_id"].as_str().unwrap_or("");
+            let offset = msg["offset"].as_u64().unwrap_or(0);
+            let mailbox = ipc_team_mailbox(ctx);
+            match mailbox.read_session_events(agent,id,offset) {
+                Ok((next,events)) => {
+                    let running = mailbox.read_status(agent).is_some_and(|s|s.status == "working" && !s.is_stale());
+                        let live = mailbox.read_status(agent).is_some_and(|s| s.status != "stopped" && !s.is_stale());
+                    (ctx.dispatch)(serde_json::json!({"type":"team_session_events","session_id":id,"team_agent":agent,"offset":offset,"next_offset":next,"events":events,"running":running,"live":live}).to_string());
+                }
+                Err(error) => (ctx.dispatch)(serde_json::json!({"type":"session_action_rejected","session_id":id,"session_unavailable":true,"text":error.to_string()}).to_string()),
+            }
+        }
+        "team_abort_turn" => {
+            let agent = msg["to"].as_str().unwrap_or("");
+            let id = msg["session_id"].as_str().unwrap_or("");
+            let mailbox = ipc_team_mailbox(ctx);
+            if mailbox.bound_session(agent).as_deref() == Some(id) {
+                let command = serde_json::to_string(&crate::team::ProtocolMessage::AbortTurn {
+                    from: "user".into(),
+                })
+                .unwrap();
+                let result = mailbox
+                    .write_to_mailbox(agent, crate::team::TeamMessage::new("user", &command));
+                if let Err(error) = result {
+                    (ctx.dispatch)(serde_json::json!({"type":"session_action_rejected","session_id":id,"text":error.to_string()}).to_string());
+                }
+            } else {
+                (ctx.dispatch)(serde_json::json!({"type":"session_action_rejected","session_id":id,"text":"Agent session changed; reopen it before stopping"}).to_string());
+            }
+        }
         "team_send_message" => {
             if let (Some(to), Some(text)) = (
                 msg.get("to").and_then(|v| v.as_str()),
@@ -5910,41 +6081,101 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         to
                     );
                 } else {
-                    let team_dir = std::env::current_dir()
-                        .unwrap_or_default()
-                        .join(crate::team::Mailbox::default_dir());
-                    let mailbox = crate::team::Mailbox::new(team_dir);
+                    let mailbox = ipc_team_mailbox(ctx);
+                    if let Some(id) = msg.get("session_id").and_then(Value::as_str) {
+                        if mailbox.bound_session(to).as_deref() != Some(id) {
+                            (ctx.dispatch)(serde_json::json!({"type":"session_action_rejected","session_id":id,"text":"Agent session changed; reopen it before sending"}).to_string());
+                            return true;
+                        }
+                    }
                     let tm = crate::team::TeamMessage::new("user", text);
-                    let _ = mailbox.write_to_mailbox(to, tm);
+                    match mailbox.write_to_mailbox(to, tm) {
+                        Ok(()) => (ctx.dispatch)(serde_json::json!({"type":"team_message_queued","session_id":msg.get("session_id"),"text":format!("Message queued for {to}. It will be read at the next turn.")}).to_string()),
+                        Err(error) => (ctx.dispatch)(serde_json::json!({"type":"session_action_rejected","session_id":msg.get("session_id"),"text":error.to_string()}).to_string()),
+                    }
                 }
             }
         }
 
-        "team_list" => {
-            // Find the team dir — could be in cwd or a subdirectory.
-            let team_dir = {
-                let cwd = std::env::current_dir().unwrap_or_default();
-                let default = crate::team::Mailbox::default_dir();
-                let candidate = cwd.join(&default);
-                if candidate.join("config.json").exists() {
-                    candidate
-                } else {
-                    let mut found = candidate.clone();
-                    if let Ok(entries) = std::fs::read_dir(&cwd) {
-                        for entry in entries.flatten() {
-                            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                                let sub = entry.path().join(&default);
-                                if sub.join("config.json").exists() {
-                                    found = sub;
-                                    break;
-                                }
-                            }
-                        }
+        "gui_shell_team" => {
+            let request_id = msg["id"].as_u64().unwrap_or(0);
+            let shell_id = msg["shellId"].as_str().unwrap_or("").to_string();
+            let action = msg["action"].as_str().unwrap_or("").to_string();
+            let allowed = crate::gui_shell::team::permission(&action)
+                .is_some_and(|permission| shell_has_permission(&shell_id, permission));
+            let dispatch = ctx.dispatch.clone();
+            let shared = ctx.shared.clone();
+            let mailbox = Arc::new(ipc_team_mailbox(ctx));
+            let store = ipc_session_store(ctx);
+            let cwd = crate::workdir::current_workdir();
+            tokio::spawn(async move {
+                let result: crate::error::Result<Value> = async {
+                    if !allowed {
+                        return Err(crate::error::Error::Tool("Shell lacks the required team permission, or action is unknown.".into()));
                     }
-                    found
-                }
-            };
-            let mailbox = crate::team::Mailbox::new(team_dir.clone());
+                    if shared.session_roots.is_some() {
+                        return Err(crate::error::Error::Tool("Team shell is currently available in single-user bot workspaces only.".into()));
+                    }
+                    let execution = shared.execution_session_id.lock().unwrap().clone();
+                    if action == "snapshot" {
+                        return Ok(crate::gui_shell::team::snapshot(&mailbox, &execution, crate::agent_activity::busy_meta().as_ref()));
+                    }
+                    if action == "manage" {
+                        let text = crate::team::management::manage(mailbox.clone(), msg["operation"].clone(), cwd).await?;
+                        return Ok(serde_json::json!({"text":text}));
+                    }
+                    let name = msg["agent"].as_str().unwrap_or("");
+                    let id = msg["targetSession"].as_str().unwrap_or("");
+                    crate::gui_shell::team::validate_target(&mailbox, name, id, &execution, action != "history")?;
+                    match action.as_str() {
+                        "history" => {
+                            let store = store.ok_or_else(|| crate::error::Error::Tool("No session store".into()))?;
+                            let session = store.read(id)?;
+                            Ok(serde_json::json!({"agent":name,"session_id":id,"messages":serialize_shell_history_with_usage(&session)}))
+                        }
+                        "message" => {
+                            crate::gui_shell::team::send_message(&mailbox, name, msg["text"].as_str().unwrap_or(""))?;
+                            Ok(serde_json::json!({"text":format!("Message queued for {name}; it will be read at the next turn.")}))
+                        }
+                        "stop" => {
+                            if name == "lead" { shared.request_cancel(); }
+                            else { crate::gui_shell::team::stop_teammate(&mailbox, name)?; }
+                            Ok(serde_json::json!({"text":format!("Stop requested for {name} only.")}))
+                        }
+                        _ => unreachable!(),
+                    }
+                }.await;
+                let body = match result {
+                    Ok(value) => serde_json::json!({"result":value}),
+                    Err(error) => serde_json::json!({"error":error.to_string()}),
+                };
+                let mut reply: Value =
+                    serde_json::from_str(&shell_reply(request_id, body)).unwrap();
+                reply["shellId"] = Value::String(shell_id);
+                dispatch(reply.to_string());
+            });
+        }
+        "team_manage" => {
+            let mailbox = Arc::new(ipc_team_mailbox(ctx));
+            let dispatch = ctx.dispatch.clone();
+            let cwd = crate::workdir::current_workdir();
+            let request_id = msg["request_id"].clone();
+            let isolated = ctx.shared.session_roots.is_some();
+            tokio::spawn(async move {
+                let result = if isolated {
+                    Err(crate::error::Error::Tool("Team management is currently available in single-user bot workspaces only.".into()))
+                } else {
+                    crate::team::management::manage(mailbox, msg, cwd).await
+                };
+                let (ok, text) = match result {
+                    Ok(text) => (true, text),
+                    Err(e) => (false, e.to_string()),
+                };
+                dispatch(serde_json::json!({"type":"team_manage_result","request_id":request_id,"ok":ok,"text":text}).to_string());
+            });
+        }
+        "team_list" => {
+            let mailbox = ipc_team_mailbox(ctx);
             let agents: Vec<serde_json::Value> = mailbox
                 .all_status()
                 .unwrap_or_default()
@@ -5963,6 +6194,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         .collect();
                     serde_json::json!({
                         "name": a.agent,
+                        "session_id": if a.agent == "lead" { Some(execution.clone()) } else { mailbox.bound_session(&a.agent) },
                         "status": a.status,
                         // `alive=false` when the heartbeat is stale (crashed /
                         // never booted) so the Team tab can flag it; the raw
@@ -5974,10 +6206,21 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     })
                 })
                 .collect();
-            let has_team = team_dir.join("config.json").exists();
+            let config = crate::team::TeamConfig::load(&mailbox.team_dir.join("config.json")).ok();
+            let has_team = config.is_some();
+            let agents: Vec<_> = agents
+                .into_iter()
+                .filter(|a| {
+                    a["name"] == "lead"
+                        || config
+                            .as_ref()
+                            .is_none_or(|c| c.members.iter().any(|m| a["name"] == m.name))
+                })
+                .collect();
             let payload = serde_json::json!({
                 "type": "team_status",
                 "has_team": has_team,
+                "team": config,
                 "agents": agents,
             });
             (ctx.dispatch)(payload.to_string());
@@ -6915,13 +7158,57 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
 
         // ── Session sidebar mutators (M6.36 SERVE9j) ──────────────
         "session_load" => {
-            if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
-                let _ = ctx
-                    .shared
-                    .input_tx
-                    .send(crate::shared_session::ShellInput::LoadSession(
-                        id.to_string(),
-                    ));
+            let owned_session = msg
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| ipc_session_store(ctx)?.load(id).ok());
+            let mailbox = ipc_team_mailbox(ctx);
+            let live_owner = owned_session
+                .as_ref()
+                .and_then(|s| s.owner_agent.as_deref())
+                .filter(|agent| {
+                    mailbox.bound_session(agent).as_deref() == msg.get("id").and_then(Value::as_str)
+                });
+            if let (Some(agent), Some(id), Some(request)) = (
+                live_owner.or_else(|| {
+                    msg.get("team_agent")
+                        .and_then(Value::as_str)
+                        .filter(|agent| {
+                            mailbox.bound_session(agent).as_deref()
+                                == msg.get("id").and_then(Value::as_str)
+                        })
+                }),
+                msg.get("id").and_then(Value::as_str),
+                msg.get("view_request").and_then(Value::as_str),
+            ) {
+                let mailbox = ipc_team_mailbox(ctx);
+                match mailbox.read_session_events(agent,id,0) {
+                    Ok((offset,events)) => {
+                        let running = mailbox.read_status(agent).is_some_and(|s|s.status == "working" && !s.is_stale());
+                        let live = mailbox.read_status(agent).is_some_and(|s| s.status != "stopped" && !s.is_stale());
+                        (ctx.dispatch)(serde_json::json!({"type":"session_view","session_id":id,"team_agent":agent,"request_id":request,"sequence":0,"offset":offset,"events":events,"running":running,"team_live":live}).to_string());
+                    }
+                    Err(error) => (ctx.dispatch)(serde_json::json!({"type":"session_view_error","request_id":request,"text":error.to_string()}).to_string()),
+                }
+                return true;
+            }
+            if let Some(id) = msg.get("id").and_then(Value::as_str) {
+                if let Some(request_id) = msg.get("view_request").and_then(Value::as_str) {
+                    let result = ipc_session_store(ctx)
+                        .ok_or_else(|| "No session store".to_string())
+                        .and_then(|store| store.load(id).map_err(|e| e.to_string()));
+                    match result {
+                        Ok(session) => {
+                            let _ = ctx.shared.events_tx.send(crate::shared_session::ViewEvent::SessionViewRequest {session:Box::new(session), request_id:request_id.to_string()});
+                        }
+                        Err(error) => (ctx.dispatch)(serde_json::json!({"type":"session_view_error", "request_id":request_id, "text":error}).to_string()),
+                    }
+                } else if busy.as_ref().is_none_or(|m| m.session_id != id) {
+                    let _ = ctx
+                        .shared
+                        .input_tx
+                        .send(ShellInput::LoadSession(id.to_string()));
+                }
             }
         }
 
@@ -7024,6 +7311,39 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn team_mailbox_routes_hosted_bot_status_and_messages_without_config() {
+        let host = tempfile::tempdir().unwrap();
+        let bot_team = host.path().join(".thclaws/bots/main/.thclaws/state/team");
+        let worker = crate::team::Mailbox::new(bot_team.clone());
+        worker.write_status("lead", "active", None).unwrap();
+        worker.write_status("researcher", "working", None).unwrap();
+        // A lead must appear even before TeamCreate writes config.json.
+        assert!(!bot_team.join("config.json").exists());
+        let ipc = team_mailbox_for_workspace(None, || bot_team.clone());
+        assert_eq!(ipc.all_status().unwrap().len(), 2);
+        ipc.write_to_mailbox("lead", crate::team::TeamMessage::new("user", "hello"))
+            .unwrap();
+        assert_eq!(worker.read_unread("lead").unwrap()[0].content(), "hello");
+        assert!(!host
+            .path()
+            .join(crate::team::Mailbox::default_dir())
+            .exists());
+    }
+
+    #[test]
+    fn team_mailbox_keeps_isolated_users_out_of_the_lead_workspace() {
+        let user = tempfile::tempdir().unwrap();
+        let ipc = team_mailbox_for_workspace(Some(user.path()), || {
+            panic!("isolated requests must not resolve the process lead mailbox")
+        });
+        assert_eq!(
+            ipc.team_dir,
+            user.path().join(crate::team::Mailbox::default_dir())
+        );
+        assert!(ipc.all_status().unwrap().is_empty());
+    }
 
     /// IpcContext can be constructed with stub closures for tests.
     /// Pin the type signature so future refactors that break Send +

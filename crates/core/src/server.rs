@@ -24,10 +24,7 @@
 //! tunnel as the auth boundary.
 
 use crate::config::AppConfig;
-use crate::event_render::{
-    render_chat_dispatches, render_gui_shell_dispatch, render_terminal_ansi,
-    terminal_data_envelope, terminal_history_replaced_envelope, TerminalRenderState,
-};
+use crate::event_render::render_chat_dispatches;
 use crate::ipc::{handle_ipc, IpcContext, PendingAsks};
 use crate::providers::provider_has_credentials;
 use crate::session::SessionStore;
@@ -319,6 +316,7 @@ pub async fn run_on(
                 }
                 let payload = serde_json::json!({
                     "type": "ask_user_question",
+                    "session_id": crate::agent_activity::busy_meta().map(|m| m.session_id),
                     "id": id,
                     "question": question,
                 });
@@ -348,6 +346,7 @@ pub async fn run_on(
             while let Some(req) = approval_rx.recv().await {
                 let payload = serde_json::json!({
                     "type": "approval_request",
+                            "session_id": req.session_id,
                     "id": req.id,
                     "tool_name": req.tool_name,
                     "input": req.input,
@@ -2746,6 +2745,7 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
     for req in state.approver.unresolved_requests() {
         let payload = serde_json::json!({
             "type": "approval_request",
+                            "session_id": req.session_id,
             "id": req.id,
             "tool_name": req.tool_name,
             "input": req.input,
@@ -2763,56 +2763,19 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
     // in multi-tenant; default in single-tenant). Critical for
     // isolation — without this, every user's translator would
     // subscribe to the default handle and see everyone's events.
-    let mut events_rx = shared.subscribe();
+    let mut events_rx = shared.view_events.subscribe();
     let event_tx = out_tx.clone();
     let event_forwarder = tokio::spawn(async move {
-        let mut term_state = TerminalRenderState::default();
         loop {
             match events_rx.recv().await {
-                Ok(ev) => {
-                    // QuitRequested is a worker-side signal that the
-                    // user typed `/quit` — we close the WS so the
-                    // browser sees the disconnect and can decide what
-                    // to do next (today: nothing; future: snapshot
-                    // re-fetch on reconnect handles state).
-                    if matches!(ev, ViewEvent::QuitRequested) {
-                        break;
-                    }
-                    for dispatch in render_chat_dispatches(&ev) {
-                        if event_tx.send(dispatch).is_err() {
-                            return;
-                        }
-                    }
-                    // dev-plan/33 Tier 2 Mode B: emit gui_shell_event
-                    // envelopes so a shell's bridge runtime can consume
-                    // streamed text/done/error events over the same WS.
-                    // The browser-side bridge filters by `event` and
-                    // ignores chat_*/terminal_* envelopes meant for
-                    // the React frontend (which isn't loaded in Mode B
-                    // anyway, but staying symmetric keeps the gui+serve
-                    // combo path working too).
-                    if let Some(dispatch) = render_gui_shell_dispatch(&ev) {
-                        if event_tx.send(dispatch).is_err() {
-                            return;
-                        }
-                    }
-                    if let Some(ansi) = render_terminal_ansi(&mut term_state, &ev) {
-                        let envelope = if matches!(ev, ViewEvent::HistoryReplaced(_)) {
-                            terminal_history_replaced_envelope(&ansi)
-                        } else {
-                            terminal_data_envelope(&ansi)
-                        };
-                        if event_tx.send(envelope).is_err() {
-                            return;
-                        }
+                Ok(frame) => {
+                    if event_tx.send(frame).is_err() {
+                        return;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    // Slow consumer dropped events; log + resume —
-                    // reconnect-with-snapshot-replay re-syncs state on
-                    // the next ws drop (issue #163 Bug 1).
-                    eprintln!("[event_forwarder:ws] lagged: dropped {n} events");
-                    continue;
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = event_tx
+                        .send(serde_json::json!({"type":"session_view_invalidated"}).to_string());
                 }
                 Err(_) => break,
             }
@@ -2882,6 +2845,7 @@ fn build_initial_state_payload(sessions_dir: Option<std::path::PathBuf>) -> Stri
                 "model": s.model,
                 "messages": s.message_count,
                 "title": s.title,
+                "owner_agent": s.owner_agent,
             })
         })
         .collect();
@@ -2990,6 +2954,104 @@ fn build_kms_initial_payload(config: &AppConfig) -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn team_control_assets_reach_the_selected_host_agent() {
+        use crate::bots::supervisor::BotSupervisor;
+        use crate::gui_shell::ShellRegistry;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let sup = BotSupervisor::with_program(workspace.path(), "unused-test-engine");
+        let mut servers = Vec::new();
+        for slug in ["main", "writer"] {
+            let dir = crate::bots::bot_dir(workspace.path(), slug);
+            std::fs::create_dir_all(&dir).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            sup.add_ready_for_test(slug, dir, listener.local_addr().unwrap());
+            let app = Router::new().fallback(get(move |req: Request| async move {
+                assert_eq!(
+                    req.headers()[axum::http::header::AUTHORIZATION],
+                    "Bearer test-token"
+                );
+                let shell = ShellRegistry::builtin_only()
+                    .resolve("team-control")
+                    .unwrap();
+                let rel = req
+                    .uri()
+                    .path()
+                    .strip_prefix("/gui-shell/team-control/")
+                    .unwrap();
+                let mut response = if rel == "index.html" {
+                    crate::gui_shell::serve::serve_shell_index_inline(&shell)
+                } else {
+                    crate::gui_shell::serve::serve_shell_asset(&shell, rel)
+                };
+                response
+                    .headers_mut()
+                    .insert("x-test-agent", slug.parse().unwrap());
+                response
+            }));
+            servers.push(tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap()
+            }));
+        }
+        sup.set_default("main");
+
+        // Built-ins have no unique on-disk owner. The second bot's index and
+        // its relative assets must keep that selection through the proxy.
+        for rel in ["index.html", "main.js", "style.css", "icon.svg"] {
+            let req = Request::builder()
+                .uri(format!("/gui-shell/team-control/{rel}"))
+                .header(
+                    "referer",
+                    "http://host/gui-shell/team-control/index.html?bot=writer",
+                )
+                .body(Body::empty())
+                .unwrap();
+            let response =
+                supervisor_forward(State(sup.clone()), Query(BotQuery { bot: None }), req).await;
+            assert_eq!(response.status(), StatusCode::OK, "{rel}");
+            assert_eq!(response.headers()["x-test-agent"], "writer", "{rel}");
+            if rel == "index.html" {
+                assert_eq!(response.headers()["referrer-policy"], "same-origin");
+            }
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(!body.is_empty(), "{rel}");
+        }
+
+        // An installed override belongs to its on-disk owner even when a
+        // stale Referer points at the default bot. Explicit bot wins over both.
+        std::fs::create_dir_all(
+            crate::bots::bot_dir(workspace.path(), "writer")
+                .join(".thclaws/gui-shell/team-control"),
+        )
+        .unwrap();
+        for (explicit, expected) in [(None, "writer"), (Some("main"), "main")] {
+            let req = Request::builder()
+                .uri("/gui-shell/team-control/main.js")
+                .header(
+                    "referer",
+                    "http://host/gui-shell/team-control/index.html?bot=main",
+                )
+                .body(Body::empty())
+                .unwrap();
+            let response = supervisor_forward(
+                State(sup.clone()),
+                Query(BotQuery {
+                    bot: explicit.map(str::to_string),
+                }),
+                req,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-test-agent"], expected);
+        }
+        for server in servers {
+            server.abort();
+        }
+    }
 
     /// The host can name a shell's agent without asking the browser, which is
     /// the point: the Referer it used to rely on is suppressed by the shell's
@@ -3122,7 +3184,8 @@ mod tests {
         // Slash command — produces SlashOutput events without needing
         // any LLM provider configured (no API keys in CI).
         ws.send(WsMessage::text(
-            serde_json::json!({"type": "shell_input", "text": "/help"}).to_string(),
+            serde_json::json!({"type": "shell_input", "session_id": "", "text": "/help"})
+                .to_string(),
         ))
         .await
         .expect("ws send shell_input");
@@ -3140,11 +3203,19 @@ mod tests {
             match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
                 Ok(Some(Ok(WsMessage::Text(text)))) => {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text.as_str()) {
-                        if let Some(t) = parsed.get("type").and_then(|v| v.as_str()) {
-                            seen.push(t.to_string());
-                            if t == "chat_done" {
-                                break;
+                        if parsed["type"] == "session_event" {
+                            assert!(parsed["session_id"].as_str().is_some_and(|s| !s.is_empty()));
+                            assert!(parsed["sequence"].as_u64().is_some_and(|n| n > 0));
+                            for event in parsed["events"].as_array().expect("session event batch") {
+                                if let Some(t) = event["type"].as_str() {
+                                    seen.push(t.to_string());
+                                }
                             }
+                        } else if let Some(t) = parsed["type"].as_str() {
+                            seen.push(t.to_string());
+                        }
+                        if seen.iter().any(|t| t == "chat_done") {
+                            break;
                         }
                     }
                 }
@@ -3168,8 +3239,29 @@ mod tests {
             "missing chat_done (turn termination); saw: {seen:?}"
         );
 
-        // Clean shutdown.
+        // Reconnect after activation: the original activation broadcast is
+        // gone, but the new frontend must learn a nonempty execution ID.
         let _ = ws.send(WsMessage::Close(None)).await;
+        let (mut reconnected, _) = connect_async(&url).await.unwrap();
+        reconnected
+            .send(WsMessage::text(
+                serde_json::json!({"type":"frontend_ready"}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let identity = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(WsMessage::Text(text))) = reconnected.next().await {
+                let frame: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+                if frame["type"] == "session_execution" {
+                    return frame["session_id"].as_str().unwrap().to_string();
+                }
+            }
+            panic!("connection closed without execution identity")
+        })
+        .await
+        .expect("reconnect must replay execution identity");
+        assert!(!identity.is_empty());
+        let _ = reconnected.send(WsMessage::Close(None)).await;
         server_handle.abort();
     }
 

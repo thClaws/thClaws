@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { send, subscribe } from "../hooks/useIPC";
+import { send, subscribe, viewedSessionId } from "../hooks/useIPC";
 
 /**
  * Identity of the agent that fired this approval request. Tagged at
@@ -89,10 +89,13 @@ function summarizeInput(input: unknown): string {
 }
 
 export function ApprovalModal() {
-  const [queue, setQueue] = useState<PendingRequest[]>([]);
+  const [queue, setQueue] = useState<(PendingRequest & { sessionId?: string })[]>([]);
+  const [viewed, setViewed] = useState(viewedSessionId());
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
+      if (msg.type === "session_view_state") setViewed(msg.session_id as string | null);
+      if (msg.type === "chat_done") setQueue((prev) => prev.filter((r) => r.sessionId !== viewedSessionId()));
       if (msg.type === "approval_request" && typeof msg.id === "number") {
         const newId = msg.id as number;
         setQueue((prev) => {
@@ -109,6 +112,7 @@ export function ApprovalModal() {
             ...prev,
             {
               id: newId,
+              sessionId: typeof msg.session_id === "string" ? msg.session_id : undefined,
               tool_name: (msg.tool_name as string) ?? "?",
               input: msg.input,
               summary: (msg.summary as string | null) ?? null,
@@ -121,12 +125,12 @@ export function ApprovalModal() {
     return unsub;
   }, []);
 
-  const current = queue[0];
+  const current = queue.find((r) => !r.sessionId || r.sessionId === viewed);
   if (!current) return null;
 
   const respond = (decision: Decision) => {
     send({ type: "approval_response", id: current.id, decision });
-    setQueue((prev) => prev.slice(1));
+    setQueue((prev) => prev.filter((r) => r.id !== current.id));
   };
 
   const preview = current.summary ?? summarizeInput(current.input);

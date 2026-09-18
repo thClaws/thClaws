@@ -248,7 +248,12 @@ impl ShellRegistry {
 
     fn builtin_only_map() -> HashMap<String, EmbeddedShell> {
         let mut builtin = HashMap::new();
-        for shell in [session_explorer(), chatbot(), media_studio()] {
+        for shell in [
+            session_explorer(),
+            chatbot(),
+            media_studio(),
+            team_control(),
+        ] {
             builtin.insert(shell.manifest.id.clone(), shell);
         }
         builtin
@@ -411,6 +416,35 @@ fn build_embedded_shell(
         assets.insert(*rel, EmbeddedAsset { bytes, mime });
     }
     EmbeddedShell { manifest, assets }
+}
+
+fn team_control() -> EmbeddedShell {
+    build_embedded_shell(
+        include_str!("../../assets/gui-shells/team-control/manifest.json"),
+        &[
+            (
+                "index.html",
+                include_bytes!("../../assets/gui-shells/team-control/index.html"),
+                "text/html; charset=utf-8",
+            ),
+            (
+                "main.js",
+                include_bytes!("../../assets/gui-shells/team-control/main.js"),
+                "application/javascript; charset=utf-8",
+            ),
+            (
+                "style.css",
+                include_bytes!("../../assets/gui-shells/team-control/style.css"),
+                "text/css; charset=utf-8",
+            ),
+            (
+                "icon.svg",
+                include_bytes!("../../assets/gui-shells/team-control/icon.svg"),
+                "image/svg+xml",
+            ),
+        ],
+        "team-control",
+    )
 }
 
 /// Session Explorer — Tier 1 demo shell. Read-only browser of past

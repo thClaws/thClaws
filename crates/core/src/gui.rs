@@ -16,10 +16,9 @@
 #![cfg(feature = "gui")]
 
 use crate::config::AppConfig;
-use crate::event_render::{
-    render_chat_dispatches, render_gui_shell_dispatch, render_terminal_ansi,
-    terminal_data_envelope, terminal_history_replaced_envelope, TerminalRenderState,
-};
+use crate::event_render::terminal_data_envelope;
+#[cfg(test)]
+use crate::event_render::{render_chat_dispatches, render_terminal_ansi, TerminalRenderState};
 use crate::session::SessionStore;
 use crate::shared_session::{SharedSessionHandle, ShellInput, ViewEvent};
 use base64::Engine;
@@ -102,66 +101,45 @@ enum UserEvent {
 // the same conversation.
 
 fn spawn_event_translator(handle: &SharedSessionHandle, proxy: EventLoopProxy<UserEvent>) {
-    let mut rx = handle.subscribe();
+    let control_proxy = proxy.clone();
+    let mut control = handle.subscribe();
+    let mut rx = handle.view_events.subscribe();
     std::thread::spawn(move || {
-        // tokio runtime so we can `.recv().await` on the broadcast.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("translator runtime");
         rt.block_on(async move {
-            let mut term_state = TerminalRenderState::default();
             loop {
                 match rx.recv().await {
-                    Ok(ev) => {
-                        // /quit confirmed by the worker — forward to
-                        // the tao event loop so the window runs the
-                        // same save-and-exit path as the close button
-                        // (#52). No chat / terminal rendering needed.
-                        if matches!(ev, ViewEvent::QuitRequested) {
-                            let _ = proxy.send_event(UserEvent::QuitRequested);
-                            continue;
-                        }
-                        if matches!(ev, ViewEvent::ReloadRequested) {
-                            let _ = proxy.send_event(UserEvent::ReloadRequested);
-                            continue;
-                        }
-                        for dispatch in render_chat_dispatches(&ev) {
-                            let _ = proxy.send_event(UserEvent::Dispatch(dispatch));
-                        }
-                        // dev-plan/33 Tier 1: also emit a gui_shell_event
-                        // for any active shell iframes. The shell shares
-                        // this session in Tier 1, so this is effectively
-                        // a third rendering of the same stream — Chat and
-                        // Terminal still get their events as before.
-                        if let Some(dispatch) = render_gui_shell_dispatch(&ev) {
-                            let _ = proxy.send_event(UserEvent::Dispatch(dispatch));
-                        }
-                        if let Some(ansi) = render_terminal_ansi(&mut term_state, &ev) {
-                            // HistoryReplaced needs a distinct envelope
-                            // so the frontend always re-renders the
-                            // prompt at the end — empty-history loads
-                            // (new session / loaded session with no
-                            // messages) otherwise leave the terminal
-                            // with no `❯ ` and the user has to press a
-                            // key before they realize it's responsive.
-                            let envelope = if matches!(ev, ViewEvent::HistoryReplaced(_)) {
-                                terminal_history_replaced_envelope(&ansi)
-                            } else {
-                                terminal_data_envelope(&ansi)
-                            };
-                            let _ = proxy.send_event(UserEvent::Dispatch(envelope));
-                        }
+                    Ok(frame) => {
+                        let _ = proxy.send_event(UserEvent::Dispatch(frame));
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        // Slow consumer dropped events; log the drop so it's
-                        // diagnosable (issue #163 Bug 1) — a full re-sync
-                        // would need agent access; the next live event keeps
-                        // state roughly in sync.
-                        eprintln!("[event_forwarder:gui] lagged: dropped {n} events");
-                        continue;
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = proxy.send_event(UserEvent::Dispatch(
+                            serde_json::json!({"type":"session_view_invalidated"}).to_string(),
+                        ));
                     }
                     Err(_) => break,
+                }
+            }
+        });
+    });
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("control runtime");
+        rt.block_on(async move {
+            while let Ok(event) = control.recv().await {
+                match event {
+                    ViewEvent::QuitRequested => {
+                        let _ = control_proxy.send_event(UserEvent::QuitRequested);
+                    }
+                    ViewEvent::ReloadRequested => {
+                        let _ = control_proxy.send_event(UserEvent::ReloadRequested);
+                    }
+                    _ => {}
                 }
             }
         });
@@ -1000,6 +978,7 @@ fn run_gui_inner(
                 }
                 let payload = serde_json::json!({
                     "type": "ask_user_question",
+                    "session_id": crate::agent_activity::busy_meta().map(|m| m.session_id),
                     "id": id,
                     "question": question,
                 });
@@ -1023,9 +1002,9 @@ fn run_gui_inner(
                     "\r\n\x1b[36m─── assistant asks ─────────────────────\x1b[0m\r\n\x1b[36m{}\x1b[0m\r\n\x1b[36m─── reply via the Chat tab ─────────────\x1b[0m\r\n",
                     question.replace('\n', "\r\n"),
                 );
-                let _ = proxy_for_ask.send_event(UserEvent::Dispatch(
-                    terminal_data_envelope(&terminal_block),
-                ));
+                let mut terminal: serde_json::Value = serde_json::from_str(&terminal_data_envelope(&terminal_block)).unwrap();
+                terminal["session_id"] = payload["session_id"].clone();
+                let _ = proxy_for_ask.send_event(UserEvent::Dispatch(terminal.to_string()));
             }
         });
     });
@@ -1059,6 +1038,7 @@ fn run_gui_inner(
                     for req in pending {
                         let payload = serde_json::json!({
                             "type": "approval_request",
+                            "session_id": req.session_id,
                             "id": req.id,
                             "tool_name": req.tool_name,
                             "input": crate::tool_display::redact_json_value(&req.input),
@@ -1072,6 +1052,7 @@ fn run_gui_inner(
             while let Some(req) = approval_rx.recv().await {
                 let payload = serde_json::json!({
                     "type": "approval_request",
+                            "session_id": req.session_id,
                     "id": req.id,
                     "tool_name": req.tool_name,
                     "input": crate::tool_display::redact_json_value(&req.input),
@@ -1999,6 +1980,7 @@ fn run_gui_inner(
                         "model": s.model,
                         "messages": s.message_count,
                         "title": s.title,
+                        "owner_agent": s.owner_agent,
                     }))
                     .collect();
                 let kms_update = build_kms_update_payload();

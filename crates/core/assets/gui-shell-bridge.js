@@ -129,6 +129,7 @@
   // out to bridge subscribers or resolve a pending request — shared
   // between Mode A (parent postMessage) and Mode B (WS).
   function handleShellEvent(data) {
+    if (data.shellId && data.shellId !== shellId) return;
     if (data.replyTo != null && pending.has(data.replyTo)) {
       const slot = pending.get(data.replyTo);
       pending.delete(data.replyTo);
@@ -821,6 +822,21 @@
     // returned AND the agent is primed so run() continues it), start a
     // new one, rename, delete. Needs `session.list`/`session.read`
     // (reads) and `session.write` (new/rename/delete) in the manifest.
+    // Native Agent Teams: never routes through the shared run/cancel API.
+    team: {
+      snapshot() { return send("team", { action: "snapshot" }); },
+      manage(operation) { return send("team", { action: "manage", operation }); },
+      message(agent, targetSession, text) {
+        return send("team", { action: "message", agent, targetSession, text });
+      },
+      stop(agent, targetSession) {
+        return send("team", { action: "stop", agent, targetSession });
+      },
+      history(agent, targetSession) {
+        return send("team", { action: "history", agent, targetSession });
+      },
+    },
+
     sessions: {
       // -> { sessions: [{ id, title, updatedAt, messageCount, model }] }
       list() {

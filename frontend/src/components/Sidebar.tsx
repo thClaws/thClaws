@@ -5,7 +5,14 @@ import { ModelPickerDropdown } from "./ModelPickerDropdown";
 import { KmsCreateModal, type KmsCreateMode } from "./KmsCreateModal";
 import { CtxMenuItem } from "./CtxMenuItem";
 
-type SessionInfo = { id: string; model: string; messages: number; title?: string | null };
+type SessionInfo = { id: string; model: string; messages: number; title?: string | null; owner_agent?: string | null };
+function sessionLabel(session: SessionInfo): string {
+  const owner = session.owner_agent?.trim();
+  const title = session.title?.trim();
+  if (!owner || owner === "lead") return `Lead · ${title || `Session ${session.id.slice(-6)}`}`;
+  return title ? `${owner} · ${title}` : owner;
+}
+
 type KmsInfo = { name: string; scope: "user" | "project"; active: boolean };
 type LineStatus = {
   state: "connected" | "disconnected";
@@ -547,18 +554,8 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
         action={
           <button
             className="p-0.5 rounded hover:bg-white/10"
-            title="New session (cancels active task + saves current + clears)"
+            title="New lead session (keeps active task running)"
             onClick={() => {
-              // session_load / new_session are processed by the same
-              // single-threaded worker that runs agent turns; if a turn
-              // is in flight the swap message sits in the input queue
-              // until the turn finishes — issue #95(a): users expected
-              // the click to switch sessions immediately. Always fire
-              // shell_cancel first; it's idempotent on the backend
-              // (no-op when nothing is running) so it's safe to send
-              // even on an idle agent. Same reasoning as the Ctrl+C
-              // handler in TerminalView.tsx.
-              send({ type: "shell_cancel" });
               send({ type: "new_session" });
             }}
           >
@@ -576,7 +573,8 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
             ? sessions.slice(0, 10)
             : sessions
                 .filter((s) =>
-                  (s.title?.toLowerCase().includes(q) ?? false) ||
+                  sessionLabel(s).toLowerCase().includes(q) ||
+                  (s.owner_agent?.toLowerCase().includes(q) ?? false) ||
                   s.id.toLowerCase().includes(q),
                 )
                 .slice(0, 50);
@@ -603,9 +601,10 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
                 </div>
               ) : (
                 filtered.map((s) => {
-            const label = s.title && s.title.trim().length > 0
-              ? s.title
-              : s.id;
+            const name = sessionLabel(s);
+            const label = sessions.filter((other) => sessionLabel(other) === name).length > 1
+              ? `${name} · ${s.id.slice(-6)}`
+              : name;
             const isCurrent = s.id === currentSessionId;
             return (
               <div
@@ -637,16 +636,13 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
                     fontWeight: isCurrent ? 600 : 400,
                   }}
                   onClick={() => {
-                    // See "New session" button comment above for why
-                    // shell_cancel goes first — issue #95(a).
-                    send({ type: "shell_cancel" });
+                    if (isCurrent) return;
                     send({ type: "session_load", id: s.id });
                   }}
-                  title={s.title ? `${s.title} (${s.id}) — ${s.messages} msg${isCurrent ? " — current" : ""}` : `${s.id} — ${s.messages} msg${isCurrent ? " — current" : ""}`}
+                  title={`${label} (${s.id})${s.owner_agent ? ` — Agent: ${s.owner_agent}` : ""} — ${s.messages} msg${isCurrent ? " — current" : ""}`}
                 >
                   <span
-                    className={s.title ? "" : "font-mono"}
-                    style={{ fontSize: s.title ? "12px" : "10px" }}
+                    style={{ fontSize: "12px" }}
                   >
                     {label}
                   </span>
@@ -799,7 +795,7 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
               // loop — otherwise the menu stays visible *behind* the
               // OS dialog on macOS (NSAlert pauses the whole app).
               await new Promise((r) => requestAnimationFrame(() => r(undefined)));
-              const label = s.title && s.title.trim().length > 0 ? s.title : s.id;
+              const label = sessionLabel(s);
               const ok = await platformConfirm({
                 title: "Delete session",
                 message: `Delete session "${label}"? This removes it from disk and can't be undone.`,
@@ -1163,7 +1159,21 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
               }}
             >
               <div className="px-4 py-3">
+                <label className="block mb-3 text-xs" style={{ color: "var(--text-secondary)" }}>
+                  Original session ID (unchanged)
+                  <input
+                    readOnly
+                    value={renameTarget.id}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="mt-1 w-full rounded border px-2 py-1 font-mono text-xs"
+                    style={{ background: "var(--bg-secondary)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+                  />
+                </label>
+                <label htmlFor="session-rename-title" className="block mb-1 text-xs">
+                  Display name
+                </label>
                 <input
+                  id="session-rename-title"
                   ref={renameInputRef}
                   type="text"
                   defaultValue={renameTarget.current}

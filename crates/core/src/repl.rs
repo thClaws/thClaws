@@ -6493,8 +6493,10 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         // each launch (a non-empty latest is left alone, so we still land
         // on a clean session). The reused one takes the current model.
         if let Ok(Some(mut empty)) = store.reuse_empty_latest() {
-            empty.model = config.model.clone();
-            session = empty;
+            if team_agent_name.is_none() {
+                empty.model = config.model.clone();
+                session = empty;
+            }
         }
     }
 
@@ -6530,6 +6532,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         }
         tokio::spawn(async { crate::update_check::refresh().await });
     }
+
+    session.owner_agent = team_agent_name.clone();
 
     // ── Team agent mode: inject rules + poll inbox ────────────────────
     if let Some(ref agent_name) = team_agent_name {
@@ -6628,6 +6632,30 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         let mailbox = crate::team::Mailbox::new(team_dir.clone());
         mailbox.init_agent(agent_name).unwrap_or(());
 
+        #[cfg(feature = "gui")]
+        let journal = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::session_view::TeamSessionJournal::new(&mailbox, agent_name, &session)
+                .map_err(|error| eprintln!("[team] session journal unavailable: {error}"))
+                .ok(),
+        ));
+        #[cfg(feature = "gui")]
+        {
+            let plan_journal = journal.clone();
+            crate::tools::plan_state::set_broadcaster(move |plan| {
+                if let Some(j) = plan_journal.lock().unwrap().as_mut() {
+                    let _ = j.append(&crate::shared_session::ViewEvent::PlanUpdate(plan));
+                }
+            });
+            let goal_journal = journal.clone();
+            crate::goal_state::set_broadcaster(move |goal| {
+                if let Some(j) = goal_journal.lock().unwrap().as_mut() {
+                    let _ = j.append(&crate::shared_session::ViewEvent::GoalUpdate(goal.cloned()));
+                }
+            });
+        }
+        if let Some(store) = &session_store {
+            let _ = session.write_header_if_missing(&store.path_for(&session.id));
+        }
         // Output log file for GUI Team tab to read.
         let log_path = mailbox.output_log_path(agent_name);
         let mut log_file = std::fs::OpenOptions::new()
@@ -6680,28 +6708,6 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
         // Soft retry counter for tasks left un-completed.
         let mut task_retries: std::collections::HashMap<String, u8> =
             std::collections::HashMap::new();
-
-        // Drain any AbortTurn protocol message (marks it read); true if found.
-        // The only way to interrupt a headless teammate mid-turn.
-        fn poll_abort_request(mailbox: &crate::team::Mailbox, agent: &str) -> bool {
-            let unread = mailbox.read_unread(agent).unwrap_or_default();
-            let abort_ids: Vec<String> = unread
-                .iter()
-                .filter(|m| {
-                    matches!(
-                        crate::team::parse_protocol_message(m.content()),
-                        Some(crate::team::ProtocolMessage::AbortTurn { .. })
-                    )
-                })
-                .map(|m| m.id.clone())
-                .collect();
-            if abort_ids.is_empty() {
-                false
-            } else {
-                let _ = mailbox.mark_as_read(agent, &abort_ids);
-                true
-            }
-        }
 
         loop {
             // Reclaim tasks stranded InProgress by a crashed/stopped peer.
@@ -6817,12 +6823,20 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 let mut capped = false;
                 let mut aborted = false;
 
+                let mut turn_usage_line = None;
+                #[cfg(feature = "gui")]
+                if let Some(j) = journal.lock().unwrap().as_mut() {
+                    let _ = j.append(&crate::shared_session::ViewEvent::UserPrompt(
+                        msg.content().to_string(),
+                    ));
+                }
                 // Run the agent turn.
                 repl_cancel.reset();
                 let mut stream = Box::pin(agent.run_turn(prompt));
+                let mut control_tick =
+                    tokio::time::interval(std::time::Duration::from_millis(poll_ms));
+                control_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
-                    let heartbeat_delay =
-                        crate::tool_display::next_heartbeat_delay(&team_active_tools);
                     let ev = tokio::select! {
                         ev = stream.next() => ev,
                         _ = tokio::signal::ctrl_c() => {
@@ -6842,7 +6856,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             aborted = true;
                             break;
                         }
-                        _ = tokio::time::sleep(heartbeat_delay) => {
+                        _ = control_tick.tick() => {
                             if let Some(id) = crate::tool_display::oldest_due_heartbeat(&team_active_tools).map(|(k, _)| k.clone()) {
                                 if let Some(td) = team_active_tools.get_mut(&id) {
                                     team_println!("\n{}", crate::tool_display::format_tool_heartbeat(&td.label, td.elapsed()));
@@ -6855,7 +6869,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 last_heartbeat = std::time::Instant::now();
                             }
                             // Cooperative cancel (headless teammate gets no SIGINT).
-                            if poll_abort_request(&mailbox, agent_name) {
+                            if mailbox.take_abort_request(agent_name) {
                                 team_println!("\n[{agent_name}] abort requested — cancelling turn");
                                 repl_cancel.cancel();
                                 drop(stream);
@@ -6866,6 +6880,19 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         }
                     };
                     let Some(ev) = ev else { break };
+                    #[cfg(feature = "gui")]
+                    if let Some(j) = journal.lock().unwrap().as_mut() {
+                        match &ev {
+                            Ok(event) => {
+                                let _ = j.agent_event(event);
+                            }
+                            Err(error) => {
+                                let _ = j.append(&crate::shared_session::ViewEvent::ErrorText(
+                                    error.to_string(),
+                                ));
+                            }
+                        }
+                    }
                     match ev {
                         Ok(AgentEvent::Text(s)) => {
                             team_print!("{s}");
@@ -6901,6 +6928,12 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             last_heartbeat = std::time::Instant::now();
                         }
                         Ok(AgentEvent::Done { usage, stop_reason }) => {
+                            turn_usage_line = Some(format!(
+                                "[tokens: {}in/{}out · {}]",
+                                usage.input_tokens,
+                                usage.output_tokens,
+                                format_duration(turn_start.elapsed())
+                            ));
                             capped = stop_reason.as_deref() == Some("max_iterations");
                             // Record teammate usage to project's .thclaws/usage/.
                             // Use team_dir parent to find project root (team_dir is absolute).
@@ -6935,6 +6968,39 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 }
                 team_println!("");
 
+                session.sync(agent.history_snapshot());
+                if let Some(provider_id) = agent.provider().provider_session_id() {
+                    session.provider_session_id = Some(provider_id);
+                }
+                if let Some(store) = &session_store {
+                    if let Err(error) = store.save(&mut session) {
+                        eprintln!("[team] failed to save session {}: {error}", session.id);
+                    }
+                    let path = store.path_for(&session.id);
+                    let _ = crate::session::append_plan_snapshot(
+                        &path,
+                        crate::tools::plan_state::get().as_ref(),
+                    );
+                    let _ = crate::session::append_goal_snapshot(
+                        &path,
+                        crate::goal_state::current().as_ref(),
+                    );
+                    if let Some(line) = &turn_usage_line {
+                        let _ = session.append_turn_usage_to(&path, line);
+                    }
+                }
+                #[cfg(feature = "gui")]
+                if let Some(j) = journal.lock().unwrap().as_mut() {
+                    if aborted {
+                        let _ = j.append(&crate::shared_session::ViewEvent::ErrorText(
+                            "(interrupted)".into(),
+                        ));
+                    }
+                    if let Some(line) = turn_usage_line {
+                        let _ = j.append(&crate::shared_session::ViewEvent::TurnUsage(line));
+                    }
+                    let _ = j.append(&crate::shared_session::ViewEvent::TurnDone);
+                }
                 // This message's turn ran — mark it read (consume it) and drop
                 // it from in_flight so it isn't re-pushed next poll.
                 let _ = mailbox.mark_as_read(agent_name, &[msg.id.clone()]);

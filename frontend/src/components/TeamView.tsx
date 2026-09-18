@@ -1,3 +1,4 @@
+import { TeamManager } from "./TeamManager";
 import { useEffect, useRef, useState } from "react";
 import { subscribe, send } from "../hooks/useIPC";
 import { useTheme, type ResolvedTheme } from "../hooks/useTheme";
@@ -120,6 +121,7 @@ function ansiToHtml(text: string, palette: Record<number, string>): string {
 
 interface AgentInfo {
   name: string;
+  sessionId: string | null;
   status: string;
   task: string | null;
   output: string[];
@@ -135,6 +137,7 @@ export function TeamView() {
         setAgents(
           msg.agents.map((a: Record<string, unknown>): AgentInfo => ({
             name: String(a.name || a.agent || "?"),
+            sessionId: typeof a.session_id === "string" && a.session_id ? a.session_id : null,
             status: String(a.status || "unknown"),
             task: a.task ? String(a.task) : a.current_task ? String(a.current_task) : null,
             output: Array.isArray(a.output) ? a.output as string[] : [],
@@ -167,16 +170,19 @@ export function TeamView() {
 
   if (agents.length === 0) {
     return (
+      <div className="h-full flex flex-col min-h-0">
+        <TeamManager />
       <div
-        className="flex items-center justify-center h-full"
+        className="flex-1 flex items-center justify-center"
         style={{ color: "var(--text-secondary)" }}
       >
         <div className="text-center">
           <p className="text-sm">No team agents running</p>
           <p className="text-xs mt-2">
-            Ask the agent to create a team — teammates will appear here
+            Use Manage team to create a team and add teammates
           </p>
         </div>
+      </div>
       </div>
     );
   }
@@ -184,8 +190,13 @@ export function TeamView() {
   const cols = agents.length <= 1 ? 1 : agents.length <= 4 ? 2 : 3;
 
   return (
+    <div className="h-full flex flex-col min-h-0">
+      <TeamManager />
+      <div className="px-3 py-2 text-xs" style={{ color: "var(--text-secondary)" }}>
+        Agents in this bot · Lead and teammates · {agents.length} members
+      </div>
     <div
-      className="h-full w-full grid gap-px overflow-hidden"
+      className="flex-1 min-h-0 w-full grid gap-px overflow-hidden"
       style={{
         gridTemplateColumns: `repeat(${cols}, 1fr)`,
         gridTemplateRows: `repeat(${Math.ceil(agents.length / cols)}, 1fr)`,
@@ -195,6 +206,7 @@ export function TeamView() {
       {agents.map((agent) => (
         <AgentPane key={agent.name} agent={agent} />
       ))}
+    </div>
     </div>
   );
 }
@@ -242,6 +254,7 @@ function AgentPane({ agent }: { agent: AgentInfo }) {
         }}
       >
         <span style={{ color: "var(--accent)" }}>{agent.name}</span>
+        {agent.sessionId && <button className="px-2 py-1 rounded hover:bg-white/10" onClick={() => send({type:"session_load",id:agent.sessionId,...(agent.name === "lead" ? {} : {team_agent:agent.name})})}>Open session</button>}
         <span style={{ color: statusColor }}>
           {statusLabel}
           {agent.task ? ` · ${agent.task}` : ""}

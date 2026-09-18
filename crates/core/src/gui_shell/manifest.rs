@@ -59,6 +59,10 @@ fn default_bridge_version() -> String {
 /// `network.outbound:<host>` are prefix forms (any suffix allowed).
 const ALLOWED_PERMISSION_PREFIXES: &[&str] = &[
     "agent.run",
+    "team.read",
+    "team.message",
+    "team.control",
+    "team.manage",
     "session.read",
     "session.list",
     // Sessions bridge (thclaws.sessions.*): write = new/rename/delete a

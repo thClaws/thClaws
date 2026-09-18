@@ -12,6 +12,8 @@ import {
   Maximize2,
   Globe,
   Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { TerminalView } from "./components/TerminalView";
 import { ChatView } from "./components/ChatView";
@@ -709,6 +711,10 @@ export default function App() {
   // current_cwd when `guiShell.tabDefault` is set in settings.json so
   // the workspace lands on the GUI shell instead.
   const [activeTab, setActiveTab] = useState<Tab>("chat");
+  useEffect(() => subscribe((msg) => {
+    if (msg.type === "session_view_selected" && msg.team_agent) setActiveTab("chat");
+  }), []);
+
   // Full-screen UI mode — hides tab strip, sidebar, status bar so the
   // GUI shell fills the viewport (the cloud equivalent of running
   // `thclaws --serve --gui-shell <id>`). Auto-enters when the backend
@@ -853,6 +859,19 @@ export default function App() {
   // breakpoint (toggled by the hamburger in the tab bar). On `sm:`+ it's
   // the normal inline column, so this flag is ignored there.
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("thclaws_sidebar_collapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("thclaws_sidebar_collapsed", String(sidebarCollapsed));
+    } catch { /* Storage may be unavailable in a restricted webview. */ }
+  }, [sidebarCollapsed]);
+
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -1010,6 +1029,16 @@ export default function App() {
           >
             <Menu size={18} />
           </button>
+          <button
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            className="hidden sm:flex items-center justify-center p-2 shrink-0"
+            title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            aria-expanded={!sidebarCollapsed}
+            style={{ color: "var(--text-secondary)" }}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
           {/* Tabs — horizontally scrollable when they don't fit (mobile);
             labels collapse to icons below `sm`. */}
           <div className="flex items-center overflow-x-auto no-scrollbar">
@@ -1089,6 +1118,7 @@ export default function App() {
             <div
               className={
                 "flex z-40 max-sm:fixed max-sm:inset-y-0 max-sm:left-0 max-sm:shadow-2xl max-sm:transition-transform " +
+                (sidebarCollapsed ? "sm:hidden " : "") +
                 (sidebarOpen
                   ? "max-sm:translate-x-0"
                   : "max-sm:-translate-x-full")

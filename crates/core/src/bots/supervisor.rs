@@ -821,6 +821,16 @@ pub async fn stdin_closed() {
 }
 
 #[cfg(test)]
+impl BotSupervisor {
+    pub(crate) fn add_ready_for_test(&self, slug: &str, dir: PathBuf, addr: SocketAddr) {
+        let mut bot = Bot::fake_ready(slug, addr, "test-token");
+        Arc::get_mut(&mut bot).unwrap().dir = dir;
+        self.bots.lock().unwrap().insert(slug.to_string(), bot);
+        self.order.lock().unwrap().push(slug.to_string());
+    }
+}
+
+#[cfg(test)]
 impl Bot {
     /// A bot that is already serving at `addr`, for tests that exercise the
     /// proxy without spawning a process.

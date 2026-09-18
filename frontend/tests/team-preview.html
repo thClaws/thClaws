@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><meta charset="UTF-8"><title>thClaws team session fixture</title></head>
+<body><div id="root"></div><script>
+// Local, deterministic UI fixture. No backend, model, or team processes are started.
+window.testSent = [];
+window.ipc = {postMessage(raw) {
+  const m = JSON.parse(raw); window.testSent.push(m); console.info("[team-fixture]", JSON.stringify(m));
+  const emit = f => setTimeout(() => window.__thclaws_dispatch?.(JSON.stringify(f)), 0);
+  if (m.type === 'get_cwd') emit({type:'current_cwd',path:'/tmp/mock-team',needs_modal:false,initial_tab:'chat'});
+  if (m.type === 'frontend_ready') {
+    emit({type:'initial_state',current_id:'lead-session',sessions:[],model:'mock',provider:'mock',team_enabled:true});
+    emit({type:'session_execution',session_id:'lead-session'});
+    emit({type:'gui_busy_changed',busy:true,sessionId:'lead-session'});
+  }
+  if (m.type === 'team_enabled_get') emit({type:'team_enabled_result',enabled:true});
+  if (m.type === 'team_list') emit({type:'team_status',has_team:true,agents:[
+    {name:'researcher',session_id:'research-session',status:'working',task:'Research sources',output:['Research in progress'],alive:true},
+    {name:'coder',session_id:'coder-session',status:'working',task:'Implement changes',output:['Implementation in progress'],alive:true}
+  ]});
+  if (m.type === 'session_load') emit({type:'session_view',session_id:m.id,request_id:m.view_request,team_agent:m.team_agent,team_live:!!m.team_agent,running:true,offset:100,sequence:0,events:[{type:'chat_user_message',text:'Research the architecture'},{type:'chat_text_delta',text:`${m.team_agent || 'lead'} is working independently while the rest of the team continues.`}]});
+  if (m.type === 'team_session_poll') emit({type:'team_session_events',session_id:m.session_id,team_agent:m.team_agent,offset:m.offset,next_offset:m.offset,running:true,events:[]});
+  if (m.type === 'team_send_message') emit({type:'team_message_queued',session_id:m.session_id,text:'Message queued for '+m.to});
+}};
+</script><script type="module" src="/src/main.tsx"></script></body></html>
