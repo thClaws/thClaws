@@ -577,6 +577,7 @@ pub async fn dispatch(
         SlashCommand::Clear => {
             state.agent.clear_history();
             state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
+            let _ = events_tx.send(ViewEvent::SessionActivated(Box::new(state.session.clone())));
             // Reset session-scoped trust + plan state too. ChangeCwd's
             // hygiene block (shared_session.rs ~2820) is the reference;
             // /clear used to skip these, so the previous conversation's
@@ -626,6 +627,8 @@ pub async fn dispatch(
                     Ok(loaded) => {
                         state.agent.set_history(loaded.messages.clone());
                         state.session = loaded;
+                        let _ = events_tx
+                            .send(ViewEvent::SessionActivated(Box::new(state.session.clone())));
                         let display = DisplayMessage::from_session(&state.session);
                         let _ = events_tx.send(ViewEvent::HistoryReplaced(display));
                         emit(events_tx, format!("loaded session: {}", state.session.id));
@@ -976,6 +979,7 @@ pub async fn dispatch(
             state.agent.clear_history();
             state.agent.set_history(summary_history.clone());
             state.session.messages = summary_history.clone();
+            let _ = events_tx.send(ViewEvent::SessionActivated(Box::new(state.session.clone())));
             // Persist the new session with its seeded history.
             if let Some(store) = &state.session_store {
                 let _ = store.save(&mut state.session);

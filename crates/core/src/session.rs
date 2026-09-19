@@ -290,9 +290,16 @@ pub struct SessionMeta {
 
 impl Session {
     pub fn new(model: impl Into<String>, cwd: impl Into<String>) -> Self {
+        let session = Self::new_detached(model, cwd);
+        crate::audit::set_session(&session.id);
+        session
+    }
+
+    /// Create a record for background viewing without moving the executing
+    /// agent's audit context.
+    pub fn new_detached(model: impl Into<String>, cwd: impl Into<String>) -> Self {
         let now = now_secs();
         let id = generate_id();
-        crate::audit::set_session(&id);
         Self {
             id,
             created_at: now,

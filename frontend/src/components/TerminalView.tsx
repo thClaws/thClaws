@@ -861,6 +861,12 @@ export function TerminalView({ active, modalOpen }: Props) {
           writePrompt();
           if (lineBuffer.length > 0) term.write(lineBuffer);
         }
+      } else if (msg.type === "session_view_state") {
+        setStreaming(msg.running === true);
+      } else if (msg.type === "session_action_rejected") {
+        term.write(`\r\n${String(msg.text)}\r\n`);
+        setStreaming(false);
+        writePrompt();
       } else if (msg.type === "chat_done") {
         // Turn complete — newline (if needed) + fresh prompt.
         // Stale askPromptId can't outlive a turn boundary; if the

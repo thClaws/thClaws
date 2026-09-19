@@ -1,3 +1,4 @@
+import { SessionNavigation } from "./sessionNavigation";
 /**
  * IPC bridge between React frontend and Rust backend.
  *
@@ -43,7 +44,7 @@ const handlers = new Set<Handler>();
 type AnyHandler = (slug: string | null, msg: IPCMessage) => void;
 const anyHandlers = new Set<AnyHandler>();
 
-function dispatchToSubscribers(msg: IPCMessage) {
+function emitToSubscribers(msg: IPCMessage) {
   handlers.forEach((h) => {
     try {
       h(msg);
@@ -52,6 +53,20 @@ function dispatchToSubscribers(msg: IPCMessage) {
     }
   });
 }
+
+const navigation = new Map<string | null, SessionNavigation>();
+function sessionNavigation() {
+  let state = navigation.get(activeSlug);
+  if (!state) {
+    state = new SessionNavigation(emitToSubscribers, transmit);
+    navigation.set(activeSlug, state);
+  }
+  return state;
+}
+function dispatchToSubscribers(msg: IPCMessage) { sessionNavigation().receive(msg); }
+export function sessionActionError() { return sessionNavigation().actionError(); }
+export function viewedSessionId() { return sessionNavigation().viewed; }
+
 
 function dispatchFromBot(slug: string | null, msg: IPCMessage) {
   anyHandlers.forEach((h) => {
@@ -283,7 +298,9 @@ export function subscribeAny(handler: AnyHandler): () => void {
 
 // ── Public API ──────────────────────────────────────────────────────
 
-export function send(msg: IPCMessage) {
+export function send(msg: IPCMessage) { return sessionNavigation().send(msg); }
+
+function transmit(msg: IPCMessage) {
   if (wrySend) {
     wrySend(msg);
     return;

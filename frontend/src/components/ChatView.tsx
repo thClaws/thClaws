@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { resolveAssetSrc } from "../lib/fileAsset";
 import { Check, Copy, Paperclip } from "lucide-react";
-import { basePath, send, subscribe } from "../hooks/useIPC";
+import { basePath, send, subscribe, sessionActionError } from "../hooks/useIPC";
 import { promptHistory, recordPrompt } from "../hooks/promptHistory";
 import { useTheme } from "../hooks/useTheme";
 import { useVersion } from "../hooks/useVersion";
@@ -270,6 +270,7 @@ export function ChatView({ active, modalOpen }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [sessionBlocked, setSessionBlocked] = useState<string | null>(null);
   const [askPrompt, setAskPrompt] = useState<AskPrompt | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
@@ -824,6 +825,14 @@ export function ChatView({ active, modalOpen }: Props) {
             waitingTimerRef.current = null;
           }
           break;
+        case "session_action_rejected":
+          setStreaming(false);
+          setMessages((prev) => [...prev, {role: "system", content: String(msg.text)}]);
+          break;
+        case "session_view_state":
+          setSessionBlocked(typeof msg.blocked === "string" ? msg.blocked : null);
+          setStreaming(msg.running === true);
+          break;
         case "initial_state":
           // (Re)connect handshake. If the worker has a turn in flight —
           // e.g. this browser detached during a long TextToSpeech/render
@@ -1065,6 +1074,8 @@ export function ChatView({ active, modalOpen }: Props) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const blocked = sessionActionError();
+    if (blocked) { setMessages((prev) => [...prev, {role: "system", content: blocked}]); return; }
     const text = input.trim();
     // Record every non-empty submission in the shared recall ring and reset
     // navigation so the next Up starts from the newest entry.
@@ -1084,6 +1095,14 @@ export function ChatView({ active, modalOpen }: Props) {
     // Allow send when EITHER text or attachments are present —
     // "describe this image" with no text is a valid use case.
     if (!text && attachments.length === 0) return;
+    if (attachments.length > 10) {
+      showAttachmentError("At most 10 attachments are allowed. Remove some images and send again.");
+      return;
+    }
+    if (attachments.reduce((total, image) => total + image.data.length, 0) > 67 * 1024 * 1024) {
+      showAttachmentError("Attachments exceed the 67 MiB base64-encoded payload limit. Reduce their size and send again.");
+      return;
+    }
 
     // Mid-turn injection path (issue #106): if the agent is already
     // streaming, the message goes into the agent's injection queue
@@ -1670,16 +1689,16 @@ export function ChatView({ active, modalOpen }: Props) {
   // a mid-turn correction (issue #106). The textarea is only locked
   // when there's literally no place for input (e.g. AskUserQuestion
   // path uses a different prompt component).
-  const inputDisabled = false;
+  const inputDisabled = sessionBlocked !== null;
   // Submit-while-streaming is allowed for plain text (the message
   // queues into the agent's injection buffer). Slash commands and
   // file attachments don't take the inject path in v1 — keep the
   // old gate for those.
-  const submitDisabled = awaitingUserAnswer
+  const submitDisabled = sessionBlocked !== null || (awaitingUserAnswer
     ? !input.trim()
     : streaming
       ? !input.trim() || input.trim().startsWith("/") || attachments.length > 0
-      : !input.trim() && attachments.length === 0;
+      : !input.trim() && attachments.length === 0);
   // The full question now renders as a markdown card above the input
   // (see `<AskCard>` below) — the placeholder is just a short hint
   // that points at the card. Truncating multi-line markdown into a
@@ -1842,6 +1861,7 @@ export function ChatView({ active, modalOpen }: Props) {
             onSelect={acceptSlashCommand}
           />
         )}
+        {sessionBlocked && <div role="status" className="text-xs px-2" style={{ color: "var(--text-secondary)" }}>{sessionBlocked}</div>}
         {askPrompt && askPrompt.question && (
           <div
             className="rounded p-3 max-h-64 overflow-y-auto"

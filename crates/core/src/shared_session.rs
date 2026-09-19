@@ -78,6 +78,11 @@ pub enum ShellInput {
     /// Raw line submitted by the user. Slash-prefix → dispatched as
     /// command, anything else → fed to the agent as a prompt.
     Line(String),
+    SessionInput {
+        id: String,
+        text: String,
+        images: Vec<(String, String)>,
+    },
     /// Like `Line`, but run on a throwaway child agent whose history
     /// starts empty and is discarded when the turn ends — the shared
     /// session and its running context are never touched. Lets a
@@ -315,6 +320,15 @@ pub enum ShellInput {
 /// Chat → bubbles + tool blocks, Terminal → ANSI-formatted bytes.
 #[derive(Debug, Clone)]
 pub enum ViewEvent {
+    SessionActivated(Box<Session>),
+    SessionActionRejected {
+        session_id: String,
+        text: String,
+    },
+    SessionViewRequest {
+        session: Box<Session>,
+        request_id: String,
+    },
     UserPrompt(String),
     AssistantTextDelta(String),
     /// A chunk of the model's reasoning (`reasoning_content` from
@@ -370,7 +384,7 @@ pub enum ViewEvent {
     /// without polling. Fired at user-facing turn boundaries (start
     /// + end). Side-channel turns (auto-learn ingest/reconcile) do
     /// not fire this — they don't change the surface meta.
-    BusyChanged,
+    BusyChanged(Option<crate::agent_activity::BusyMeta>),
     HistoryReplaced(Vec<DisplayMessage>),
     SessionListRefresh(String),
     /// Sidebar provider/model update — carries a pre-built JSON
@@ -721,6 +735,8 @@ impl DisplayMessage {
 }
 
 pub struct SharedSessionHandle {
+    pub view_events: broadcast::Sender<String>,
+    pub execution_session_id: Arc<std::sync::Mutex<String>>,
     pub input_tx: mpsc::Sender<ShellInput>,
     pub events_tx: broadcast::Sender<ViewEvent>,
     /// Cooperative cancel handle (M6.17 BUGs H1 + M3). Replaces the
@@ -1162,6 +1178,9 @@ pub fn spawn_with_roots(
     // Bug 1: thinking rendered, response text vanished); 2048 absorbs the
     // bursts. Lagged events are now also logged in the forwarders.
     let (events_tx, _) = broadcast::channel::<ViewEvent>(2048);
+    let execution_session_id = Arc::new(std::sync::Mutex::new(String::new()));
+    let view_events =
+        crate::session_view::spawn(events_tx.subscribe(), execution_session_id.clone());
     let cancel = crate::cancel::CancelToken::new();
     let ready_gate = Arc::new(ReadyGate::new());
     // Mid-turn injection queue (issue #106) — shared between the IPC
@@ -1214,6 +1233,8 @@ pub fn spawn_with_roots(
     });
 
     SharedSessionHandle {
+        view_events,
+        execution_session_id,
         input_tx,
         events_tx,
         cancel,
@@ -2047,6 +2068,9 @@ async fn run_worker(
         let _ = current_session.write_header_if_missing(&path);
         *g = Some(path);
     }
+    let _ = events_tx.send(ViewEvent::SessionActivated(Box::new(
+        current_session.clone(),
+    )));
     // Reset plan_state to whatever the initial session has (None for
     // a fresh `Session::new`, but Some(plan) for a session loaded
     // off disk that already had a plan_snapshot in its JSONL).
@@ -2167,7 +2191,6 @@ async fn run_worker(
         Ok(_) => {}
         Err(e) => eprintln!("[phone-home] failed to load on-disk config: {e}"),
     }
-
     // Lead inbox poller — parity with repl.rs:1524. Without this, teammates
     // message the lead, messages pile up in `.thclaws/team/inboxes/lead.json`
     // unread, and the team stalls waiting for the lead to react.
@@ -2207,6 +2230,30 @@ async fn run_worker(
 
     while let Ok(input) = input_rx.recv() {
         match input {
+            ShellInput::SessionInput { id, text, images } => {
+                if !load_session(id.clone(), &mut state, &events_tx, &plan_persist_path) {
+                    let _ = events_tx.send(ViewEvent::SessionActionRejected {
+                        session_id: id,
+                        text: "Could not activate this session. Check its provider configuration or reopen the session.".into(),
+                    });
+                    continue;
+                }
+                cancel.reset();
+                maybe_reset_session_per_turn(&mut state, &events_tx, &plan_persist_path);
+                if images.is_empty() {
+                    handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
+                } else {
+                    handle_line_with_images(
+                        text,
+                        images,
+                        &mut state,
+                        &events_tx,
+                        &cancel,
+                        &input_tx_self,
+                    )
+                    .await;
+                }
+            }
             ShellInput::Line(text) => {
                 cancel.reset();
                 maybe_reset_session_per_turn(&mut state, &events_tx, &plan_persist_path);
@@ -2237,6 +2284,8 @@ async fn run_worker(
                 save_history(&state.agent, &mut state.session, &state.session_store);
                 state.agent.clear_history();
                 state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
+                let _ =
+                    events_tx.send(ViewEvent::SessionActivated(Box::new(state.session.clone())));
                 state.warned_file_size = false;
                 // New session = clean slate for plan state and the
                 // persistence path. Broadcasts `PlanUpdate(None)` so
@@ -2267,166 +2316,7 @@ async fn run_worker(
                 )));
             }
             ShellInput::LoadSession(id) => {
-                // Capture the outgoing session id BEFORE the load so we can
-                // tell a real session switch from a same-id reload below.
-                let prev_session_id = state.session.id.clone();
-                let Some(ref store) = state.session_store else {
-                    continue;
-                };
-                let Ok(loaded) = store.load(&id) else {
-                    let _ = events_tx.send(ViewEvent::ErrorText(format!(
-                        "Failed to load session '{id}'"
-                    )));
-                    continue;
-                };
-                // If the session was recorded against a different
-                // provider than what's active, the stored messages
-                // carry wire-specific shapes (Anthropic content
-                // blocks, OpenAI tool_calls arrays, Gemini parts, …)
-                // that won't replay cleanly through another provider.
-                // Auto-switch to the session's original model. If that
-                // provider has no credentials configured, refuse the
-                // load rather than swap to something that will hard-
-                // error on the next turn.
-                let current_kind = crate::providers::ProviderKind::detect(&state.config.model);
-                let loaded_kind = crate::providers::ProviderKind::detect(&loaded.model);
-                let needs_switch = loaded_kind.is_some() && current_kind != loaded_kind;
-                if needs_switch {
-                    let Some(target_kind) = loaded_kind else {
-                        continue;
-                    };
-                    // Credentials are OK if the provider has a local key OR the
-                    // gateway proxy can serve the session's (featured) model —
-                    // mirror build_provider so a proxy-only user can load a
-                    // session recorded against a featured model with no BYOK key.
-                    let gateway_ok = {
-                        let mut probe = state.config.clone();
-                        probe.model = loaded.model.clone();
-                        crate::providers::thclaws_gateway::gateway_overlay_for_model(
-                            &probe,
-                            target_kind,
-                        )
-                        .is_some()
-                    };
-                    if !kind_has_credentials(target_kind) && !gateway_ok {
-                        let provider_name = target_kind.name();
-                        let env_hint = target_kind
-                            .api_key_env()
-                            .map(|v| format!(" (set {v})"))
-                            .unwrap_or_default();
-                        let _ = events_tx.send(ViewEvent::ErrorText(format!(
-                            "Can't load session '{id}' — it was recorded against {provider_name} ({}), but no API key for that provider is configured{env_hint}.",
-                            loaded.model
-                        )));
-                        continue;
-                    }
-                    // Flush whatever the active session had so we don't
-                    // lose a turn or two just because the user clicked
-                    // another session.
-                    save_history(&state.agent, &mut state.session, &state.session_store);
-                    // M6.19 BUG M1: capture prev_model BEFORE the
-                    // assignment so rebuild_agent failure can roll the
-                    // config back. Pre-fix the in-memory state.config
-                    // got the new model but the agent kept the old
-                    // provider — subsequent turns ran the old agent
-                    // against config.model that no longer matched, and
-                    // the on-disk settings.json wasn't yet written, so
-                    // restart silently lost the swap.
-                    let prev_model =
-                        std::mem::replace(&mut state.config.model, loaded.model.clone());
-                    if let Err(e) = state.rebuild_agent(false) {
-                        // Roll back the config so it matches the still-
-                        // active agent. The user sees the error and the
-                        // session stays on its previous model.
-                        state.config.model = prev_model;
-                        let _ = events_tx.send(ViewEvent::ErrorText(format!(
-                            "Auto-switch to {} failed: {e}",
-                            loaded.model
-                        )));
-                        continue;
-                    }
-                    let provider_name = target_kind.name();
-                    let _ = events_tx.send(ViewEvent::SlashOutput(format!(
-                        "(auto-switched to {} to match session)",
-                        format_provider_model(provider_name, &loaded.model)
-                    )));
-                    // Keep `.thclaws/settings.json` in sync so a
-                    // restart lands on the same provider/model.
-                    let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
-                    project.set_model(&state.config.model);
-                    let _ = project.save();
-                    // Push the sidebar immediately so the Provider /
-                    // model display reflects the switch without
-                    // waiting for the 5 s config_poll.
-                    let payload = serde_json::json!({
-                        "type": "provider_update",
-                        "provider": provider_name,
-                        "model": state.config.model,
-                        "provider_ready": true,
-                    });
-                    let _ = events_tx.send(ViewEvent::ProviderUpdate(payload.to_string()));
-                }
-                state.agent.set_history(loaded.messages.clone());
-                // Rehydrate the provider-side session id BEFORE
-                // `state.session = loaded` overwrites the in-memory
-                // session — the next `agent.run_turn` will then pass
-                // `--resume <uuid>` to the SDK subprocess and the
-                // server-side conversation comes back instead of
-                // restarting from scratch. Pre-fix this hop was
-                // missing and resumed sessions silently lost their
-                // SDK-side history.
-                state
-                    .agent
-                    .provider()
-                    .set_provider_session_id(loaded.provider_session_id.clone());
-                state.session = loaded;
-                state.warned_file_size = false;
-                // /load: repoint persistence at the loaded session's
-                // JSONL and restore plan_state so the sidebar comes
-                // back populated if the loaded session had a plan
-                // snapshot. M1+ — decision #1 in dev-plan/03.
-                if let (Some(store), Ok(mut g)) =
-                    (state.session_store.as_ref(), plan_persist_path.lock())
-                {
-                    *g = Some(store.path_for(&state.session.id));
-                }
-                crate::tools::plan_state::restore_from_session(state.session.plan.clone());
-                crate::goal_state::restore_from_session(state.session.goal.clone());
-                // M6.9 (Bug E1): reset the per-step attempt counter
-                // on session swap. The counter is process-global and
-                // would otherwise leak across sessions — if the prior
-                // session had attempts at 2/3 on a step.id that the
-                // loaded session also uses, the driver would
-                // immediately force-Failed on its first nudge.
-                crate::tools::plan_state::reset_step_attempts_external();
-                // M6.20 BUG M2 + M3: clear yolo flag and reset
-                // permission mode from the prior session. Pre-fix the
-                // user's "allow for session" decision from session A
-                // continued to auto-approve in session B, and a Plan
-                // mode set in A leaked into B with no plan to submit.
-                //
-                // Guard on a REAL switch (id != prev): a same-id reload —
-                // e.g. the frontend's startup auto-load firing right after
-                // the user entered plan mode + submitted a plan — must NOT
-                // clobber the current session's ephemeral yolo / plan mode.
-                // That race reset the mode to Auto and dropped the sidebar
-                // Approve button the first time /plan was used in a fresh
-                // workspace (plan_state survives via restore_from_session
-                // above, so "type approve" still worked — mode was the only
-                // casualty).
-                if id != prev_session_id {
-                    state.approver.reset_session_flag();
-                    let _ = crate::permissions::take_pre_plan_mode();
-                    crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
-                }
-                let display = DisplayMessage::from_session(&state.session);
-                let _ = events_tx.send(ViewEvent::HistoryReplaced(display));
-                // Refresh so the sidebar's "current session" highlight
-                // moves to the freshly-loaded id.
-                let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
-                    &state.session_store,
-                    &state.session.id,
-                )));
+                load_session(id, &mut state, &events_tx, &plan_persist_path);
             }
             ShellInput::SaveAndQuit => {
                 save_history(&state.agent, &mut state.session, &state.session_store);
@@ -3452,6 +3342,8 @@ async fn run_worker(
                         // Nothing left to fall back to — mint a fresh one.
                         state.session =
                             Session::new(&state.config.model, state.cwd.to_string_lossy());
+                        let _ = events_tx
+                            .send(ViewEvent::SessionActivated(Box::new(state.session.clone())));
                         state.warned_file_size = false;
                         if let (Some(store), Ok(mut g)) =
                             (state.session_store.as_ref(), plan_persist_path.lock())
@@ -3744,6 +3636,8 @@ async fn run_worker(
                 state.agent.clear_history();
                 state.session =
                     crate::session::Session::new(&state.config.model, state.cwd.to_string_lossy());
+                let _ =
+                    events_tx.send(ViewEvent::SessionActivated(Box::new(state.session.clone())));
                 state.warned_file_size = false;
                 if let (Some(store), Ok(mut g)) =
                     (state.session_store.as_ref(), plan_persist_path.lock())
@@ -4104,6 +3998,7 @@ fn maybe_reset_session_per_turn(
     save_history(&state.agent, &mut state.session, &state.session_store);
     state.agent.clear_history();
     state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
+    let _ = events_tx.send(ViewEvent::SessionActivated(Box::new(state.session.clone())));
     if let (Some(store), Ok(mut g)) = (state.session_store.as_ref(), plan_persist_path.lock()) {
         let path = store.path_for(&state.session.id);
         let _ = state.session.write_header_if_missing(&path);
@@ -5023,7 +4918,7 @@ async fn drive_turn_stream_inner(
     impl Drop for BroadcastOnDrop {
         fn drop(&mut self) {
             if let Some(tx) = self.0.take() {
-                let _ = tx.send(ViewEvent::BusyChanged);
+                let _ = tx.send(ViewEvent::BusyChanged(crate::agent_activity::busy_meta()));
             }
         }
     }
@@ -5034,7 +4929,7 @@ async fn drive_turn_stream_inner(
     let _busy = match surface_session {
         Some(id) => {
             let guard = crate::agent_activity::BusyGuard::for_session(id);
-            let _ = events_tx.send(ViewEvent::BusyChanged);
+            let _ = events_tx.send(ViewEvent::BusyChanged(crate::agent_activity::busy_meta()));
             BusyBroadcast {
                 _busy: guard,
                 _broadcast_on_drop: BroadcastOnDrop(Some(events_tx.clone())),
@@ -6379,4 +6274,173 @@ mod tests {
         let safe = s.floor_char_boundary(past_end);
         assert_eq!(safe, s.len());
     }
+}
+
+fn load_session(
+    id: String,
+    state: &mut WorkerState,
+    events_tx: &broadcast::Sender<ViewEvent>,
+    plan_persist_path: &Arc<std::sync::Mutex<Option<PathBuf>>>,
+) -> bool {
+    if id == state.session.id {
+        return true;
+    }
+    // Capture the outgoing session id BEFORE the load so we can
+    // tell a real session switch from a same-id reload below.
+    let prev_session_id = state.session.id.clone();
+    let Some(ref store) = state.session_store else {
+        return false;
+    };
+    let Ok(loaded) = store.load(&id) else {
+        let _ = events_tx.send(ViewEvent::ErrorText(format!(
+            "Failed to load session '{id}'"
+        )));
+        return false;
+    };
+    // If the session was recorded against a different
+    // provider than what's active, the stored messages
+    // carry wire-specific shapes (Anthropic content
+    // blocks, OpenAI tool_calls arrays, Gemini parts, …)
+    // that won't replay cleanly through another provider.
+    // Auto-switch to the session's original model. If that
+    // provider has no credentials configured, refuse the
+    // load rather than swap to something that will hard-
+    // error on the next turn.
+    let current_kind = crate::providers::ProviderKind::detect(&state.config.model);
+    let loaded_kind = crate::providers::ProviderKind::detect(&loaded.model);
+    let needs_switch = loaded_kind.is_some() && current_kind != loaded_kind;
+    if needs_switch {
+        let Some(target_kind) = loaded_kind else {
+            return false;
+        };
+        // Credentials are OK if the provider has a local key OR the
+        // gateway proxy can serve the session's (featured) model —
+        // mirror build_provider so a proxy-only user can load a
+        // session recorded against a featured model with no BYOK key.
+        let gateway_ok = {
+            let mut probe = state.config.clone();
+            probe.model = loaded.model.clone();
+            crate::providers::thclaws_gateway::gateway_overlay_for_model(&probe, target_kind)
+                .is_some()
+        };
+        if !kind_has_credentials(target_kind) && !gateway_ok {
+            let provider_name = target_kind.name();
+            let env_hint = target_kind
+                .api_key_env()
+                .map(|v| format!(" (set {v})"))
+                .unwrap_or_default();
+            let _ = events_tx.send(ViewEvent::ErrorText(format!(
+                            "Can't load session '{id}' — it was recorded against {provider_name} ({}), but no API key for that provider is configured{env_hint}.",
+                            loaded.model
+                        )));
+            return false;
+        }
+        // Flush whatever the active session had so we don't
+        // lose a turn or two just because the user clicked
+        // another session.
+        save_history(&state.agent, &mut state.session, &state.session_store);
+        // M6.19 BUG M1: capture prev_model BEFORE the
+        // assignment so rebuild_agent failure can roll the
+        // config back. Pre-fix the in-memory state.config
+        // got the new model but the agent kept the old
+        // provider — subsequent turns ran the old agent
+        // against config.model that no longer matched, and
+        // the on-disk settings.json wasn't yet written, so
+        // restart silently lost the swap.
+        let prev_model = std::mem::replace(&mut state.config.model, loaded.model.clone());
+        if let Err(e) = state.rebuild_agent(false) {
+            // Roll back the config so it matches the still-
+            // active agent. The user sees the error and the
+            // session stays on its previous model.
+            state.config.model = prev_model;
+            let _ = events_tx.send(ViewEvent::ErrorText(format!(
+                "Auto-switch to {} failed: {e}",
+                loaded.model
+            )));
+            return false;
+        }
+        let provider_name = target_kind.name();
+        let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+            "(auto-switched to {} to match session)",
+            format_provider_model(provider_name, &loaded.model)
+        )));
+        // Keep `.thclaws/settings.json` in sync so a
+        // restart lands on the same provider/model.
+        let mut project = crate::config::ProjectConfig::load().unwrap_or_default();
+        project.set_model(&state.config.model);
+        let _ = project.save();
+        // Push the sidebar immediately so the Provider /
+        // model display reflects the switch without
+        // waiting for the 5 s config_poll.
+        let payload = serde_json::json!({
+            "type": "provider_update",
+            "provider": provider_name,
+            "model": state.config.model,
+            "provider_ready": true,
+        });
+        let _ = events_tx.send(ViewEvent::ProviderUpdate(payload.to_string()));
+    }
+    state.agent.set_history(loaded.messages.clone());
+    // Rehydrate the provider-side session id BEFORE
+    // `state.session = loaded` overwrites the in-memory
+    // session — the next `agent.run_turn` will then pass
+    // `--resume <uuid>` to the SDK subprocess and the
+    // server-side conversation comes back instead of
+    // restarting from scratch. Pre-fix this hop was
+    // missing and resumed sessions silently lost their
+    // SDK-side history.
+    state
+        .agent
+        .provider()
+        .set_provider_session_id(loaded.provider_session_id.clone());
+    state.session = loaded;
+    crate::audit::set_session(&state.session.id);
+    let _ = events_tx.send(ViewEvent::SessionActivated(Box::new(state.session.clone())));
+    state.warned_file_size = false;
+    // /load: repoint persistence at the loaded session's
+    // JSONL and restore plan_state so the sidebar comes
+    // back populated if the loaded session had a plan
+    // snapshot. M1+ — decision #1 in dev-plan/03.
+    if let (Some(store), Ok(mut g)) = (state.session_store.as_ref(), plan_persist_path.lock()) {
+        *g = Some(store.path_for(&state.session.id));
+    }
+    crate::tools::plan_state::restore_from_session(state.session.plan.clone());
+    crate::goal_state::restore_from_session(state.session.goal.clone());
+    // M6.9 (Bug E1): reset the per-step attempt counter
+    // on session swap. The counter is process-global and
+    // would otherwise leak across sessions — if the prior
+    // session had attempts at 2/3 on a step.id that the
+    // loaded session also uses, the driver would
+    // immediately force-Failed on its first nudge.
+    crate::tools::plan_state::reset_step_attempts_external();
+    // M6.20 BUG M2 + M3: clear yolo flag and reset
+    // permission mode from the prior session. Pre-fix the
+    // user's "allow for session" decision from session A
+    // continued to auto-approve in session B, and a Plan
+    // mode set in A leaked into B with no plan to submit.
+    //
+    // Guard on a REAL switch (id != prev): a same-id reload —
+    // e.g. the frontend's startup auto-load firing right after
+    // the user entered plan mode + submitted a plan — must NOT
+    // clobber the current session's ephemeral yolo / plan mode.
+    // That race reset the mode to Auto and dropped the sidebar
+    // Approve button the first time /plan was used in a fresh
+    // workspace (plan_state survives via restore_from_session
+    // above, so "type approve" still worked — mode was the only
+    // casualty).
+    if id != prev_session_id {
+        state.approver.reset_session_flag();
+        let _ = crate::permissions::take_pre_plan_mode();
+        crate::permissions::set_current_mode_and_broadcast(state.agent.permission_mode);
+    }
+    let display = DisplayMessage::from_session(&state.session);
+    let _ = events_tx.send(ViewEvent::HistoryReplaced(display));
+    // Refresh so the sidebar's "current session" highlight
+    // moves to the freshly-loaded id.
+    let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
+        &state.session_store,
+        &state.session.id,
+    )));
+
+    true
 }

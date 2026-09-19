@@ -380,6 +380,7 @@ impl ApprovalSink for ReplApprover {
 /// [`GuiApprover::approve`].
 #[derive(Debug, Clone, Serialize)]
 pub struct GuiApprovalRequest {
+    pub session_id: Option<String>,
     pub id: u64,
     pub tool_name: String,
     pub input: Value,
@@ -471,6 +472,7 @@ impl ApprovalSink for GuiApprover {
             pending.insert(id, resp_tx);
         }
         let out = GuiApprovalRequest {
+            session_id: crate::agent_activity::busy_meta().map(|m| m.session_id),
             id,
             tool_name: req.tool_name.clone(),
             input: req.input.clone(),
@@ -489,6 +491,21 @@ impl ApprovalSink for GuiApprover {
             }
             return ApprovalDecision::Deny;
         }
+        struct PendingGuard<'a> {
+            approver: &'a GuiApprover,
+            id: u64,
+        }
+        impl Drop for PendingGuard<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut pending) = self.approver.pending.lock() {
+                    pending.remove(&self.id);
+                }
+                if let Ok(mut unresolved) = self.approver.unresolved.lock() {
+                    unresolved.remove(&self.id);
+                }
+            }
+        }
+        let _pending = PendingGuard { approver: self, id };
         match resp_rx.await {
             Ok(ApprovalDecision::AllowForSession) => {
                 self.session_allowed.store(true, Ordering::Relaxed);
@@ -574,6 +591,28 @@ mod tests {
         assert_eq!(outbound.tool_name, "Write");
         approver.resolve(outbound.id, ApprovalDecision::Allow);
         assert_eq!(call.await.unwrap(), ApprovalDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn cancelled_gui_approval_is_not_replayed_on_reconnect() {
+        let (approver, mut rx) = GuiApprover::new();
+        let task_approver = approver.clone();
+        let task = tokio::spawn(async move {
+            task_approver
+                .approve(&ApprovalRequest {
+                    tool_name: "Write".into(),
+                    input: serde_json::json!({}),
+                    summary: None,
+                    originator: AgentOrigin::Main,
+                })
+                .await
+        });
+        rx.recv().await.unwrap();
+        assert_eq!(approver.unresolved_requests().len(), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(approver.unresolved_requests().is_empty());
+        assert!(approver.pending.lock().unwrap().is_empty());
     }
 
     /// `originator` field on ApprovalRequest must round-trip into
