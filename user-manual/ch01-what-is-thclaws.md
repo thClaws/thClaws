@@ -174,7 +174,7 @@ dedicated bullet below and [Chapter 27](ch27-thclaws-cloud.md):
   Code auth), OpenAI (Chat Completions + Responses/Codex), Google
   Gemini & Gemma, Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding
   Plan), NVIDIA NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma,
-  THaLLE), OpenRouter, TokenRouter, Moonshot, xAI, Groq, MiniMax, Qwen Cloud, AtlasCloud, Meta, 9router, OpenCode Go, Azure AI Foundry, Ollama (local,
+  THaLLE), OpenRouter, TokenRouter, Moonshot, xAI, Groq, MiniMax, Qwen Cloud, AtlasCloud, Unifically, Meta, 9router, OpenCode Go, Azure AI Foundry, Ollama (local,
   local Anthropic-compatible, and Ollama Cloud), LMStudio, self-hosted
   vLLM / llama.cpp / LiteLLM, plus a generic **OpenAI-compatible** slot
   (`oai/*`) for Portkey / Helicone / internal proxies — auto-detected by

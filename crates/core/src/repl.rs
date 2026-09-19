@@ -4769,6 +4769,23 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("atlascloud/"),
             ))
         }
+        ProviderKind::Unifically => {
+            // Unifically exposes an OpenAI-compatible API for its text models.
+            // Ids use the `unifically/<id>` routing prefix locally, stripped
+            // before the upstream request.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "UNIFICALLY_BASE_URL",
+                "https://api.unifically.com/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("unifically/"),
+            ))
+        }
         ProviderKind::MetaAi => {
             // Meta AI (api.meta.ai) — OpenAI-compatible chat/completions.
             // BYOK only: there is no gateway segment for it, so a hosted

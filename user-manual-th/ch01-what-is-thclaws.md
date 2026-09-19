@@ -125,7 +125,7 @@ hosted runtime ให้เช่า — ดู bullet ด้านล่าง�
   Alibaba DashScope (Qwen), DeepSeek, Z.ai (GLM Coding Plan), NVIDIA
   NIM, NSTDA Thai LLM (OpenThaiGPT, Typhoon, Pathumma, THaLLE),
   OpenRouter, TokenRouter, Moonshot, xAI, Groq, MiniMax, Qwen Cloud,
-  AtlasCloud, Meta, 9router, OpenCode Go, Azure AI Foundry,
+  AtlasCloud, Unifically, Meta, 9router, OpenCode Go, Azure AI Foundry,
   Ollama (local + Anthropic-compat + Cloud), LMStudio,
   vLLM / llama.cpp / LiteLLM ที่
   self-host เอง และ slot OpenAI-compatible

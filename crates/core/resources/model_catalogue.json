@@ -9520,6 +9520,192 @@
         }
       }
     },
+    "unifically": {
+      "list_url": "https://api.unifically.com/v1/models?category=llm",
+      "default_context": 200000,
+      "models": {
+        "unifically/anthropic/claude-fable-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/anthropic/claude-fable-5-1": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/anthropic/claude-haiku-4-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/anthropic/claude-opus-4-6": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/anthropic/claude-opus-4-7": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/anthropic/claude-opus-4-8": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/anthropic/claude-opus-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/anthropic/claude-sonnet-4-6": {
+          "context": 1000000,
+          "max_output": 64000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/anthropic/claude-sonnet-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/cursor/composer-2.5": {
+          "context": 200000,
+          "max_output": 200000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/cursor/composer-2.5-fast": {
+          "context": 200000,
+          "max_output": 200000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/google/gemini-3.5-flash": {
+          "context": 1048576,
+          "max_output": 65536,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/google/gemini-3.6-flash": {
+          "context": 1048576,
+          "max_output": 65536,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/google/gemini-3.7-flash": {
+          "context": 1048576,
+          "max_output": 65536,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/google/gemini-3.8-flash": {
+          "context": 1048576,
+          "max_output": 65536,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/moonshotai/kimi-k3": {
+          "context": 1048576,
+          "max_output": 131072,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/openai/gpt-5.4": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/openai/gpt-5.4-mini": {
+          "context": 400000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/openai/gpt-5.5": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/openai/gpt-5.6-luna": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/openai/gpt-5.6-sol": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/openai/gpt-5.6-terra": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/openai/gpt-6-astra": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/xai/grok-4.20-0309-non-reasoning": {
+          "context": 1000000,
+          "max_output": 1000000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/xai/grok-4.20-0309-reasoning": {
+          "context": 1000000,
+          "max_output": 1000000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/xai/grok-4.20-multi-agent-0309": {
+          "context": 1000000,
+          "max_output": 1000000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/xai/grok-4.3": {
+          "context": 1000000,
+          "max_output": 1000000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/xai/grok-4.5": {
+          "context": 500000,
+          "max_output": 500000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/xai/grok-4.6": {
+          "context": 500000,
+          "max_output": 500000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        },
+        "unifically/xai/grok-build-0.1": {
+          "context": 256000,
+          "max_output": 256000,
+          "source": "https://api.unifically.com/v1/models?category=llm (context_length, max_output)",
+          "verified_at": "2026-09-19"
+        }
+      }
+    },
     "meta": {
       "list_url": "https://api.meta.ai/v1/models",
       "default_context": 1048576,

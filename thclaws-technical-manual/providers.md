@@ -98,6 +98,7 @@ Cache fields are `Option` because only Anthropic reports them today. `Usage::acc
 pub enum ProviderKind {
     Anthropic,
     AtlasCloud,
+    Unifically,
     MetaAi,
     NineRouter,
     AgentSdk,
@@ -162,6 +163,7 @@ pub enum ProviderKind {
 | `Ollama` | Ollama NDJSON | `ollama/llama3.2` | `ollama/` | none | `OLLAMA_BASE_URL` | http://localhost:11434 | yes |
 | `OllamaCloud` | Ollama NDJSON | `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/` | `OLLAMA_CLOUD_API_KEY` | — | ollama.com (fixed) | no |
 | `AtlasCloud` | OpenAI Chat Completions | `atlascloud/qwen/qwen3.5-flash` | `atlascloud/` | `ATLASCLOUD_API_KEY` | `ATLASCLOUD_BASE_URL` | https://api.atlascloud.ai/v1 | no |
+| `Unifically` | OpenAI Chat Completions | `unifically/google/gemini-3.5-flash` | `unifically/` | `UNIFICALLY_API_KEY` | `UNIFICALLY_BASE_URL` | https://api.unifically.com/v1 | no |
 | `MetaAi` | OpenAI Chat Completions | `meta/muse-spark-1.2` | `meta/` | `META_API_KEY` | `META_BASE_URL` | https://api.meta.ai/v1 | no |
 | `NineRouter` | OpenAI Chat Completions | `9router/anthropic/claude-sonnet-4.5` | `9router/` | `NINEROUTER_API_KEY` | `NINEROUTER_BASE_URL` | http://localhost:20128/v1 | yes |
 | `LiteLlm` | OpenAI Chat Completions | `litellm/gpt-4o-mini` | `litellm/` | `LITELLM_API_KEY` | `LITELLM_BASE_URL` | http://localhost:4000/v1 | yes |

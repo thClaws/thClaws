@@ -60,6 +60,7 @@ pub mod thclaws_gateway;
 pub enum ProviderKind {
     Anthropic,
     AtlasCloud,
+    Unifically,
     MetaAi,
     NineRouter,
     AgentSdk,
@@ -270,6 +271,7 @@ impl ProviderKind {
     pub const ALL: &'static [Self] = &[
         Self::Anthropic,
         Self::AtlasCloud,
+        Self::Unifically,
         Self::MetaAi,
         Self::NineRouter,
         Self::AgentSdk,
@@ -306,6 +308,7 @@ impl ProviderKind {
         match self {
             Self::Anthropic => "anthropic",
             Self::AtlasCloud => "atlascloud",
+            Self::Unifically => "unifically",
             Self::MetaAi => "meta",
             Self::NineRouter => "9router",
             Self::AgentSdk => "anthropic-agent",
@@ -343,6 +346,7 @@ impl ProviderKind {
         match self {
             Self::Anthropic => "claude-sonnet-4-6",
             Self::AtlasCloud => "atlascloud/qwen/qwen3.5-flash",
+            Self::Unifically => "unifically/google/gemini-3.5-flash",
             // muse-spark reasons before it answers, so it needs a large
             // output budget — see the catalogue's max_output note.
             Self::MetaAi => "meta/muse-spark-1.2",
@@ -468,6 +472,7 @@ impl ProviderKind {
         match self {
             Self::TokenRouter => Some("TOKENROUTER_BASE_URL"),
             Self::AtlasCloud => Some("ATLASCLOUD_BASE_URL"),
+            Self::Unifically => Some("UNIFICALLY_BASE_URL"),
             Self::MetaAi => Some("META_BASE_URL"),
             Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
@@ -548,6 +553,7 @@ impl ProviderKind {
         match self {
             Self::TokenRouter => Some("https://api.tokenrouter.com/v1"),
             Self::AtlasCloud => Some("https://api.atlascloud.ai/v1"),
+            Self::Unifically => Some("https://api.unifically.com/v1"),
             Self::MetaAi => Some("https://api.meta.ai/v1"),
             // Self-hosted router; localhost default. Override per user via
             // NINEROUTER_BASE_URL for a remote / non-default-port instance.
@@ -658,6 +664,7 @@ impl ProviderKind {
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
             Self::TokenRouter => Some("TOKENROUTER_API_KEY"),
             Self::AtlasCloud => Some("ATLASCLOUD_API_KEY"),
+            Self::Unifically => Some("UNIFICALLY_API_KEY"),
             Self::MetaAi => Some("META_API_KEY"),
             Self::NineRouter => Some("NINEROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
@@ -765,6 +772,7 @@ impl ProviderKind {
             Self::OpenAI
             | Self::OpenAIResponses
             | Self::AtlasCloud
+            | Self::Unifically
             | Self::MetaAi
             // 9router uses full `9router/<alias>/<model>` ids; no short-alias
             // table (the alias segment is 9router's own, typed explicitly).
@@ -807,6 +815,8 @@ impl ProviderKind {
             Some(Self::OpenRouter)
         } else if model.starts_with("atlascloud/") {
             Some(Self::AtlasCloud)
+        } else if model.starts_with("unifically/") {
+            Some(Self::Unifically)
         } else if model.starts_with("meta/") {
             // Meta AI (api.meta.ai) — BYOK only, no gateway route. Ids look
             // like meta/muse-spark-1.2; the prefix is stripped before the
@@ -2730,6 +2740,7 @@ mod tests {
             ProviderKind::ChatGptCodex,
             ProviderKind::AgentSdk,
             ProviderKind::AtlasCloud,
+            ProviderKind::Unifically,
             ProviderKind::NineRouter,
             ProviderKind::QwenCloud,
             ProviderKind::ThaiLLM,
@@ -2942,6 +2953,35 @@ mod tests {
         );
         assert_eq!(ProviderKind::Minimax.name(), "minimax");
         assert_eq!(ProviderKind::Minimax.default_model(), "minimax/MiniMax-M3");
+    }
+
+    #[test]
+    fn detect_unifically_prefix_routes_to_unifically_provider() {
+        assert_eq!(
+            ProviderKind::detect("unifically/google/gemini-3.5-flash"),
+            Some(ProviderKind::Unifically)
+        );
+        assert_eq!(
+            ProviderKind::detect("unifically/anthropic/claude-sonnet-5"),
+            Some(ProviderKind::Unifically)
+        );
+        assert_eq!(
+            ProviderKind::Unifically.api_key_env(),
+            Some("UNIFICALLY_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::Unifically.endpoint_env(),
+            Some("UNIFICALLY_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::Unifically.default_endpoint(),
+            Some("https://api.unifically.com/v1")
+        );
+        assert_eq!(ProviderKind::Unifically.name(), "unifically");
+        assert_eq!(
+            ProviderKind::Unifically.default_model(),
+            "unifically/google/gemini-3.5-flash"
+        );
     }
 
     #[test]

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Unifically: a new BYOK provider with an OpenAI-compatible API.** Models use the `unifically/<id>` prefix and the key is read from `UNIFICALLY_API_KEY`.
+
 ## [0.133.0] — 2026-09-18
 
 **A bugfix release.** The provider list now shows only providers that can actually be reached, xAI's thinking is no longer dropped, and GUI shells resolve their agent from their own files.
