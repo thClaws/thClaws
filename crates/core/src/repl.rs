@@ -5087,6 +5087,24 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("unifically/"),
             ))
         }
+        ProviderKind::Requesty => {
+            // Requesty is an OpenAI-compatible router. Ids use the
+            // `requesty/<id>` routing prefix locally, stripped before the
+            // upstream request so Requesty sees `openai/gpt-4o-mini` or a
+            // managed policy id such as `claude-sonnet-4-6`.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "REQUESTY_BASE_URL",
+                "https://router.requesty.ai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("requesty/"),
+            ))
+        }
         ProviderKind::MetaAi => {
             // Meta AI (api.meta.ai) — OpenAI-compatible chat/completions.
             // BYOK only: there is no gateway segment for it, so a hosted
