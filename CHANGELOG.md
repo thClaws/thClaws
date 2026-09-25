@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Requesty: a new BYOK provider with an OpenAI-compatible API.** Models use the `requesty/<id>` prefix and the key is read from `REQUESTY_API_KEY`.
+
 ## [0.141.0] — 2026-10-10
 
 **A release about consent and boundaries.** Approvals — for spawned commands, symlinked writes, shares, and served workspaces — now land where the settings say they should, and a handful of server-side stumbles got fixed.
