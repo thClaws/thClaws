@@ -94,10 +94,10 @@ impl Tool for WriteTool {
                     .map_err(|e| Error::Tool(format!("mkdir {}: {}", parent.display(), e)))?;
             }
         }
-        // The landing the sandbox validated, not the path as typed — see
-        // `write_no_follow`.
-        let landing = crate::sandbox::resolve_landing(p);
-        write_no_follow(&landing, content)
+        // `validated` is already the sandbox-approved landing path.
+        // Opening it directly preserves approved symlinks while keeping
+        // O_NOFOLLOW as the check/open race backstop.
+        write_no_follow(&validated, content)
             .map_err(|e| Error::Tool(format!("write {path}: {e}")))?;
         Ok(format!("Wrote {} bytes to {}", content.len(), path))
     }
@@ -177,6 +177,27 @@ mod tests {
                 .is_symlink(),
             "and the link must still be a link, not replaced by a file"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writes_through_an_inside_dangling_symlink() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let link = output.join("nested.txt");
+        let landing = output.join("nested").join("file.txt");
+        std::os::unix::fs::symlink(&landing, &link).unwrap();
+
+        WriteTool
+            .call(json!({ "path": link.to_string_lossy(), "content": "new" }))
+            .await
+            .expect("an approved inside dangling symlink is a legitimate write target");
+        assert_eq!(std::fs::read_to_string(&landing).unwrap(), "new");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),);
     }
 
     /// PR #222's case: a link swapped in after the check must not be
