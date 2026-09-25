@@ -10208,6 +10208,102 @@
         }
       }
     },
+    "requesty": {
+      "list_url": "https://router.requesty.ai/v1/models/managed",
+      "default_context": 128000,
+      "models": {
+        "requesty/claude-haiku-4-5": {
+          "context": 200000,
+          "max_output": 64000,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/claude-opus-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/claude-sonnet-4-6": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/claude-sonnet-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/deepseek-v4-flash": {
+          "context": 1048576,
+          "max_output": 131072,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/deepseek-v4-pro": {
+          "context": 1000000,
+          "max_output": 131072,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/gemini-3.1-pro-preview": {
+          "context": 1048576,
+          "max_output": 65535,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/gemini-3.5-flash": {
+          "context": 1048576,
+          "max_output": 65535,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/glm-5.2": {
+          "context": 1048576,
+          "max_output": 131072,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/gpt-5.4": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/gpt-5.4-mini": {
+          "context": 400000,
+          "max_output": 128000,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/gpt-5.5": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/kimi-k3": {
+          "context": 1048576,
+          "max_output": 262144,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/openai/gpt-4o-mini": {
+          "context": 128000,
+          "max_output": 16384,
+          "source": "https://router.requesty.ai/v1/models (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        },
+        "requesty/qwen3.7-plus": {
+          "context": 1048576,
+          "max_output": 131072,
+          "source": "https://router.requesty.ai/v1/models/managed (context_window, max_output_tokens)",
+          "verified_at": "2026-09-25"
+        }
+      }
+    },
     "meta": {
       "list_url": "https://api.meta.ai/v1/models",
       "default_context": 1048576,
