@@ -54,6 +54,8 @@ const MARKER: &str = ".thclaws-v3-migration.marker";
 /// Where `unmigrate` puts the host's `.thclaws/` — its agent list, state and
 /// settings — instead of deleting it.
 pub const HOST_BACKUP: &str = ".thclaws-v3-host";
+/// Where `unnest` puts the bare outer host it promotes the inner tree out of.
+pub const NESTED_BACKUP: &str = ".thclaws-nested-host";
 
 /// dev-plan/61: what makes a folder an agent. The upgrade moves only these into
 /// `.thclaws/bots/main/`; everything else is the user's and stays at the root,
@@ -363,6 +365,9 @@ pub struct Report {
     pub bot_dir: PathBuf,
     pub minted_identity: bool,
     pub rewritten_schedules: Vec<String>,
+    /// Paths in the agent's own text pointed back at its folder — see
+    /// [`super::agent_paths`].
+    pub fixed_paths: usize,
 }
 
 pub fn apply(plan: &Plan) -> Result<Report> {
@@ -512,6 +517,13 @@ fn apply_locked(plan: &Plan) -> Result<Report> {
     // after `mint_identity`, which writes the file even when there was none.
     let _ = crate::config::ProjectConfig::backfill_defaults_in(&bot_dir(ws, MAIN_SLUG));
     report.rewritten_schedules = rewrite_schedules(ws)?;
+    // finding 11: the move just made every `.thclaws/…` the agent runs point
+    // at the host's folder instead of its own. Repairing it here, in the pass
+    // that broke it, is the difference between a workspace that keeps working
+    // and one that opens to an empty panel with nothing to explain it.
+    report.fixed_paths = super::agent_paths::fix(&bot_dir(ws, MAIN_SLUG), false)
+        .map(|r| r.commands + r.literals)
+        .unwrap_or(0);
     let _ = std::fs::remove_file(marker_path(ws));
     Ok(report)
 }
@@ -540,6 +552,224 @@ fn host_root_entry_ok(ws: &Path, name: &str) -> bool {
 ///
 /// Resumable: interrupted after the host tree was set aside, a re-run finds
 /// the agent inside the backup and finishes the move.
+/// finding 11: an agent installed before agents learned `$THCLAWS_AGENT_DIR`.
+///
+/// It ships assets under its own `.thclaws/` and reaches them by a bare
+/// relative path, which under a workspace host lands in the HOST's folder
+/// instead. Nothing errors: the agent reports an empty project, so a GUI shell
+/// draws its chrome around no data and the user sees a blank panel.
+///
+/// The signal is the convention's own name. An agent that ships anything and
+/// never mentions the variable predates it. Only the bundled directories are
+/// scanned — sessions and state can be large and say nothing about this.
+pub fn stale_agents(root: &Path) -> Vec<(String, Option<String>)> {
+    const BUNDLED: [&str; 5] = [
+        "scripts",
+        "skills",
+        "workflows",
+        "agent_workflow",
+        "gui-shell",
+    ];
+    let Ok(cfg) = BotsConfig::load(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for def in cfg.bots {
+        let dir = super::resolve_agent_dir(root, &def.slug);
+        let dirs: Vec<std::path::PathBuf> = BUNDLED
+            .iter()
+            .map(|d| dir.join(".thclaws").join(d))
+            .filter(|d| d.is_dir())
+            .collect();
+        if dirs.is_empty() {
+            continue;
+        }
+        let mentions = dirs.iter().any(|d| {
+            walkdir::WalkDir::new(d)
+                .max_depth(6)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| e.metadata().map(|m| m.len() < 512 * 1024).unwrap_or(false))
+                .any(|e| {
+                    std::fs::read_to_string(e.path())
+                        .map(|t| t.contains("THCLAWS_AGENT_DIR"))
+                        .unwrap_or(false)
+                })
+        });
+        if mentions {
+            continue;
+        }
+        let id = std::fs::read_to_string(dir.join("manifest.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        out.push((def.slug, id));
+    }
+    out
+}
+
+/// What this workspace needs before its agents can work, said to the PAGE.
+///
+/// Both of these are written to stderr already, which a desktop launched from
+/// its icon never shows. Both fail silently — an agent that cannot reach its
+/// own files renders an empty project, not an error — so without this the user
+/// gets a blank panel and nothing to act on.
+///
+/// Only under a host: off one, an agent's folder IS the workspace and neither
+/// problem can arise.
+pub fn workspace_notice_frames(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some((slug, dir)) = nested_bot(root) {
+        out.push(
+            serde_json::json!({
+                "type": "workspace_notice",
+                "id": format!("nested:{slug}"),
+                "title": format!("'{slug}' sits deeper than it needs to"),
+                "detail": format!(
+                    "An older migration ran twice, so {} is a host of its own and the agent \
+                     runs a level below it. thClaws follows that, and nothing is missing — \
+                     but the workspace carries an engine process it does not need.",
+                    dir.display()
+                ),
+                "command": "thclaws bots unnest",
+            })
+            .to_string(),
+        );
+    }
+    for (slug, id) in stale_agents(root) {
+        // An agent from the catalogue is replaced by getting it again, which
+        // also brings whatever else it has gained since. One the user wrote
+        // has nowhere to come from, so its copy is repaired in place.
+        let command = id.as_deref().map_or_else(
+            || "thclaws bots fix-paths".to_string(),
+            |i| format!("/cloud get {i}"),
+        );
+        out.push(
+            serde_json::json!({
+                "type": "workspace_notice",
+                "id": format!("stale:{slug}"),
+                "title": format!("'{slug}' cannot reach the files it ships"),
+                "detail": "It was installed before agents learned to find their own folder \
+                           under a workspace host, so its scripts and state look for themselves \
+                           in the wrong place. It shows an empty project rather than an error.",
+                "command": command,
+            })
+            .to_string(),
+        );
+    }
+    out
+}
+
+/// finding 12: an agent folder that is itself a workspace.
+///
+/// An older migration ran twice. The second pass read a host that carried no
+/// version stamp, took it for a v2 workspace, and swallowed the whole tree —
+/// the user's files, the host's `.thclaws/` and the real agent inside it —
+/// into a new `bots/<slug>/`, leaving a bare host at the root. Nothing is
+/// lost, but the host then supervises a folder that is not an agent: no
+/// `AGENTS.md`, no gui-shell, none of what the agent ships. It starts, and
+/// then does nothing, with no error to explain it.
+///
+/// The signature is unambiguous: a bot folder does not hold a bots.json,
+/// because bots do not nest.
+pub fn nested_bot(ws: &Path) -> Option<(String, PathBuf)> {
+    let cfg = BotsConfig::load(ws).ok()?;
+    let [only] = cfg.bots.as_slice() else {
+        return None;
+    };
+    let dir = bot_dir(ws, &only.slug);
+    let nested = dir.join(super::CONFIG_REL).is_file() && dir.join(super::SHELF_REL).is_dir();
+    nested.then(|| (only.slug.clone(), dir))
+}
+
+#[derive(Debug, Default)]
+pub struct UnnestReport {
+    pub moved: usize,
+    /// The bare outer host, kept rather than deleted — the inner tree came out
+    /// of it, so this is the one thing that could still hold something.
+    pub host_backup: PathBuf,
+    pub rewritten_schedules: Vec<String>,
+}
+
+/// Undo a double migration by promoting the inner workspace to be the
+/// workspace. The inner tree is already the right shape — it holds the files,
+/// `.home`, and a `.thclaws/` with the real settings and the agent under
+/// `bots/` — so this only lifts it a level and keeps the bare outer host aside.
+///
+/// Refuses unless the outer root holds nothing but `.thclaws`, which is what
+/// the second pass leaves behind. A root with files of its own is some other
+/// shape, and promoting into it would collide.
+pub fn unnest(ws: &Path) -> Result<UnnestReport> {
+    if crate::workdir::is_multiuser() {
+        return Err(Error::Config(
+            "workspace migration is not defined for a multiuser pod".into(),
+        ));
+    }
+    if marker_path(ws).exists() {
+        return Err(Error::Config(format!(
+            "{} is mid-migration — finish it with `thclaws bots migrate` first",
+            ws.display()
+        )));
+    }
+    let Some((slug, _)) = nested_bot(ws) else {
+        return Err(Error::Config(format!(
+            "{} is not a doubly-migrated workspace — its agent folder holds no {}",
+            ws.display(),
+            super::CONFIG_REL
+        )));
+    };
+    let strays: Vec<String> = std::fs::read_dir(ws)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n != ".thclaws" && n != ".DS_Store")
+        .collect();
+    if !strays.is_empty() {
+        return Err(Error::Config(format!(
+            "{} holds {} at its root as well as a nested workspace — promoting the inner tree              would collide with them. Move them aside first.",
+            ws.display(),
+            strays.join(", ")
+        )));
+    }
+    let backup = ws.join(NESTED_BACKUP);
+    if backup.exists() {
+        return Err(Error::Config(format!(
+            "{} already exists from an earlier un-nesting — move it aside first",
+            backup.display()
+        )));
+    }
+
+    // Held before anything moves; the destination lives inside the source, so
+    // the outer host goes aside first and the inner tree comes out of it.
+    let _lock = super::lock_workspace(ws, "an un-nesting")?;
+    std::fs::rename(ws.join(".thclaws"), &backup)?;
+    let inner = backup
+        .join(super::SHELF_REL.trim_start_matches(".thclaws/"))
+        .join(&slug);
+    let mut report = UnnestReport {
+        host_backup: backup.clone(),
+        ..Default::default()
+    };
+    for entry in std::fs::read_dir(&inner)? {
+        let name = entry?.file_name();
+        let dst = ws.join(&name);
+        if dst.exists() {
+            return Err(Error::Config(format!(
+                "cannot promote {}: {} already exists",
+                inner.join(&name).display(),
+                dst.display()
+            )));
+        }
+        std::fs::rename(inner.join(&name), &dst)?;
+        report.moved += 1;
+    }
+    let _ = std::fs::remove_dir(&inner);
+    if slug == MAIN_SLUG {
+        report.rewritten_schedules = unrewrite_schedules(ws)?;
+    }
+    Ok(report)
+}
+
 pub fn unmigrate(ws: &Path) -> Result<UnmigrateReport> {
     if crate::workdir::is_multiuser() {
         return Err(Error::Config(

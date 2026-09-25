@@ -4,6 +4,9 @@ thClaws มาพร้อม built-in tools ประมาณสามสิ�
 เองโดยอัตโนมัติ คุณจะเห็นการเรียกแต่ละครั้งในรูป `[tool: Name: …]`
 ตามด้วย ✓ (สำเร็จ) หรือ ✗ (error) บทนี้คือเอกสารอ้างอิง
 
+![tool call อย่างที่แท็บ Chat แสดงผล — หนึ่งแถวพับได้ต่อหนึ่งครั้ง ผลลัพธ์อยู่ใต้แถว และปิดท้ายเทิร์นด้วยบรรทัดสรุป token กับค่าใช้จ่าย](../user-manual-img/ch-04/chat-tab.png)
+
+
 ## File tools
 
 | Tool | การอนุมัติ | สรุป |
@@ -104,7 +107,7 @@ thClaws redistribute ได้ภายใต้ MIT/Apache ฟอนต์ Noto
 | Tool | การอนุมัติ | สรุป |
 |---|---|---|
 | `PdfCreate` | prompt | Markdown → PDF (printpdf + ฟอนต์ไทยฝังใน, A4/Letter/Legal) |
-| `PdfRead` | auto | สกัดข้อความผ่าน `pdftotext` (poppler-utils — `brew install poppler` / `apt install poppler-utils`) |
+| `PdfRead` | auto¹ | สกัดข้อความผ่าน `pdftotext` (poppler-utils — `brew install poppler` / `apt install poppler-utils`) |
 | `DocxCreate` | prompt | Markdown → Word (.docx) ผ่าน `docx-rs` — heading, list, code block |
 | `DocxRead` | auto | สกัดข้อความจากไฟล์ Word (XML walk แบบ pure Rust) |
 | `DocxEdit` | prompt | `find_replace` / `append_paragraph` ในไฟล์เดิม |
@@ -114,6 +117,26 @@ thClaws redistribute ได้ภายใต้ MIT/Apache ฟอนต์ Noto
 | `PptxCreate` | prompt | markdown outline → PowerPoint (.pptx); `# Heading` = สไลด์ใหม่ |
 | `PptxRead` | auto | สกัดข้อความรายสไลด์ (เรียงตามตัวเลข — slide10 ไม่มาก่อน slide2) |
 | `PptxEdit` | prompt | `find_replace` ทั่วทุกสไลด์ — ออกแบบมาสำหรับเทมเพลต `{{placeholder}}` |
+
+**¹ อ่าน PDF โดยไม่ต้องติดตั้ง poppler** — `PdfRead` จะเลือกใช้ `pdftotext`
+ในเครื่องก่อนเสมอ เพราะเป็นตัวสกัดข้อความที่ดีที่สุดสำหรับภาษาไทย และไฟล์
+ไม่ต้องออกจากเครื่องคุณเลย ถ้าไม่ได้ติดตั้ง poppler ไว้ thClaws จะไม่ล้มเหลว
+แต่จะเสนอให้สกัดข้อความผ่านบริการสาธารณะของ thClaws แทน — **ไม่ต้องมีบัญชี
+ไม่ต้องมี key** — และจะถามคุณก่อน โดยบอกชื่อไฟล์และปลายทางที่จะส่งไป
+ข้อความที่ได้กลับมาจะมีเครื่องหมายกำกับว่ามาจากเส้นทางไหน
+
+สามเรื่องที่ควรรู้:
+
+- ติดตั้ง poppler แล้วคำถามนี้จะหายไป
+  (`brew install poppler`, `apt install poppler-utils`,
+  `winget install oschwartz10612.Poppler` หรือ `scoop install poppler`)
+- ตั้ง `"pdfCloudFallback": false` ใน `.thclaws/settings.json` แล้วจะไม่มีการ
+  อัปโหลดอะไรทั้งสิ้น คุณจะได้วิธีติดตั้งแทน — ตั้งแบบนี้ถ้า PDF ของคุณเป็น
+  ความลับโดยค่าเริ่มต้น
+- **PDF ที่เป็นภาพสแกนยังต้องใช้ poppler อยู่ดี** เพราะเมื่อ PDF ไม่มีชั้น
+  ข้อความ thClaws จะอ่านด้วยการ render หน้าเป็นภาพให้โมเดลดู และตัว render
+  นั้นคือ `pdftoppm` ซึ่งมาจากแพ็กเกจเดียวกัน ส่วนบริการสาธารณะคืนให้เฉพาะ
+  ข้อความเท่านั้น
 
 **การ render ภาษาไทยในแต่ละ format:**
 

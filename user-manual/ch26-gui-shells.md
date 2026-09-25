@@ -9,6 +9,9 @@ shells are folders you drop on disk; the same shell can also be
 served over the cloud at a tokenised URL so you can use it from a
 phone browser or share it with a teammate.
 
+![The UI tab — the GUI Shell picker, with no shell installed yet](../user-manual-img/ch-04/ui-tab.png)
+
+
 > **Status:** Tier 1 lands in v0.24 (Session Explorer + tab loader);
 > Tier 2 adds the picker, custom shells, and `--serve --gui-shell`;
 > Tier 3 adds the SDK, permissions, and marketplace. See

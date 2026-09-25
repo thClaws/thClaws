@@ -23,21 +23,29 @@ deploy โปรเจกต์จริง ไม่ว่าจะเป็น
 
 | # | บท |
 |---|---|
-| 5 | [Permissions](ch05-permissions.md) |
 | 6 | [Provider, model และ API key](ch06-providers-models-api-keys.md) |
-| 7 | [Sessions](ch07-sessions.md) |
-| 10 | [Slash command](ch10-slash-commands.md) |
+| 7 | [เซสชัน (Sessions)](ch07-sessions.md) |
+| 10 | [Slash commands](ch10-slash-commands.md) |
 | 11 | [Built-in tools](ch11-built-in-tools.md) |
-| 32 | [การมาสก์ข้อมูลส่วนบุคคลภาษาไทย](ch32-thai-pii-masking.md) |
-| 34 | [Managed build และนโยบายองค์กร](ch34-managed-builds.md) |
+| 28 | [Browser automation](ch28-browser-automation.md) |
+
+### คุมขอบเขตของ agent
+
+คุณตัดสินใจล่วงหน้าว่า agent ทำอะไรได้บ้าง และอะไรบ้างที่ออกจากเครื่องคุณไป
+
+| # | บท |
+|---|---|
+| 5 | [สิทธิการใช้งานเครื่องมือ](ch05-permissions.md) |
+| 18 | [Plan mode](ch18-plan-mode.md) |
+| 32 | [การกลบข้อมูลส่วนบุคคลภาษาไทย](ch32-thai-pii-masking.md) |
 
 ### สิ่งที่ agent รู้
 
 | # | บท |
 |---|---|
 | 8 | [Memory และคำสั่งประจำโปรเจกต์ (`CLAUDE.md` / `AGENTS.md`)](ch08-memory-and-agents-md.md) |
-| 9 | [ฐานความรู้ (KMS)](ch09-knowledge-bases-kms.md) |
-| 20 | [Background research (`/research`)](ch20-research.md) |
+| 9 | [Knowledge bases (KMS)](ch09-knowledge-bases-kms.md) |
+| 20 | [Research เบื้องหลัง (`/research`)](ch20-research.md) |
 
 ### ต่อยอด agent
 
@@ -45,32 +53,37 @@ deploy โปรเจกต์จริง ไม่ว่าจะเป็น
 |---|---|
 | 12 | [Skills](ch12-skills.md) |
 | 13 | [Hooks](ch13-hooks.md) |
-| 14 | [MCP server](ch14-mcp.md) |
+| 14 | [MCP servers](ch14-mcp.md) |
 | 16 | [Plugins](ch16-plugins.md) |
 | 26 | [GUI Shells](ch26-gui-shells.md) |
-| 28 | [Browser automation](ch28-browser-automation.md) |
 
-### ทำหลายอย่างพร้อมกัน
+### ใช้ agent หลายตัว
 
 | # | บท |
 |---|---|
+| 35 | [agent หลายตัวใน workspace เดียว](ch35-agents-in-a-workspace.md) |
 | 15 | [Subagents](ch15-subagents.md) |
-| 17 | [ทีม agent](ch17-agent-teams.md) |
-| 18 | [Plan mode](ch18-plan-mode.md) |
-| 19 | [การตั้งเวลา](ch19-scheduling.md) |
+| 17 | [Agent Teams](ch17-agent-teams.md) |
 | 25 | [Workflows (`/workflow run`)](ch25-workflows.md) |
-| 31 | [Loop และ Goal (`/loop`, `/goal`)](ch31-loops-and-goals.md) |
+| 19 | [การตั้งเวลา (Scheduling)](ch19-scheduling.md) |
+| 31 | [Loops และ goals (`/loop`, `/goal`)](ch31-loops-and-goals.md) |
 
 ### เข้าถึง thClaws จากที่อื่น
 
 | # | บท |
 |---|---|
-| 21 | [LINE chat และ browser bridge](ch21-line-and-browser-chat.md) |
+| 21 | [LINE chat และ web browser bridge](ch21-line-and-browser-chat.md) |
 | 23 | [Telegram bot](ch23-telegram.md) |
 | 24 | [Facebook Page Messenger bot](ch24-messenger.md) |
-| 27 | [thClaws.cloud (แคตตาล็อก + hosted + gateway)](ch27-thclaws-cloud.md) |
-| 30 | [Job Artifacts (รับส่งไฟล์สำหรับ orchestrator)](ch30-job-artifacts.md) |
 | 33 | [thClaws Remote](ch33-thclaws-remote.md) |
+| 30 | [Job Artifacts (ไฟล์เข้า-ออกสำหรับ orchestrator)](ch30-job-artifacts.md) |
+
+### thClaws.cloud และเครื่องที่องค์กรตั้งค่าให้
+
+| # | บท |
+|---|---|
+| 27 | [thClaws.cloud (Agent Templates + hosted + gateway)](ch27-thclaws-cloud.md) |
+| 34 | [Managed builds และนโยบายองค์กร](ch34-managed-builds.md) |
 
 ## ภาคผนวก
 

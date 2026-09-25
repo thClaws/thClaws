@@ -2,6 +2,9 @@
 
 Plan mode คือ workflow แบบ **สองเฟส** สำหรับงานที่อยากให้ model **ออกแบบแผนก่อน** แล้วค่อยดู model ทำตามแผนทีละ step ผ่าน sidebar ทางขวาที่มี checkmark อัพเดทแบบ live:
 
+![แถบ plan หลังโมเดลเรียก `SubmitPlan` — ขั้นตอนทั้งหมด ปุ่ม Approve & execute และตัวนับขั้นตอนที่ด้านล่าง](../user-manual-img/ch-18/plan-sidebar.png)
+
+
 1. **Plan phase** — model ใช้ได้แค่ tool ที่ read-only (Read, Grep, Glob, Ls) สำรวจ codebase, ออกแบบ approach, แล้วส่งแผนแบบ structured ผ่าน `SubmitPlan` **Sidebar ทางขวา**จะเด้งขึ้นพร้อมรายการ step และปุ่ม **Approve / Cancel** *ยังไม่มีไฟล์ไหนถูกแก้*
 2. **Execution phase** — เมื่อกด Approve, tool ที่แก้ไขได้จะปลดล็อก model เดินตามแผนทีละ step การเปลี่ยนสถานะแต่ละ step (in_progress → done) จะอัพเดทเครื่องหมายถูกใน sidebar แบบ live
 

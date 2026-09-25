@@ -91,6 +91,22 @@ impl Sandbox {
     }
 
     fn enforce_write_policy(root: &Path, resolved: PathBuf) -> Result<PathBuf> {
+        // finding 11: an agent's own folder sits under `.thclaws/bots/<slug>/`,
+        // so the blanket deny below also locked an agent out of its own state —
+        // Book Author could not write the `book.json` it reads every turn. That
+        // folder IS the agent, so it is writable; the host's `.thclaws/` and a
+        // sibling agent's folder stay denied.
+        if let Some(agent) = crate::workdir::agent_dir() {
+            // Both forms: `resolved` is canonical for a path that exists and a
+            // normalized landing path for one that does not, and on macOS the
+            // canonical form of a temp dir gains a `/private` prefix the raw
+            // one lacks — comparing only one of them denies writes to new
+            // files in the agent's own folder.
+            let under = |a: &Path| resolved == a || resolved.starts_with(a);
+            if under(&agent) || agent.canonicalize().is_ok_and(|a| under(&a)) {
+                return Ok(resolved);
+            }
+        }
         let protected = root.join(".thclaws");
         if resolved == protected || resolved.starts_with(&protected) {
             return Err(Error::Tool(format!(
@@ -119,12 +135,13 @@ impl Sandbox {
             return if p.is_absolute() {
                 Ok(p.to_path_buf())
             } else {
-                Ok(crate::workdir::current_workdir().join(p))
+                Ok(crate::workdir::tool_base(path).join(p))
             };
         };
         // dev-plan/42: resolve relative paths against the per-session
-        // working dir (task-local when scoped, else process cwd).
-        let cwd = crate::workdir::current_workdir();
+        // working dir (task-local when scoped, else process cwd) — except an
+        // agent's own `.thclaws/…`, which finding 11 resolves in its folder.
+        let cwd = crate::workdir::tool_base(path);
         Self::validate_against(&root, &cwd, path)
     }
 

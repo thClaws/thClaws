@@ -7,6 +7,9 @@ sites the way a person would, not by guessing pixel coordinates. You
 get a **Browser** tab to watch it work, take over to log in yourself,
 and hand control back. Built across v0.48–v0.52.
 
+![The Browser tab — the managed browser's status, the page preview, the activity log, and an Agent panel sharing the Chat tab's conversation](../user-manual-img/ch-04/browser-tab.png)
+
+
 This is the inverse of "computer use" screenshot tools: the agent works
 from the page's **accessibility tree** (fast, reliable, cheap), and can
 also *see* the rendered pixels when a page is visual-only.

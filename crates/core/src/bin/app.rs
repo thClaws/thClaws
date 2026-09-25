@@ -418,6 +418,30 @@ enum BotsCmd {
         #[arg(long)]
         path: Option<String>,
     },
+    /// Point an agent's own `.thclaws/…` paths back at its folder. Migration
+    /// does this for workspaces it moves; this is for one already on disk,
+    /// whose agent still looks for its scripts and state at the workspace root
+    /// and so reports an empty project.
+    FixPaths {
+        /// Report what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Workspace to repair. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Undo a double migration: a workspace an older engine migrated twice
+    /// holds its real agent one level too deep, and the host supervises a
+    /// folder that is not an agent. Promotes the inner workspace and keeps the
+    /// bare outer host beside it.
+    Unnest {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Workspace to un-nest. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Undo `migrate` for a workspace whose one agent is `main`: the agent goes
     /// back to the root, and the host's `.thclaws/` is kept beside it.
     Unmigrate {
@@ -1615,7 +1639,16 @@ async fn run_bots_subcommand(cmd: BotsCmd) -> i32 {
                 Ok(p) => {
                     println!("workspace  {}", p.workspace.display());
                     match &p.status {
-                        migrate::Status::AlreadyV3 => println!("layout     multiple agents (v3 or later)"),
+                        migrate::Status::AlreadyV3 => {
+                            println!("layout     multiple agents (v3 or later)");
+                            if let Some((slug, _)) = migrate::nested_bot(&ws) {
+                                println!(
+                                    "nested     agent '{slug}' runs a level below this shelf — \
+                                     an older migration ran twice. It is followed, so nothing \
+                                     is missing; `thclaws bots unnest` flattens it"
+                                );
+                            }
+                        }
                         migrate::Status::Migrate => println!(
                             "layout     v2 (single agent) — `thclaws bots migrate` moves it to v3"
                         ),
@@ -1787,6 +1820,103 @@ async fn run_bots_subcommand(cmd: BotsCmd) -> i32 {
                     eprintln!("\n\x1b[31mmigration failed: {e}\x1b[0m");
                     eprintln!("The workspace is mid-migration and safe to resume — run the same");
                     eprintln!("command again once the cause is fixed.");
+                    1
+                }
+            }
+        }
+        BotsCmd::FixPaths { dry_run, path } => {
+            let ws = resolve(path);
+            let cfg = match thclaws_core::bots::BotsConfig::load(&ws) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "\x1b[31m{} has no agents to repair: {e}\x1b[0m",
+                        ws.display()
+                    );
+                    return 1;
+                }
+            };
+            println!("workspace  {}", ws.display());
+            let mut total = 0usize;
+            for def in &cfg.bots {
+                let dir = thclaws_core::bots::bot_dir(&ws, &def.slug);
+                match thclaws_core::bots::agent_paths::fix(&dir, dry_run) {
+                    Ok(r) => {
+                        total += r.commands + r.literals;
+                        println!(
+                            "{}      {}{} file(s): {} command(s), {} path(s)",
+                            def.slug,
+                            if dry_run { "would change " } else { "" },
+                            r.files,
+                            r.commands,
+                            r.literals
+                        );
+                        for skipped in &r.skipped {
+                            println!("           left alone (no import block): {skipped}");
+                        }
+                    }
+                    Err(e) => eprintln!("\x1b[31m{}: {e}\x1b[0m", def.slug),
+                }
+            }
+            if total == 0 {
+                println!("nothing to change — these agents already find their own files");
+            } else if !dry_run {
+                println!("\n\x1b[33m  Restart thClaws on this workspace to pick it up.\x1b[0m");
+            }
+            0
+        }
+        BotsCmd::Unnest { yes, path } => {
+            let ws = resolve(path);
+            let Some((slug, dir)) = migrate::nested_bot(&ws) else {
+                eprintln!(
+                    "\x1b[31m{} is not a doubly-migrated workspace — nothing to un-nest\x1b[0m",
+                    ws.display()
+                );
+                return 1;
+            };
+            println!("workspace  {}", ws.display());
+            println!(
+                "nested     {} (agent '{slug}' is a workspace of its own)",
+                dir.display()
+            );
+            println!(
+                "action     promote it to the root; the bare outer host is kept as {}",
+                migrate::NESTED_BACKUP
+            );
+            println!(
+                "\n\x1b[33m  Close any thClaws window or `--serve` on this workspace first.\x1b[0m"
+            );
+            if !yes {
+                print!("\nType `yes` to continue: ");
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+                let mut answer = String::new();
+                if std::io::stdin().read_line(&mut answer).is_err() || answer.trim() != "yes" {
+                    println!("cancelled — nothing was moved.");
+                    return 1;
+                }
+            }
+            match migrate::unnest(&ws) {
+                Ok(r) => {
+                    println!("moved      {} entries to the root", r.moved);
+                    println!("kept       {}", r.host_backup.display());
+                    if !r.rewritten_schedules.is_empty() {
+                        println!("schedules  {}", r.rewritten_schedules.join(", "));
+                    }
+                    // The layout is fixed; the agent's own paths are not. An
+                    // agent installed before agents learned $THCLAWS_AGENT_DIR
+                    // still looks for its state at the workspace root, and it
+                    // reports that as an empty project rather than an error —
+                    // "No book yet" for a book that is right there.
+                    println!(
+                        "\n\x1b[33m  The layout is fixed. If '{slug}' still shows nothing, it \
+                         was installed before agents learned to find their own files — \
+                         `thclaws bots fix-paths` repairs it, or get the agent again.\x1b[0m"
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("\x1b[31m{e}\x1b[0m");
                     1
                 }
             }

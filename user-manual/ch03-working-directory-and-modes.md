@@ -79,7 +79,7 @@ a sidebar with provider/sessions/knowledge/MCP sections, and a gear
 icon for Settings. [Chapter 4](ch04-desktop-gui-tour.md) is the full
 tour with screenshots and keyboard shortcuts.
 
-![thClaws Desktop GUI](../user-manual-img/ch-01/main-window-layout.png)
+![thClaws Desktop GUI](../user-manual-img/ch-04/main-window.png)
 
 ### Interactive CLI
 
@@ -90,7 +90,7 @@ thclaws --cli
 Same agent, just in a terminal. Every feature in this manual works
 here — it's the backbone the GUI wraps.
 
-![thClaws Interactive CLI](../user-manual-img/ch-03/thclaws-interactive-cli.png)
+![The CLI REPL on launch — startup lines, the banner with version, model, permission mode and session id, then the `>` prompt](../user-manual-img/ch-03/interactive-cli.png)
 
 Inside the REPL, lines you type fall into three buckets:
 
@@ -157,7 +157,7 @@ The `--resume` chain is also what powers **heartbeat schedules** —
 recurring jobs that keep one growing conversation instead of starting
 amnesiac every fire. See [Chapter 19](ch19-scheduling.md#heartbeats).
 
-![thClaws Non-Interactive Mode](../user-manual-img/ch-03/thclaws-non-interactive.png)
+![Print mode — one turn, the tool calls it made, the answer, then exit](../user-manual-img/ch-03/non-interactive.png)
 
 ### `--serve` (HTTP/WebSocket server)
 
@@ -168,7 +168,7 @@ thclaws --serve --bind 0.0.0.0        # bind all interfaces (auth required)
 thclaws --serve --gui                 # plus open desktop window on same engine
 ```
 
-![thClaws --serve mode](../user-manual-img/ch-03/thclaws-serve-mode.png)
+![`--serve` on launch — the host URL, then the per-agent URL to open in a browser](../user-manual-img/ch-03/serve-mode.png)
 
 The same agent engine, exposed over HTTP + WebSocket — covers two
 use cases:

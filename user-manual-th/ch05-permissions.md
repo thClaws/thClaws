@@ -52,7 +52,7 @@ permissions: auto
 permissions: ask
 ```
 
-![thClaws Permissions](../user-manual-img/ch-05/thClaws-permissions.png)
+![`/permissions` ในแท็บ Terminal — อ่านโหมดปัจจุบัน สลับเป็น `ask` แล้วอ่านกลับ](../user-manual-img/ch-05/permissions.png)
 
 ## หน้าขออนุญาตหน้าตาเป็นยังไง
 

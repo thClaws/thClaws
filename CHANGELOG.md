@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.138.0] — 2026-09-25
+
+**A release about an agent being able to reach its own files.** A workspace with
+a host keeps the user's files at its root and the agent in a folder of its own.
+An agent installed before this release did not know that, so it looked for the
+scripts and state it ships where the user's files are, found nothing, and
+reported an empty project — no error anywhere. A GUI shell drew its chrome
+around no data, which looked like the shell was broken and the work was gone.
+It was not: opening such a workspace now repairs it.
+
+### Added
+- **`$THCLAWS_AGENT_DIR`.** A shell an agent runs gets its own folder as an
+  environment variable, because one working directory cannot mean two places at
+  once. File tools need no variable: a `.thclaws/…` path an agent gives them
+  resolves in its folder, while `.thclaws/state/kms` and `.thclaws/state/logs`
+  stay shared at the workspace root.
+- **`thclaws bots fix-paths`.** Points an agent's own paths back at its folder,
+  with `--dry-run`. Migration now does the same in the pass that moves the
+  files, so a workspace is never left in the broken state, and a host repairs a
+  stale agent on open without being asked — keeping the originals under
+  `.thclaws/state/pre-agent-dir/`.
+- **`thclaws bots unnest`.** An older engine could migrate a workspace twice,
+  leaving the real agent a level too deep. This flattens it and keeps the bare
+  outer host aside. Nothing is lost either way; it is tidying, not a repair.
+
+### Fixed
+- **A GUI shell no longer opens onto nothing.** The desktop served a shell's
+  assets from the wrong folder when a workspace had been migrated twice, so
+  every asset 404'd and the panel came up blank — while the same workspace
+  worked over `--serve`.
+- **Images embedded in a document render again.** They were being served from
+  the agent's folder rather than the workspace the agent runs in, which are two
+  different places.
+- **The folder picker picks a workspace.** It offered an agent's folder inside
+  the workspace instead, and rewrote what you had typed each time a page
+  mounted. The folder button in the status bar now opens the picker it asks
+  for, rather than swapping the screen out and straight back in.
+- **The agent is told which folder is which.** Its prompt named one working
+  directory while its shell used another, so it would list `.thclaws/`, see the
+  host's, and report the layout as wrong.
+
+### Changed
+- **A workspace says what it needs, on screen.** Both of these used to be
+  announced only on stderr, which a desktop opened from its icon never shows
+  and a browser has none of. They now reach the page, each carrying the command
+  that fixes it.
+- **Migration will not run twice.** It refuses a tree that already has an agent
+  shelf, and the notice about one that was migrated before that guard existed
+  no longer claims the workspace is broken, because it is not.
+
 ## [0.137.0] — 2026-09-24
 
 **A release about the takeover browser, and about the workspace actually being the boundary.** The takeover grows a keyboard and a live view that follows the agent, and a symlink swapped in mid-flight can no longer carry a write out of the workspace.

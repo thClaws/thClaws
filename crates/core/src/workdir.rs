@@ -70,6 +70,62 @@ pub fn workspace_root() -> PathBuf {
     }
 }
 
+/// finding 11: the agent's OWN folder under a workspace host.
+///
+/// A bot runs with its folder as the process cwd while
+/// `THCLAWS_WORKSPACE_ROOT` points at the user's files, so the two differ
+/// exactly when there is a host. Without one they are the same directory and
+/// this is `None`, which keeps every rule below a no-op off a host.
+pub fn agent_dir() -> Option<PathBuf> {
+    let root = match std::env::var("THCLAWS_WORKSPACE_ROOT") {
+        Ok(s) if !s.trim().is_empty() => PathBuf::from(s),
+        _ => return None,
+    };
+    let cwd = std::env::current_dir().ok()?;
+    (cwd != root).then_some(cwd)
+}
+
+/// Subpaths of `.thclaws/` that belong to the WORKSPACE rather than to the
+/// agent: the project KMS and the engine's log, which every agent shares and
+/// which `kms.rs` and `util.rs` already resolve at the workspace root.
+const SHARED_THCLAWS: &[&str] = &["state/kms", "state/logs"];
+
+/// Where a relative path the agent typed into a tool resolves from.
+///
+/// `.thclaws/…` is the agent's own — holding its settings, sessions, skills
+/// and whatever it ships — and `AGENT_ENTRIES` in the migration says as much.
+/// Everything else is the user's and resolves at the workspace root, as
+/// before. Two subpaths are carved out because they are shared, not agent
+/// state (see [`SHARED_THCLAWS`]).
+///
+/// Bash cannot follow this rule: its cwd is one directory for the whole
+/// command, so a bare `.thclaws/…` inside a shell string cannot mean the
+/// agent's folder for one process and the host's for another. Agents reach
+/// their own folder from a shell through `THCLAWS_AGENT_DIR` instead.
+pub fn tool_base(path: &str) -> PathBuf {
+    match agent_dir() {
+        Some(agent) if is_agent_owned(path) => agent,
+        _ => current_workdir(),
+    }
+}
+
+/// True for a relative `.thclaws/…` that belongs to the agent.
+fn is_agent_owned(path: &str) -> bool {
+    let p = path.strip_prefix("./").unwrap_or(path);
+    if std::path::Path::new(p).is_absolute() {
+        return false;
+    }
+    let Some(rest) = p
+        .strip_prefix(".thclaws/")
+        .or_else(|| (p == ".thclaws").then_some(""))
+    else {
+        return false;
+    };
+    !SHARED_THCLAWS
+        .iter()
+        .any(|s| rest == *s || rest.strip_prefix(s).is_some_and(|t| t.starts_with('/')))
+}
+
 /// True when a per-session working root is active (i.e. we're inside a
 /// multiuser worker scope). Lets callers fail-closed instead of touching
 /// process cwd when isolation is expected.
@@ -124,6 +180,53 @@ mod tests {
     }
 
     use super::*;
+
+    /// finding 11: an agent's own `.thclaws/…` resolves in its folder, so it
+    /// can reach the scripts and state it ships. The user's files and the two
+    /// shared subpaths keep resolving at the workspace root.
+    #[test]
+    fn an_agents_own_thclaws_resolves_in_its_folder() {
+        let _g = crate::kms::test_env_lock();
+        let prev = std::env::var("THCLAWS_WORKSPACE_ROOT").ok();
+        let ws = tempfile::tempdir().unwrap();
+        let agent = std::env::current_dir().unwrap();
+
+        std::env::set_var("THCLAWS_WORKSPACE_ROOT", ws.path());
+        assert_eq!(
+            agent_dir(),
+            Some(agent.clone()),
+            "cwd differs from the root"
+        );
+
+        for p in [
+            ".thclaws",
+            ".thclaws/book.json",
+            "./.thclaws/scripts/book.py",
+            ".thclaws/state/sessions/a.jsonl",
+            ".thclaws/state/kmsx/not-the-carve-out",
+        ] {
+            assert_eq!(tool_base(p), agent, "{p} is the agent's");
+        }
+        for p in [
+            "chapters/ch01.md",
+            ".thclaws/state/kms",
+            ".thclaws/state/kms/vault/page.md",
+            ".thclaws/state/logs/engine.log",
+            "/etc/hosts",
+        ] {
+            assert_eq!(tool_base(p), ws.path(), "{p} is not the agent's");
+        }
+
+        // Off a host cwd IS the root, so nothing moves.
+        std::env::remove_var("THCLAWS_WORKSPACE_ROOT");
+        assert_eq!(agent_dir(), None);
+        assert_eq!(tool_base(".thclaws/book.json"), agent);
+
+        match prev {
+            Some(v) => std::env::set_var("THCLAWS_WORKSPACE_ROOT", v),
+            None => std::env::remove_var("THCLAWS_WORKSPACE_ROOT"),
+        }
+    }
 
     #[tokio::test]
     async fn unscoped_falls_back_to_process_cwd() {

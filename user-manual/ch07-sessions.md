@@ -2,6 +2,9 @@
 
 A **session** is one persistent conversation between you and thClaws. It holds:
 
+![`/sessions` — every saved session with its message count and the model it ran on](../user-manual-img/ch-07/sessions-list.png)
+
+
 - The full message history (user prompts, assistant responses, tool calls)
 - The model and provider in use
 - A creation date, working directory, and optional human-readable title

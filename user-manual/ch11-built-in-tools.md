@@ -4,6 +4,9 @@ thClaws ships with around thirty built-in tools. The agent picks them
 autonomously; you see each call as a `[tool: Name: …]` line, then a
 ✓ (success) or ✗ (error). This chapter is the reference.
 
+![Tool calls as the Chat tab renders them — one collapsible row per call, with the result underneath and the turn's token and cost footer](../user-manual-img/ch-04/chat-tab.png)
+
+
 ## File tools
 
 | Tool | Approval | Summary |

@@ -109,7 +109,30 @@ impl ProjectContext {
             crate::usage::today_str()
         ));
 
-        parts.push(format!("# Working directory\n{}", self.cwd.display()));
+        // Under a workspace host the agent's folder and the user's files are
+        // two different directories, and the model had no way to tell which is
+        // which — it read the cwd line, ran `ls .thclaws/`, got the host's
+        // folder and reported the layout as wrong. Both paths come from their
+        // real sources rather than from `cwd`, which is the agent's folder on
+        // this surface and the workspace on others.
+        match crate::workdir::agent_dir() {
+            Some(agent) => parts.push(format!(
+                "# Working directory\n{root}\n\nThis workspace has a host, so two directories \
+                 are in play. The user's files live at the workspace root above, and that is \
+                 also where a shell runs. Your own folder is {agent} — your AGENTS.md, \
+                 settings, sessions and anything you ship.\n\nA `.thclaws/…` path you hand a \
+                 file tool (Read, Write, Edit, Glob, Grep) resolves in YOUR folder, so \
+                 `.thclaws/x.json` is your own state. Two subpaths are shared and stay at the \
+                 workspace root: `.thclaws/state/kms` and `.thclaws/state/logs`.\n\nA shell \
+                 cannot follow that rule — its cwd is the workspace root, so a bare \
+                 `.thclaws/` in a Bash command is the HOST's folder, not yours. Run what you \
+                 ship through the variable instead: \
+                 `python3 \"$THCLAWS_AGENT_DIR/.thclaws/scripts/x.py\"`.",
+                root = crate::workdir::workspace_root().display(),
+                agent = agent.display(),
+            )),
+            None => parts.push(format!("# Working directory\n{}", self.cwd.display())),
+        }
 
         if let Some(git) = &self.git {
             parts.push(format!(

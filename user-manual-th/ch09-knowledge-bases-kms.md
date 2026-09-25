@@ -2,6 +2,9 @@
 
 **knowledge base** (KMS — Knowledge Management System) คือโฟลเดอร์ของ markdown page ที่คุณดูแลเอง พร้อมกับ `index.md` ที่ทำหน้าที่เป็นสารบัญซึ่ง agent อ่านทุก turn แนวคิดนี้ได้แรงบันดาลใจมาจาก [LLM wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) ของ Andrej Karpathy โดย thClaws ใส่ KMS มาให้ในตัวอยู่แล้ว ไม่มี embeddings ไม่มี vector store มีแค่ grep กับ read
 
+![knowledge base ที่ attach เข้ากับโปรเจกต์แล้ว — ส่วน Knowledge ในแถบข้างแสดงรายการพร้อมกล่องติ๊ก และ `(proj)` บอกขอบเขต](../user-manual-img/ch-09/kms-attached.png)
+
+
 Use case:
 
 - **บันทึกส่วนตัว** — ทุกสิ่งที่คุณเรียนรู้เกี่ยวกับ API, library หรือ codebase ของลูกค้า

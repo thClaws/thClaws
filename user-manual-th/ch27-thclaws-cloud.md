@@ -8,6 +8,9 @@ hosted workspace มารันก็ได้ จากมุมของ desk
 Settings แล้วทุก catalog op (`/cloud get`, `/cloud publish`,
 `/cloud list`, …) ทำงานเป็น slash command ภายใน thClaws session
 
+![`/cloud status` — URL ของ catalog, มี token เก็บไว้หรือยัง และโฟลเดอร์นี้ผูกกับ Agent Template ตัวไหน](../user-manual-img/ch-27/cloud-status.png)
+
+
 > **ขอบเขตของบทนี้ (ฝั่ง client เท่านั้น).** การ browse catalog การ
 > publish agent ของตัวเอง การติดตั้ง agent ลง folder และบล็อก
 > `agent.{name, description, uuid}` ใน `settings.json` ส่วน runbook
@@ -15,7 +18,14 @@ Settings แล้วทุก catalog op (`/cloud get`, `/cloud publish`,
 > [`dev-plan/34`](../dev-plan/34-thclaws-cloud-control-plane.md) และ
 > source tree `thclaws-cloud/` ที่ workspace-private
 
-## โมเดล folder-คือ-agent — สรุปคร่าว ๆ
+## Agent Templates กับโมเดล folder-คือ-agent
+
+catalog เรียก agent ที่ publish แล้วว่า **Agent Template** — โฟลเดอร์ที่ใคร
+สักคนทำเสร็จแล้วแบ่งปันไว้ พร้อมจะกลายเป็น agent ใน workspace ของคุณ พอดึงมา
+มันก็ก๊อบเข้ามาเป็นของคุณ มีบทสนทนาและการตั้งค่าของตัวเอง และเทมเพลตต้นทาง
+ก็หมดความสำคัญไปตั้งแต่นาทีนั้น การเอาหลายเทมเพลตมาไว้ใน workspace เดียวกัน
+อยู่ใน [บทที่ 35](ch35-agents-in-a-workspace.md)
+
 
 ในทุกที่ที่ thClaws รันได้ **AI agent คือโฟลเดอร์** หนึ่ง โดยที่ราก
 ของโฟลเดอร์มี 3 ไฟล์หลัก:
@@ -139,6 +149,28 @@ thClaws session ใน folder นั้น แล้วใช้ slash command:
 
 ถ้า `manifest.json` หายหรือ invalid `publish` จะ abort พร้อม error
 ที่ชัด minimum field ที่ต้องมี: `id`, `name`, `description`, `version`
+
+## Publish หน้า HTML
+
+นอกเหนือจากเรื่อง agent แล้ว thClaws.cloud ยังโฮสต์ **ไฟล์ HTML ไฟล์เดียวที่
+สมบูรณ์ในตัว** ให้คุณที่ URL ส่วนตัวได้ด้วย:
+
+```
+❯ /publish dashboard.html
+published → https://k3m9qp2wv7xa.thclaws.app  (expires in 3 days)
+```
+
+ไฟล์ต้องยืนอยู่ได้ด้วยตัวเอง — ฝัง CSS กับ JS ไว้ในไฟล์เลย เพราะไม่มีอะไร
+ข้าง ๆ ถูกอัปโหลดขึ้นไปด้วย สิ่งที่ได้กลับมาคือ subdomain 12 ตัวอักษรที่
+*เดาไม่ถูก* มากกว่าจะเป็น *ความลับ*: ใครที่มีลิงก์ก็เปิดได้ และมันจะหยุด
+ทำงานหลังผ่านไปสามวัน
+
+ต้องมี token ของ thClaws.cloud และยอดเครดิตมากกว่าศูนย์ ด้วยเหตุผลเดียวกับ
+ทุกอย่างในบทนี้ — บัญชีคือสิ่งที่จ่ายค่าโฮสต์
+
+นี่คือปลายทางตามธรรมชาติของเซสชันแบบ "ช่วยทำ dashboard ให้หน่อย": agent เขียน
+หน้าเว็บ คุณดูผลในแท็บ Files ([บทที่ 4](ch04-desktop-gui-tour.md)) แล้ว publish
+เพื่อส่งลิงก์ให้คนอื่น
 
 ## บล็อก agent identity ใน `settings.json`
 

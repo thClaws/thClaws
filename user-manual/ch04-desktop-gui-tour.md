@@ -8,11 +8,12 @@ If you only ever use the terminal REPL, you can skim this chapter and move on. E
 
 ## The main window — layout
 
-![thClaws main window — Terminal tab active, sidebar showing Provider / Sessions / Knowledge / MCP sections](../user-manual-img/ch-01/main-window-layout.png)
+![thClaws main window — Chat tab on a fresh workspace: the agent rail on the far left, then the sidebar's Provider / Sessions / Knowledge / MCP sections](../user-manual-img/ch-04/main-window.png)
 
-- **Tab bar** (top) — Terminal, Chat, Files, optional Team. Window title shows the current project.
-- **Sidebar** (left column) — four collapsible sections covering active provider + model, saved sessions, attached knowledge bases, and configured MCP servers.
-- **Active tab content** (right) — whatever tab you're on: a live terminal, a streaming chat, a file browser, or the team view.
+- **Agent rail** (far left, narrow) — one square per agent in this workspace, plus workspace settings and "add an agent" at the bottom. A workspace holds up to 8 agents; see [chapter 17](ch17-agent-teams.md) for what they are. With one agent it is just the single tile, so it is easy to miss.
+- **Tab bar** (top) — Chat, Terminal, Files, and whichever optional tabs are switched on.
+- **Sidebar** (left column) — four sections covering active provider + model, saved sessions, attached knowledge bases, and configured MCP servers.
+- **Active tab content** (right) — whatever tab you're on: a streaming chat, a live terminal, a file browser, the team view.
 - **Status bar** (bottom) — current working directory on the left, gear icon for Settings on the right.
 
 ### Sidebar (left column)
@@ -21,8 +22,8 @@ The sidebar is always visible and holds four sections:
 
 | Section | Shows | Actions |
 |---|---|---|
-| **Provider** | Active provider + model, ready/not-ready dot, ▾ chevron | Click to open the inline model picker (v0.7.2+) |
-| **Sessions** | Last 10 saved sessions (title or ID) | `+` to start a new session · hover row → pencil to rename · click to load |
+| **Provider** | Active provider + model, ready/not-ready dot, ▾ chevron, and a `think` row | Click the model line to open the inline model picker (v0.7.2+) |
+| **Sessions** | A search box, then the saved sessions (title or ID) | `+` to start a new session · type to filter · hover row → pencil to rename · click to load |
 | **Knowledge** | Every discoverable KMS with attach checkbox | `+` to create a new KMS; **right-click the header** to import/export OKF bundles — see [chapter 9](ch09-knowledge-bases-kms.md) |
 | **MCP Servers** | Active MCP servers + their tool count | Read-only here — configure via `/mcp add` |
 
@@ -33,7 +34,30 @@ The **Provider** section has a visual health indicator:
 
 When a key is saved via Settings, the dot flips to green and the active model may auto-switch to the first provider with credentials — see [chapter 6](ch06-providers-models-api-keys.md#auto-switch-on-key-save).
 
+**Thinking budget** — under the model line sits a `think` row: `auto · 0 · 1 · 2 · 3`. It sets how much reasoning the model is asked to spend on the next turn, without a slash command. `auto` lets the engine decide from the prompt; `0` turns extended thinking off; `1`–`3` ask for progressively larger budgets. Models that have no reasoning mode ignore it. The same control is `/thinking` in the REPL — see [chapter 10](ch10-slash-commands.md).
+
+![The inline model picker — search-as-you-type over every model in the catalogue, grouped by provider](../user-manual-img/ch-04/model-picker.png)
+
 **Inline model picker** (v0.7.2+): clicking the Provider row opens a search-as-you-type dropdown listing every model the catalogue knows about, grouped by provider, plus any local Ollama models discovered live via `/api/tags`. Click a row to switch — the change persists to `.thclaws/settings.json` and the active provider rebuilds in place (same path as `/model`). Esc or click-outside dismisses without changing.
+
+### Agent rail (far left)
+
+![The workspace panel, opened from the agent rail — every agent in this workspace, with add / remove / restart](../user-manual-img/ch-04/agent-rail.png)
+
+The narrow strip down the left edge is the workspace's agent list — one
+square per agent, showing its initials, with the active one highlighted.
+Hovering a square names it and gives its state (`main — ready`).
+
+Two buttons sit at the bottom of the rail:
+
+| Button | Does |
+|---|---|
+| **Workspace settings** | Add, remove or restart agents in this workspace |
+| **Add an agent** | Get an agent from an Agent Template, or create an empty one |
+
+Every agent keeps its own conversations, sessions and settings, but they
+all read and write the *same* project files — the working directory in
+the status bar is shared. See [chapter 17](ch17-agent-teams.md).
 
 ### Right-edge sidebars (contextual)
 
@@ -68,13 +92,15 @@ Chat is the leftmost tab and the one a fresh window opens on.
 
 A streaming chat panel that shares history with the Terminal tab (same agent, same session). Messages render as Markdown; tool calls show collapsible `[tool: Name]` blocks; token usage appears after each assistant response.
 
+![Chat tab mid-conversation — the agent's tool calls render as collapsible `browser__*` rows, a Thinking block sits inline, and the token / cost footer closes the turn](../user-manual-img/ch-04/chat-tab.png)
+
 Use the Chat tab when you prefer a conversational UI; use the Terminal tab when you want to see raw output and run slash commands.
 
 #### 2. Terminal tab
 
 An embedded xterm.js terminal running `thclaws --cli` (the same REPL you get from the CLI). Keystrokes go through a PTY bridge to the child process; output streams back via base64-encoded frames.
 
-![Terminal tab — agent just finished scaffolding a static site; `[tool: Write …]` lines show each file being created and the token/time totals appear at the bottom](../user-manual-img/ch-04/thClaws-gui-terminal.png)
+![Terminal tab — the same conversation as the Chat tab, rendered as the REPL you get from `thclaws --cli`](../user-manual-img/ch-04/terminal-tab.png)
 
 Key behaviors worth knowing:
 
@@ -109,11 +135,15 @@ page:
   `../sources/<alias>.md`. Pick this for long documents you want to
   navigate by concept; pick the plain summary for short notes.
 
-![Files-tab preview mode — `script.js` rendered through CodeMirror with line numbers and syntax highlighting; the Edit button on the top-right switches to edit mode](../user-manual-img/ch-04/thClaws-gui-file-viewer.png)
+![Files tab — the project tree on the left, a file's contents on the right](../user-manual-img/ch-04/files-tab-tree.png)
+
+Source files land in CodeMirror, read-only, with line numbers and syntax highlighting; **Edit** in the top-right switches to edit mode:
+
+![Files-tab preview mode — `style.css` through CodeMirror, with the Refresh / Edit controls top-right](../user-manual-img/ch-04/files-tab-code-viewer.png)
 
 `.html` files render live in the sandboxed iframe, so you see the page as a browser would — styles, images, and interactive JS intact:
 
-![Files-tab HTML preview — `index.html` rendered inside the sandboxed iframe, complete with stylesheet, image, and clickable button](../user-manual-img/ch-04/thClaws-gui-file-html-viewer.png)
+![Files-tab HTML preview — `index.html` rendered inside the sandboxed iframe, stylesheet and scripts intact, so the page looks exactly as a browser shows it](../user-manual-img/ch-04/files-tab-html-preview.png)
 
 **Edit mode** (pencil icon):
 
@@ -125,7 +155,7 @@ page:
 - Clicking a different file in the sidebar while dirty also pops the same native confirm — save or discard before navigating away.
 - Auto-refresh polling pauses while you're editing, so a concurrent `Write`/`Edit` tool call from the agent can't clobber your in-progress buffer.
 
-![Files-tab edit mode — `index.html` opened in CodeMirror; the ● after the filename marks unsaved changes, and the Save / Discard controls appear in the top-right](../user-manual-img/ch-04/thClaws-gui-file-editor.png)
+![Files-tab edit mode — the ● after the filename marks unsaved changes; Save / Discard replace the Refresh / Edit pair](../user-manual-img/ch-04/files-tab-edit-mode.png)
 
 Files are written through the same working-directory sandbox the agent uses, so edits stay inside the project tree. User-initiated saves do **not** go through the agent approval prompt — the Save button is your approval.
 
@@ -137,6 +167,8 @@ Files are written through the same working-directory sandbox the agent uses, so 
 
 **Shown only when `teamEnabled: true`** is set in `.thclaws/settings.json` — the same flag that gives the agent the team tools (`TeamCreate`, `SpawnTeammate`, `SendMessage`, …). With the flag off there is no Team tab at all. With it on but no team yet, the tab shows an empty state ("No team agents running — ask the agent to create a team"); once the agent calls `TeamCreate`, each teammate gets its own pane — click a pane to focus, scroll to browse history, type into it to send input. See [chapter 17](ch17-agent-teams.md) for the team concept.
 
+![Team tab with no team running yet](../user-manual-img/ch-04/team-tab.png)
+
 
 #### 5. UI tab
 
@@ -145,6 +177,8 @@ installable HTML frontend that an agent ships with itself — Media Studio
 is one. The tab is a picker: choose a shell and it loads in an iframe,
 talking to the engine over the `window.thclaws.*` bridge rather than
 your conversation. See [chapter 26](ch26-gui-shells.md).
+
+![UI tab — the GUI Shell picker, with no shell installed yet](../user-manual-img/ch-04/ui-tab.png)
 
 (It was called "Shell" until the PTY-backed Shell tab below took that
 name.)
@@ -159,30 +193,69 @@ you type is a prompt or a slash command. Shell is a plain shell with no
 agent in it — the same thing you would get from your terminal app, in a
 tab.
 
+![Shell tab — a plain `$SHELL`, no agent in the loop](../user-manual-img/ch-04/shell-tab.png)
+
 #### 7. Browser tab
 
-**Shown only when `browserEnabled` is set.** Status and live activity
-for the Chromium instance the engine manages for browser automation:
-what page it is on, what the agent just did, a live view, and takeover
-so you can drive it yourself mid-run. See
+**On by default since v0.49.2**; turn it off under Settings → Optional
+features → Browser tools. Status and live activity for the Chromium
+instance the engine manages for browser automation.
+
+![Browser tab — the managed browser's status line, the page preview, the activity log, and an Agent panel that shares the Chat tab's conversation](../user-manual-img/ch-04/browser-tab.png)
+
+The header names the exact `playwright-mcp` command and Chromium
+binary in use, and says whether the live view is ready. **Take over**
+hands you the keyboard and mouse mid-run; **capture** snapshots the
+current page. The **Agent** panel on the right is the same conversation
+as the Chat tab, so you can steer the run without leaving the tab.
+
+The live view needs Playwright's own Chromium — `npx playwright install
+chromium`. Without it the tools still work (playwright-mcp launches its
+own browser) but the preview and takeover stay off. See
 [chapter 28](ch28-browser-automation.md).
 
 ### Settings menu (gear icon)
 
 Click the gear ⚙ on the right side of the status bar (bottom-right of
-the window) to open a popup menu:
+the window) to open the settings menu. Rows with a `›` open a submenu on
+hover — clicking one closes the menu instead.
 
-![thClaws Settings menu](../user-manual-img/ch-04/thClaws-settings-menu.png)
+![The settings menu](../user-manual-img/ch-04/settings-menu.png)
 
 | Item | Opens |
 |---|---|
-| **Global instructions** | Tiptap markdown editor on `~/.config/thclaws/AGENTS.md` |
-| **Folder instructions** | Tiptap editor on `./AGENTS.md` (in the working directory) |
-| **Provider API keys** | Settings modal for keys — see [chapter 6](ch06-providers-models-api-keys.md) |
-| **LINE Connect...** | Pair this thClaws install with your LINE OA so you can drive the agent from your phone — see [chapter 21](ch21-line-and-browser-chat.md) |
-| **APPEARANCE → Light / Dark / System** | Theme toggle — see below |
-| **APPEARANCE → GUI scale** | Zoom factor for HiDPI / 4K displays — 75 / 90 / 100 / 110 / 125 / 150 / 175 / 200% (v0.7.3+) |
-| **WORKSPACE → Agent Teams** | Toggle the Agent Teams feature (writes `teamEnabled` to `.thclaws/settings.json`) — see [chapter 17](ch17-agent-teams.md) |
+| **Instructions** `›` | Global (`~/.config/thclaws/AGENTS.md`) or Folder (`./AGENTS.md`) — see [chapter 8](ch08-memory-and-agents-md.md) |
+| **Settings & API keys** | Provider keys, gateway, thClaws.cloud and auto-learn — see [chapter 6](ch06-providers-models-api-keys.md) |
+| **Connect a channel…** `›` | LINE, Telegram, Messenger — see chapters [21](ch21-line-and-browser-chat.md), [23](ch23-telegram.md), [24](ch24-messenger.md) |
+| **Appearance** `›` | Light / Dark / System |
+| **GUI scale** | Zoom preset, inline dropdown (75–200%) |
+| **WORKSPACE → Reload settings** | Re-read `.thclaws/settings.json` by hand (a file watcher usually does it for you) |
+| **WORKSPACE → Optional features** `›` | The six feature toggles, below |
+
+![Instructions submenu — Global and Folder AGENTS.md](../user-manual-img/ch-04/settings-instructions.png)
+
+![Connect a channel submenu — LINE, Telegram and Messenger in one place](../user-manual-img/ch-04/settings-connect-channel.png)
+
+#### Optional features
+
+![The Optional features submenu — six toggles, each naming the tools it adds and what it needs](../user-manual-img/ch-04/settings-optional-features.png)
+
+This submenu is the supported way to turn features on and off; each
+toggle writes the matching key into `.thclaws/settings.json`, so you
+never have to edit that file by hand.
+
+| Toggle | Default | Gives you | Needs |
+|---|---|---|---|
+| **Agent Teams** | off | `TeamCreate`, `SpawnTeammate`, … and the Team tab | — |
+| **Media tools** | off | `TextToImage`, `TextToVideo`, … | a GEMINI / GOOGLE key |
+| **HAL tools** | off | `YouTubeTranscript`, `WebScrape` | a HAL key, or the gateway |
+| **Shell tab** | off | the PTY-backed Shell tab | — |
+| **Browser tools** | **on** | the `browser__*` tools and the Browser tab | `node` / `npx` on PATH |
+| **Sensitive-data masking** | off | Thai ID / phone / plate / names leave as `[ID_1]` and are restored in the reply; skipped for local models | — see [chapter 32](ch32-thai-pii-masking.md) |
+
+A malformed `.thclaws/settings.json` makes **every** one of these read as
+off with no visible error, so if a toggle refuses to stick, check that
+the file is valid JSON first.
 
 The Tiptap editor round-trips markdown through `tiptap-markdown`: you edit in a rich-text UI (headings, bold, lists, code fences), save to disk as markdown, and the agent reads the file on its next turn. No lossy conversion for standard Markdown.
 
@@ -190,13 +263,15 @@ The path shown at the top of the editor is the resolved filename so you always k
 
 ### Appearance (Light / Dark / System)
 
-The bottom of the gear menu has three theme options — Light, Dark, System — each with a check next to the active one. Clicking a theme applies immediately and persists to `~/.config/thclaws/theme.json` (per-user; never committed with your project). The menu deliberately stays open when you click a theme so you can try all three without reopening the gear.
+![Appearance submenu — Light, Dark, System](../user-manual-img/ch-04/settings-appearance.png)
+
+The **Appearance** submenu has three theme options — Light, Dark, System — each with a check next to the active one. Clicking a theme applies immediately and persists to `~/.config/thclaws/theme.json` (per-user; never committed with your project). The menu deliberately stays open when you click a theme so you can try all three without reopening the gear.
 
 **Light** and **Dark** are explicit overrides — they are honoured even if your OS is set to the opposite scheme. **System** follows `prefers-color-scheme` and flips live when the OS appearance changes (macOS Appearance, Linux DE theme, Windows personalization) without an app restart.
 
 ### GUI scale (v0.7.3+)
 
-Below the theme rows, **GUI scale** is a dropdown of zoom presets that tunes WebView text size for HiDPI / 4K displays without changing OS-level display scaling. Pick a preset (75–200%) and the entire app scales live — Chat, Terminal, Files, Settings, sidebar — same primitive used by VS Code and Slack. The value persists per-project to `.thclaws/settings.json` as `guiScale: <number>` and is reapplied on every launch.
+**GUI scale** sits in the main menu as a dropdown of zoom presets that tunes WebView text size for HiDPI / 4K displays without changing OS-level display scaling. Pick a preset (75–200%) and the entire app scales live — Chat, Terminal, Files, Settings, sidebar — same primitive used by VS Code and Slack. The value persists per-project to `.thclaws/settings.json` as `guiScale: <number>` and is reapplied on every launch.
 
 Use case: a 4K laptop screen at 100% Windows scaling renders thClaws text too small relative to other dev tools. Bump to 125% or 150% to match without affecting any other app.
 

@@ -21,6 +21,7 @@
 //! Step 3 scope: one bot, spawned from a hand-edited `.thclaws/bots.json`,
 //! proxied and restarted on crash. No migration, no UI, no `/cloud get`.
 
+pub mod agent_paths;
 pub mod desktop;
 pub mod install;
 pub mod migrate;
@@ -57,6 +58,50 @@ impl BotDef {
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.slug)
     }
+}
+
+/// Follow a bot that is itself a workspace down to the agent that actually
+/// runs.
+///
+/// finding 12 left workspaces migrated twice, where `bots/<slug>/` is another
+/// host and the real agent is a level further down. The window resolves the
+/// gui-shell and file assets it serves from the bot folder, and stopping at
+/// the first level found none of them — a 404 for every asset and a blank
+/// panel, while the same workspace worked under `--serve`, where the innermost
+/// process serves from its own cwd.
+///
+/// Bounded: a chain this long is already damage, and a loop here would hang a
+/// request.
+pub fn resolve_agent_dir(root: &Path, slug: &str) -> PathBuf {
+    resolve_agent(root, slug).1
+}
+
+/// The agent that actually runs, and the workspace it runs in.
+///
+/// These are two different folders and confusing them is its own bug: what the
+/// agent SHIPS — its gui-shell, its settings — is in the agent folder, while
+/// the user's files are in the workspace above it. A doubly-migrated tree puts
+/// them one level deeper than the shelf the window is holding, so both have to
+/// be walked to rather than assumed.
+pub fn resolve_agent(root: &Path, slug: &str) -> (PathBuf, PathBuf) {
+    let mut ws = root.to_path_buf();
+    let mut dir = bot_dir(&ws, slug);
+    for _ in 0..4 {
+        // `bots.json` inside a bot folder means that folder is a host.
+        let Ok(cfg) = BotsConfig::load(&dir) else {
+            break;
+        };
+        let Some(first) = cfg.bots.first() else {
+            break;
+        };
+        let inner = bot_dir(&dir, &first.slug);
+        if !inner.is_dir() {
+            break;
+        }
+        ws = dir;
+        dir = inner;
+    }
+    (ws, dir)
 }
 
 /// A slug names a directory and is the cwd a child process is spawned in, so
@@ -173,6 +218,46 @@ impl BotsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shelf(root: &Path, slug: &str) -> PathBuf {
+        let dir = bot_dir(root, slug);
+        std::fs::create_dir_all(dir.join(".thclaws")).unwrap();
+        std::fs::write(
+            root.join(CONFIG_REL),
+            format!(r#"{{"version":1,"bots":[{{"slug":"{slug}"}}]}}"#),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// finding 12: the window resolves the shell it serves from the bot
+    /// folder, and a workspace migrated twice puts the real agent a level
+    /// further down. Stopping at the first level served none of its assets.
+    #[test]
+    fn a_bot_that_is_itself_a_host_resolves_to_the_agent_inside_it() {
+        let ws = tempfile::tempdir().unwrap();
+        // An ordinary workspace: the bot folder IS the agent.
+        let plain = shelf(ws.path(), "main");
+        assert_eq!(resolve_agent_dir(ws.path(), "main"), plain);
+
+        // Migrated twice: the bot folder is a host holding the agent.
+        let inner = shelf(&plain, "main");
+        assert_eq!(resolve_agent_dir(ws.path(), "main"), inner);
+
+        // And once more, in case it ever happened three times.
+        let deepest = shelf(&inner, "main");
+        assert_eq!(resolve_agent_dir(ws.path(), "main"), deepest);
+
+        // The workspace an agent runs in is the folder ABOVE it — where the
+        // user's files are. Serving those from the agent folder is how the
+        // chapter images 404'd.
+        assert_eq!(resolve_agent(ws.path(), "main"), (inner.clone(), deepest));
+        assert_eq!(
+            resolve_agent(ws.path(), "main").0,
+            inner,
+            "one level above the agent, not the shelf the window holds"
+        );
+    }
 
     /// The slug becomes a directory name AND a child's cwd, so traversal
     /// and separator shapes are refused rather than sanitised.

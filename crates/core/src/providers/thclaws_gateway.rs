@@ -83,6 +83,7 @@ pub fn provider_segment(kind: ProviderKind) -> Option<&'static str> {
         ProviderKind::DashScope => Some("dashscope"),
         ProviderKind::ZAi => Some("zai"),
         ProviderKind::DeepSeek => Some("deepseek"),
+        ProviderKind::Sis => Some("sis"),
         ProviderKind::Minimax => Some("minimax"),
         ProviderKind::XAi => Some("xai"),
         ProviderKind::Moonshot => Some("moonshot"),
@@ -125,6 +126,7 @@ pub fn segment_for_provider_name(name: &str) -> Option<&'static str> {
         "dashscope" => Some("dashscope"),
         "zai" => Some("zai"),
         "deepseek" => Some("deepseek"),
+        "sis" => Some("sis"),
         "minimax" => Some("minimax"),
         "xai" => Some("xai"),
         "moonshot" => Some("moonshot"),
@@ -161,6 +163,7 @@ fn native_key_present_by_segment(segment: &str) -> bool {
         "dashscope" => "DASHSCOPE_API_KEY",
         "zai" => "ZAI_API_KEY",
         "deepseek" => "DEEPSEEK_API_KEY",
+        "sis" => "SIS_API_KEY",
         "minimax" => "MINIMAX_API_KEY",
         "xai" => "XAI_API_KEY",
         "moonshot" => "MOONSHOT_API_KEY",
@@ -302,6 +305,36 @@ mod tests {
     // the env-touching tests so a sibling test reading the resolved
     // value mid-mutation doesn't see ghost state.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// SIS asked for the same usage reporting they saw on our side, which
+    /// means their Qwen server has to ride the METERED path. Three of the
+    /// four layers are mechanical; the fourth is the trap. `repl.rs`'s `Sis`
+    /// arm does not go through `compat_endpoint` — it reads `SIS_BASE_URL`
+    /// directly, because a SIS endpoint embeds a workspace id and there is
+    /// no safe default to fall back to. So the overlay can be computed
+    /// correctly and then simply ignored: the request goes to the upstream,
+    /// every answer is right, and NOT ONE usage_events row is written.
+    /// This pins the segment; the arm that consumes it is exercised live.
+    #[test]
+    fn sis_is_routable_through_the_gateway() {
+        assert_eq!(provider_segment(ProviderKind::Sis), Some("sis"));
+        // The segment name is the gateway's route path, so a rename on
+        // either side silently stops metering.
+        assert_eq!(segment_for_provider_name("sis"), Some("sis"));
+        // `hides_unpriced_models` reaches the segment through the NAME map,
+        // and only 2 of SIS's 115 catalogue models carry a price. Without
+        // the mapping the picker offers all 115 and the gateway 400s the
+        // 113 — an error the user has no way to explain.
+        let mut c = cfg(&["sis"]);
+        c.gateway_use_for = vec!["sis".into()];
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw-test-key");
+        std::env::remove_var("SIS_API_KEY");
+        assert!(
+            hides_unpriced_models(&c, "sis"),
+            "an unpriced SIS model must not be offered while the overlay meters every call"
+        );
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+    }
 
     fn cfg(providers: &[&str]) -> AppConfig {
         let mut c = AppConfig::default();
