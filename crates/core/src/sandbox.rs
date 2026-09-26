@@ -114,13 +114,15 @@ impl Sandbox {
     /// - New files (don't exist yet): parent directory is validated instead.
     pub fn check(path: &str) -> Result<PathBuf> {
         let Some(root) = Self::root() else {
-            // No sandbox initialized — allow everything (backward compat).
-            let p = Path::new(path);
-            return if p.is_absolute() {
-                Ok(p.to_path_buf())
+            // No sandbox initialized — allow everything (backward compat),
+            // while still returning the path's actual landing so callers
+            // can safely use O_NOFOLLOW for the final open.
+            let initial = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
             } else {
-                Ok(crate::workdir::current_workdir().join(p))
+                crate::workdir::current_workdir().join(path)
             };
+            return Ok(resolve_landing(&initial));
         };
         // dev-plan/42: resolve relative paths against the per-session
         // working dir (task-local when scoped, else process cwd).
