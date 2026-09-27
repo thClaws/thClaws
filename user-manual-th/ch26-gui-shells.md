@@ -9,6 +9,9 @@ custom shell คือ folder ที่คุณวางลงดิสก์ s
 serve ขึ้น cloud ที่ URL พร้อม token ได้ด้วย ทำให้ใช้จาก browser
 บนมือถือหรือแชร์ให้เพื่อนร่วมทีมได้
 
+![แท็บ UI — ตัวเลือก GUI Shell ตอนที่ยังไม่ได้ติดตั้ง shell ใดเลย](../user-manual-img/ch-04/ui-tab.png)
+
+
 > **สถานะ:** Tier 1 ลง v0.24 (Session Explorer + tab loader);
 > Tier 2 เพิ่ม picker, custom shell, และ `--serve --gui-shell`;
 > Tier 3 เพิ่ม SDK, permission, และ marketplace ดู

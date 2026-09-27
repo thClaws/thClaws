@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "source": "baseline 2026-06-10 — pricing synced from LiteLLM (github.com/BerriAI/litellm)",
-  "fetched_at": "2026-09-24T00:00:00Z",
+  "fetched_at": "2026-09-25T00:00:00Z",
   "providers": {
     "anthropic": {
       "list_url": "https://api.anthropic.com/v1/models",
@@ -2075,11 +2075,6 @@
       "list_url": "https://ollama.com/v1/models",
       "default_context": 262144,
       "models": {
-        "ollama-cloud/deepseek-v4-flash:0731": {
-          "context": 1048576,
-          "source": "https://ollama.com/v1/models (context: models.dev:deepseek-v4-flash:0731)",
-          "verified_at": "2026-08-03"
-        },
         "ollama-cloud/deepseek-v4-pro:0813": {
           "context": 262144,
           "source": "https://ollama.com/v1/models (context unverified)",
@@ -2093,11 +2088,6 @@
         "ollama-cloud/gemma4:31b": {
           "context": 262144,
           "source": "https://ollama.com/v1/models (context: models.dev:gemma4:31b)",
-          "verified_at": "2026-04-26"
-        },
-        "ollama-cloud/glm-5.1": {
-          "context": 202752,
-          "source": "https://ollama.com/v1/models (context: models.dev:glm-5.1)",
           "verified_at": "2026-04-26"
         },
         "ollama-cloud/glm-5.2": {
@@ -2169,11 +2159,6 @@
           "context": 262144,
           "source": "https://ollama.com/v1/models (context: models.dev:nemotron-3-ultra)",
           "verified_at": "2026-06-06"
-        },
-        "ollama-cloud/qwen3.5:397b": {
-          "context": 262144,
-          "source": "https://ollama.com/v1/models (context: models.dev:qwen3.5:397b)",
-          "verified_at": "2026-04-26"
         }
       }
     },
@@ -2900,6 +2885,13 @@
           "input_per_mtok": 0.2,
           "output_per_mtok": 1.2
         },
+        "opencode-go/gpt-6-luna": {
+          "context": 922000,
+          "source": "https://opencode.ai/zen/go/v1/models + litellm:gpt-6-luna",
+          "verified_at": "2026-09-25",
+          "input_per_mtok": 0.1,
+          "output_per_mtok": 0.5
+        },
         "opencode-go/grok-4.6": {
           "context": 500000,
           "source": "https://opencode.ai/zen/go/v1/models (context: models.dev:grok-4.6)",
@@ -3565,21 +3557,21 @@
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-24",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.08246,
-          "output_per_mtok": 0.16492
+          "input_per_mtok": 0.049,
+          "output_per_mtok": 0.098
         },
         "deepseek/deepseek-v4-flash-0731": {
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-22",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.04,
-          "output_per_mtok": 0.64
+          "input_per_mtok": 0.03,
+          "output_per_mtok": 0.32
         },
         "deepseek/deepseek-v4-flash-vision-exp": {
           "context": 1048576,
@@ -3595,11 +3587,11 @@
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-24",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.948126,
-          "output_per_mtok": 1.896252
+          "input_per_mtok": 0.783,
+          "output_per_mtok": 1.566
         },
         "deepseek/deepseek-v4-pro-0813": {
           "context": 1048576,
@@ -3614,11 +3606,11 @@
           "context": 1048576,
           "max_output": 384000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-24",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.1,
-          "output_per_mtok": 0.5
+          "input_per_mtok": 0.15,
+          "output_per_mtok": 0.6
         },
         "dots-studio/dots-3-note-preview:free": {
           "context": 512000,
@@ -3629,6 +3621,16 @@
           "chat": true,
           "input_per_mtok": 0.0,
           "output_per_mtok": 0.0
+        },
+        "fireworks/ember-1": {
+          "context": 1048576,
+          "max_output": 943718,
+          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
+          "verified_at": "2026-09-25",
+          "free": false,
+          "chat": true,
+          "input_per_mtok": 3.0,
+          "output_per_mtok": 15.0
         },
         "google/gemini-2.5-flash": {
           "context": 1048576,
@@ -4270,11 +4272,11 @@
           "context": 196608,
           "max_output": 196608,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-08-11",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.255,
-          "output_per_mtok": 1.02
+          "input_per_mtok": 0.3,
+          "output_per_mtok": 1.2
         },
         "minimax/minimax-m2-her": {
           "context": 65536,
@@ -4336,6 +4338,16 @@
           "input_per_mtok": 0.3,
           "output_per_mtok": 0.9
         },
+        "mistralai/devstral-2512": {
+          "context": 262144,
+          "max_output": 209715,
+          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
+          "verified_at": "2026-09-25",
+          "free": false,
+          "chat": true,
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 2.0
+        },
         "mistralai/ministral-14b-2512": {
           "context": 262144,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
@@ -4380,6 +4392,16 @@
           "chat": true,
           "input_per_mtok": 2.0,
           "output_per_mtok": 6.0
+        },
+        "mistralai/mistral-large-2512": {
+          "context": 262144,
+          "max_output": 209715,
+          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
+          "verified_at": "2026-09-25",
+          "free": false,
+          "chat": true,
+          "input_per_mtok": 0.5,
+          "output_per_mtok": 1.5
         },
         "mistralai/mistral-medium-3": {
           "context": 131072,
@@ -4536,10 +4558,10 @@
           "context": 262144,
           "max_output": 262144,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-22",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.7062,
+          "input_per_mtok": 0.6562,
           "output_per_mtok": 3.3
         },
         "moonshotai/kimi-k3": {
@@ -4571,16 +4593,6 @@
           "input_per_mtok": 0.9,
           "output_per_mtok": 1.9
         },
-        "nex-agi/nex-n2.5-mini": {
-          "context": 262144,
-          "max_output": 235929,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-22",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 0.025,
-          "output_per_mtok": 0.1
-        },
         "nex-agi/nex-n2.5-mini:free": {
           "context": 262144,
           "max_output": 235929,
@@ -4590,16 +4602,6 @@
           "chat": true,
           "input_per_mtok": 0.0,
           "output_per_mtok": 0.0
-        },
-        "nex-agi/nex-n2.5-pro": {
-          "context": 262144,
-          "max_output": 235929,
-          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-22",
-          "free": false,
-          "chat": true,
-          "input_per_mtok": 0.075,
-          "output_per_mtok": 0.25
         },
         "nex-agi/nex-n2.5-pro:free": {
           "context": 262144,
@@ -5616,11 +5618,11 @@
           "context": 262144,
           "max_output": 262144,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-13",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.04815,
-          "output_per_mtok": 0.19305
+          "input_per_mtok": 0.1,
+          "output_per_mtok": 0.3
         },
         "qwen/qwen3-30b-a3b-thinking-2507": {
           "context": 131072,
@@ -5724,10 +5726,10 @@
         "qwen/qwen3-next-80b-a3b-instruct": {
           "context": 262144,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-09",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.09,
+          "input_per_mtok": 0.1,
           "output_per_mtok": 1.1
         },
         "qwen/qwen3-next-80b-a3b-thinking": {
@@ -5763,11 +5765,11 @@
           "context": 131072,
           "max_output": 32768,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-17",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.13,
-          "output_per_mtok": 0.52
+          "input_per_mtok": 0.15,
+          "output_per_mtok": 0.6
         },
         "qwen/qwen3-vl-30b-a3b-thinking": {
           "context": 131072,
@@ -6018,6 +6020,16 @@
           "input_per_mtok": 2.0,
           "output_per_mtok": 6.0
         },
+        "qwen/qwen3.8-max-prime": {
+          "context": 1000000,
+          "max_output": 131072,
+          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
+          "verified_at": "2026-09-25",
+          "free": false,
+          "chat": true,
+          "input_per_mtok": 4.0,
+          "output_per_mtok": 12.0
+        },
         "qwen/qwen3.8-omni-flash": {
           "context": 1000000,
           "max_output": 131072,
@@ -6211,11 +6223,11 @@
           "context": 262144,
           "max_output": 128000,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-24",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.0825,
-          "output_per_mtok": 0.33
+          "input_per_mtok": 0.132,
+          "output_per_mtok": 0.528
         },
         "tencent/hy3-preview": {
           "context": 262144,
@@ -6537,11 +6549,11 @@
         "z-ai/glm-4.7": {
           "context": 202752,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-06-10",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.4,
-          "output_per_mtok": 1.75,
+          "input_per_mtok": 0.6,
+          "output_per_mtok": 2.2,
           "cached_input_per_mtok": 0.0,
           "cache_creation_per_mtok": 0.0
         },
@@ -6579,11 +6591,11 @@
           "context": 202752,
           "max_output": 65535,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-04",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.966,
-          "output_per_mtok": 3.036
+          "input_per_mtok": 0.9646,
+          "output_per_mtok": 3.0316
         },
         "z-ai/glm-5.2": {
           "context": 1048576,
@@ -6609,21 +6621,21 @@
           "context": 1048576,
           "max_output": 131072,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-24",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.84,
-          "output_per_mtok": 2.64
+          "input_per_mtok": 1.4,
+          "output_per_mtok": 4.4
         },
         "z-ai/glm-5.3-flash": {
           "context": 1310720,
           "max_output": 131072,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-22",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.15,
-          "output_per_mtok": 0.5
+          "input_per_mtok": 0.045,
+          "output_per_mtok": 0.14
         },
         "z-ai/glm-5.3-flashx": {
           "context": 1048576,
@@ -6634,6 +6646,16 @@
           "chat": true,
           "input_per_mtok": 0.37,
           "output_per_mtok": 1.25
+        },
+        "z-ai/glm-5.3-prime": {
+          "context": 1000000,
+          "max_output": 131072,
+          "source": "https://openrouter.ai/api/v1/models + api:openrouter",
+          "verified_at": "2026-09-25",
+          "free": false,
+          "chat": true,
+          "input_per_mtok": 2.8,
+          "output_per_mtok": 8.8
         },
         "z-ai/glm-5v-turbo": {
           "context": 202752,
@@ -6711,11 +6733,11 @@
           "context": 256000,
           "max_output": 65536,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-09-24",
+          "verified_at": "2026-09-25",
           "free": false,
           "chat": true,
-          "input_per_mtok": 1.4989,
-          "output_per_mtok": 10.758
+          "input_per_mtok": 0.8845,
+          "output_per_mtok": 10.5346
         },
         "~openai/gpt-mini-latest": {
           "context": 400000,
@@ -7512,13 +7534,17 @@
       "models": {
         "sis/ZHIPU/GLM-5.3": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/ZHIPU/GLM-5.3 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.4,
+          "output_per_mtok": 4.4
         },
         "sis/deepseek-v3.2": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/deepseek-v3.2 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.287,
+          "output_per_mtok": 0.431
         },
         "sis/deepseek-v4-flash": {
           "context": 1000000,
@@ -7529,8 +7555,10 @@
         },
         "sis/deepseek-v4-flash-0731": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/deepseek-v4-flash-0731 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 0.4
         },
         "sis/deepseek-v4-pro": {
           "context": 1000000,
@@ -7541,8 +7569,10 @@
         },
         "sis/deepseek-v4-pro-0813": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/deepseek-v4-pro-0813 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.4,
+          "output_per_mtok": 4.8
         },
         "sis/deepseek-v4.1-flash": {
           "context": 262144,
@@ -7551,148 +7581,206 @@
         },
         "sis/glm-5.1": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/glm-5.1 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.86,
+          "output_per_mtok": 3.154
         },
         "sis/glm-5.2": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/glm-5.2 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.86,
+          "output_per_mtok": 3.154
         },
         "sis/glm-5.2-fast-preview": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/glm-5.2-fast-preview — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.86,
+          "output_per_mtok": 3.154
         },
         "sis/glm-5.3": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-17"
+          "source": "derived:dashscope/glm-5.3 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.86,
+          "output_per_mtok": 3.154
         },
         "sis/glm-5.3-prime": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-21"
+          "source": "derived:dashscope/glm-5.3-prime — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.86,
+          "output_per_mtok": 3.154
         },
         "sis/kimi-k2.7-code": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/kimi-k2.7-code — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.574,
+          "output_per_mtok": 3.011
         },
         "sis/kimi-k3": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/kimi-k3 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 3.0,
+          "output_per_mtok": 15.0
         },
         "sis/kimi/kimi-k3": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/kimi/kimi-k3 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 3.0,
+          "output_per_mtok": 15.0
         },
         "sis/qvq-max": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qvq-max — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.2,
+          "output_per_mtok": 4.8
         },
         "sis/qwen-coder-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-coder-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 6.0,
+          "output_per_mtok": 60.0
         },
         "sis/qwen-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.25,
+          "output_per_mtok": 2.0
         },
         "sis/qwen-flash-character": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-flash-character — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.25,
+          "output_per_mtok": 2.0
         },
         "sis/qwen-max": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-max — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.6,
+          "output_per_mtok": 6.4
         },
         "sis/qwen-mt-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-mt-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.16,
+          "output_per_mtok": 0.49
         },
         "sis/qwen-mt-lite": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-mt-lite — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.12,
+          "output_per_mtok": 0.36
         },
         "sis/qwen-mt-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-mt-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.46,
+          "output_per_mtok": 7.37
         },
         "sis/qwen-mt-turbo": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-mt-turbo — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.16,
+          "output_per_mtok": 0.49
         },
         "sis/qwen-omni-turbo": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-omni-turbo — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.07,
+          "output_per_mtok": 0.27
         },
         "sis/qwen-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 1.2
         },
         "sis/qwen-plus-2025-01-25": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-plus-2025-01-25 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 1.2
         },
         "sis/qwen-plus-2025-04-28": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-plus-2025-04-28 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 1.2
         },
         "sis/qwen-plus-2025-07-14": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-plus-2025-07-14 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 1.2
         },
         "sis/qwen-plus-2025-09-11": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-plus-2025-09-11 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.2,
+          "output_per_mtok": 3.6
         },
         "sis/qwen-plus-2025-12-01": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-plus-2025-12-01 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.2,
+          "output_per_mtok": 3.6
         },
         "sis/qwen-plus-character": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-plus-character — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.2,
+          "output_per_mtok": 3.6
         },
         "sis/qwen-plus-latest": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-plus-latest — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.2,
+          "output_per_mtok": 3.6
         },
         "sis/qwen-turbo": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-turbo — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.05,
+          "output_per_mtok": 0.2
         },
         "sis/qwen-vl-max": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-vl-max — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.8,
+          "output_per_mtok": 3.2
         },
         "sis/qwen-vl-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen-vl-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.21,
+          "output_per_mtok": 0.63
         },
         "sis/qwen2-7b-instruct": {
           "context": 262144,
@@ -7701,378 +7789,528 @@
         },
         "sis/qwen3-14b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-14b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.35,
+          "output_per_mtok": 1.4
         },
         "sis/qwen3-235b-a22b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-235b-a22b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.7,
+          "output_per_mtok": 2.8
         },
         "sis/qwen3-235b-a22b-instruct-2507": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-235b-a22b-instruct-2507 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.7,
+          "output_per_mtok": 2.8
         },
         "sis/qwen3-235b-a22b-thinking-2507": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-235b-a22b-thinking-2507 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.7,
+          "output_per_mtok": 8.4
         },
         "sis/qwen3-30b-a3b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-30b-a3b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 0.8
         },
         "sis/qwen3-30b-a3b-instruct-2507": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-30b-a3b-instruct-2507 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 0.8
         },
         "sis/qwen3-30b-a3b-thinking-2507": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-30b-a3b-thinking-2507 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 0.8
         },
         "sis/qwen3-32b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-32b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.16,
+          "output_per_mtok": 0.64
         },
         "sis/qwen3-8b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-8b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.18,
+          "output_per_mtok": 0.7
         },
         "sis/qwen3-coder-480b-a35b-instruct": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-coder-480b-a35b-instruct — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 6.0,
+          "output_per_mtok": 60.0
         },
         "sis/qwen3-coder-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-coder-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.6,
+          "output_per_mtok": 9.6
         },
         "sis/qwen3-coder-next": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-coder-next — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 6.0,
+          "output_per_mtok": 60.0
         },
         "sis/qwen3-coder-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-coder-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 6.0,
+          "output_per_mtok": 60.0
         },
         "sis/qwen3-coder-plus-2025-07-22": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-coder-plus-2025-07-22 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 6.0,
+          "output_per_mtok": 60.0
         },
         "sis/qwen3-coder-plus-2025-09-23": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-coder-plus-2025-09-23 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 6.0,
+          "output_per_mtok": 60.0
         },
         "sis/qwen3-max": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-max — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 3.0,
+          "output_per_mtok": 15.0
         },
         "sis/qwen3-max-2025-09-23": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-max-2025-09-23 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 3.0,
+          "output_per_mtok": 15.0
         },
         "sis/qwen3-max-2026-01-23": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-max-2026-01-23 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 3.0,
+          "output_per_mtok": 15.0
         },
         "sis/qwen3-max-preview": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-max-preview — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 3.0,
+          "output_per_mtok": 15.0
         },
         "sis/qwen3-next-80b-a3b-instruct": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-next-80b-a3b-instruct — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.15,
+          "output_per_mtok": 1.2
         },
         "sis/qwen3-next-80b-a3b-thinking": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-next-80b-a3b-thinking — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.15,
+          "output_per_mtok": 1.2
         },
         "sis/qwen3-omni-30b-a3b-captioner": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-omni-30b-a3b-captioner — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 3.81,
+          "output_per_mtok": 3.06
         },
         "sis/qwen3-omni-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-omni-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.43,
+          "output_per_mtok": 1.66
         },
         "sis/qwen3-omni-flash-2025-09-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-omni-flash-2025-09-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.43,
+          "output_per_mtok": 1.66
         },
         "sis/qwen3-omni-flash-2025-12-01": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-omni-flash-2025-12-01 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.43,
+          "output_per_mtok": 1.66
         },
         "sis/qwen3-omni-flash-realtime": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-omni-flash-realtime — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.52,
+          "output_per_mtok": 1.99
         },
         "sis/qwen3-omni-flash-realtime-2025-09-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-omni-flash-realtime-2025-09-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.52,
+          "output_per_mtok": 1.99
         },
         "sis/qwen3-omni-flash-realtime-2025-12-01": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-omni-flash-realtime-2025-12-01 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.52,
+          "output_per_mtok": 1.99
         },
         "sis/qwen3-vl-235b-a22b-instruct": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-vl-235b-a22b-instruct — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 1.6
         },
         "sis/qwen3-vl-235b-a22b-thinking": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-vl-235b-a22b-thinking — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 4.0
         },
         "sis/qwen3-vl-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-vl-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.25,
+          "output_per_mtok": 2.0
         },
         "sis/qwen3-vl-flash-2025-10-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-vl-flash-2025-10-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.25,
+          "output_per_mtok": 2.0
         },
         "sis/qwen3-vl-flash-2026-01-22": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-vl-flash-2026-01-22 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.25,
+          "output_per_mtok": 2.0
         },
         "sis/qwen3-vl-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-vl-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 1.6
         },
         "sis/qwen3-vl-plus-2025-09-23": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-vl-plus-2025-09-23 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 1.6
         },
         "sis/qwen3-vl-plus-2025-12-19": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3-vl-plus-2025-12-19 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 1.6
         },
         "sis/qwen3.5-122b-a10b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-122b-a10b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 3.2
         },
         "sis/qwen3.5-27b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-27b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.3,
+          "output_per_mtok": 2.4
         },
         "sis/qwen3.5-35b-a3b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-35b-a3b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.25,
+          "output_per_mtok": 2.0
         },
         "sis/qwen3.5-397b-a17b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-397b-a17b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.6,
+          "output_per_mtok": 3.6
         },
         "sis/qwen3.5-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.1,
+          "output_per_mtok": 0.4
         },
         "sis/qwen3.5-flash-2026-02-23": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-flash-2026-02-23 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.1,
+          "output_per_mtok": 0.4
         },
         "sis/qwen3.5-omni-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-omni-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 2.2
         },
         "sis/qwen3.5-omni-flash-2026-03-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-omni-flash-2026-03-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.4,
+          "output_per_mtok": 2.2
         },
         "sis/qwen3.5-omni-flash-realtime": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-omni-flash-realtime — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.55,
+          "output_per_mtok": 3.3
         },
         "sis/qwen3.5-omni-flash-realtime-2026-03-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-omni-flash-realtime-2026-03-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.55,
+          "output_per_mtok": 3.3
         },
         "sis/qwen3.5-omni-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-omni-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.4,
+          "output_per_mtok": 8.3
         },
         "sis/qwen3.5-omni-plus-2026-03-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-omni-plus-2026-03-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.4,
+          "output_per_mtok": 8.3
         },
         "sis/qwen3.5-omni-plus-realtime": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-omni-plus-realtime — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.1,
+          "output_per_mtok": 12.4
         },
         "sis/qwen3.5-omni-plus-realtime-2026-03-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-omni-plus-realtime-2026-03-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.1,
+          "output_per_mtok": 12.4
         },
         "sis/qwen3.5-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.5,
+          "output_per_mtok": 3.0
         },
         "sis/qwen3.5-plus-2026-02-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-plus-2026-02-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.5,
+          "output_per_mtok": 3.0
         },
         "sis/qwen3.5-plus-2026-04-20": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.5-plus-2026-04-20 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.5,
+          "output_per_mtok": 3.0
         },
         "sis/qwen3.6-27b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.6-27b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.6,
+          "output_per_mtok": 3.6
         },
         "sis/qwen3.6-35b-a3b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.6-35b-a3b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.375,
+          "output_per_mtok": 2.25
         },
         "sis/qwen3.6-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.6-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.0,
+          "output_per_mtok": 4.0
         },
         "sis/qwen3.6-flash-2026-04-16": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.6-flash-2026-04-16 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.0,
+          "output_per_mtok": 4.0
         },
         "sis/qwen3.6-max-preview": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.6-max-preview — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 12.0
         },
         "sis/qwen3.6-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.6-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 6.0
         },
         "sis/qwen3.6-plus-2026-04-02": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.6-plus-2026-04-02 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 6.0
         },
         "sis/qwen3.7-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 0.8
         },
         "sis/qwen3.7-flash-2026-07-15": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-flash-2026-07-15 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 0.8
         },
         "sis/qwen3.7-max": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-max — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.5,
+          "output_per_mtok": 7.5
         },
         "sis/qwen3.7-max-2026-05-17": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-max-2026-05-17 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.5,
+          "output_per_mtok": 7.5
         },
         "sis/qwen3.7-max-2026-05-20": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-max-2026-05-20 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.5,
+          "output_per_mtok": 7.5
         },
         "sis/qwen3.7-max-2026-06-08": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-max-2026-06-08 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.5,
+          "output_per_mtok": 7.5
         },
         "sis/qwen3.7-max-preview": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-max-preview — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.5,
+          "output_per_mtok": 7.5
         },
         "sis/qwen3.7-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.2,
+          "output_per_mtok": 4.8
         },
         "sis/qwen3.7-plus-2026-05-26": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.7-plus-2026-05-26 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 1.2,
+          "output_per_mtok": 4.8
         },
         "sis/qwen3.8-2.4t-a95b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.8-2.4t-a95b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 6.0
         },
         "sis/qwen3.8-27b": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.8-27b — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.5,
+          "output_per_mtok": 3.0
         },
         "sis/qwen3.8-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.8-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.15,
+          "output_per_mtok": 0.47
         },
         "sis/qwen3.8-max": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.8-max — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 6.0
         },
         "sis/qwen3.8-max-0902": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwen3.8-max-0902 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 2.0,
+          "output_per_mtok": 6.0
         },
         "sis/qwen3.8-omni-flash": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-21"
+          "source": "derived:dashscope/qwen3.8-omni-flash — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.15,
+          "output_per_mtok": 0.47
         },
         "sis/qwen3.8-omni-flash-realtime": {
           "context": 262144,
@@ -8082,13 +8320,17 @@
         },
         "sis/qwq-plus": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwq-plus — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.8,
+          "output_per_mtok": 2.4
         },
         "sis/qwq-plus-2025-03-05": {
           "context": 262144,
-          "source": "https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1/models (context unverified)",
-          "verified_at": "2026-09-10"
+          "source": "derived:dashscope/qwq-plus-2025-03-05 — the same Alibaba Model Studio models served from a private workspace endpoint; the rate card is DashScope's",
+          "verified_at": "2026-09-24",
+          "input_per_mtok": 0.8,
+          "output_per_mtok": 2.4
         }
       }
     },
@@ -8397,11 +8639,6 @@
           "source": "https://api.tokenrouter.com/v1/models (context unverified)",
           "verified_at": "2026-07-26"
         },
-        "tokenrouter/anthropic/claude-opus-5-fast": {
-          "context": 262144,
-          "source": "https://api.tokenrouter.com/v1/models (context unverified)",
-          "verified_at": "2026-07-26"
-        },
         "tokenrouter/anthropic/claude-opus-5-huo": {
           "context": 262144,
           "source": "https://api.tokenrouter.com/v1/models (context unverified)",
@@ -8446,13 +8683,6 @@
           "context": 262144,
           "source": "https://api.tokenrouter.com/v1/models (context unverified)",
           "verified_at": "2026-07-15"
-        },
-        "tokenrouter/claude-haiku-4-5": {
-          "context": 200000,
-          "source": "https://api.tokenrouter.com/v1/models + litellm:claude-haiku-4-5",
-          "verified_at": "2026-06-14",
-          "input_per_mtok": 1.0,
-          "output_per_mtok": 5.0
         },
         "tokenrouter/deepseek/deepseek-v3.2": {
           "context": 163840,
@@ -8866,6 +9096,11 @@
           "context": 262144,
           "source": "https://api.tokenrouter.com/v1/models (context unverified)",
           "verified_at": "2026-09-04"
+        },
+        "tokenrouter/typesafe/jev-1.13": {
+          "context": 262144,
+          "source": "https://api.tokenrouter.com/v1/models (context unverified)",
+          "verified_at": "2026-09-25"
         },
         "tokenrouter/wan3.0-video": {
           "context": 262144,
@@ -9295,11 +9530,6 @@
           "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
           "verified_at": "2026-08-22"
         },
-        "atlascloud/anthropic/claude-opus-4.8-ccmax": {
-          "context": 1000000,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-08-11"
-        },
         "atlascloud/anthropic/claude-opus-4.8-coding": {
           "context": 1000000,
           "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
@@ -9314,11 +9544,6 @@
           "context": 1000000,
           "source": "https://api.atlascloud.ai/v1/models (context unverified)",
           "verified_at": "2026-08-29"
-        },
-        "atlascloud/anthropic/claude-opus-5-ccmax": {
-          "context": 1000000,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-08-11"
         },
         "atlascloud/anthropic/claude-opus-5.5": {
           "context": 1000000,
@@ -9364,11 +9589,6 @@
           "context": 1000000,
           "source": "https://api.atlascloud.ai/v1/models (context unverified)",
           "verified_at": "2026-08-29"
-        },
-        "atlascloud/anthropic/claude-sonnet-5-ccmax": {
-          "context": 1000000,
-          "source": "https://api.atlascloud.ai/v1/models (context: atlascloud /v1/models)",
-          "verified_at": "2026-07-23"
         },
         "atlascloud/bytedance/doubao-seed-1.6-251015": {
           "context": 262144,
@@ -9645,6 +9865,11 @@
           "context": 1000000,
           "source": "https://api.atlascloud.ai/v1/models (context unverified)",
           "verified_at": "2026-09-09"
+        },
+        "atlascloud/openai/gpt-6-sol-codex": {
+          "context": 1000000,
+          "source": "https://api.atlascloud.ai/v1/models (context unverified)",
+          "verified_at": "2026-09-25"
         },
         "atlascloud/qwen/qwen3-vl-235b-a22b-thinking": {
           "context": 131072,

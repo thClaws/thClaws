@@ -2,6 +2,9 @@
 
 **เซสชัน** คือบทสนทนาต่อเนื่องหนึ่งชุดระหว่างคุณกับ thClaws ซึ่งเก็บข้อมูลไว้ดังนี้
 
+![`/sessions` — เซสชันที่บันทึกไว้ทั้งหมด พร้อมจำนวนข้อความและโมเดลที่ใช้](../user-manual-img/ch-07/sessions-list.png)
+
+
 - ประวัติข้อความทั้งหมด (คำสั่งจากผู้ใช้ คำตอบของผู้ช่วย และการเรียกใช้ tool)
 - โมเดลและ provider ที่ใช้งานอยู่
 - วันที่สร้าง working directory และชื่อ (title) ที่อ่านเข้าใจได้ ซึ่งจะใส่หรือไม่ก็ได้
@@ -88,7 +91,7 @@ session title cleared
 - **`+`** ที่ header ของส่วนนี้ → เริ่มเซสชันใหม่ (บันทึกเซสชันปัจจุบัน
   ให้อัตโนมัติก่อน)
 
-![thClaws Sessions sidebar — right-click menu ของเซสชันหนึ่งรายการ แสดงตัวเลือก Rename กับ Delete](../user-manual-img/ch-07/thclaws-sessions-menu.png)
+![Sessions ใน sidebar — คลิกขวาที่เซสชันหนึ่งรายการเพื่อเปิดเมนูของมัน](../user-manual-img/ch-07/session-context-menu.png)
 
 เมนูที่ได้จากคลิกขวา:
 

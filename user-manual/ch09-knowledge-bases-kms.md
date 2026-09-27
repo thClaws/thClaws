@@ -2,6 +2,9 @@
 
 A **knowledge base** (KMS — Knowledge Management System) is a folder of markdown pages you curate, plus an `index.md` table of contents the agent reads on every turn. Inspired by Andrej Karpathy's [LLM wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), thClaws ships with KMS built in — no embeddings, no vector store, just grep + read.
 
+![A knowledge base attached to the project — the sidebar's Knowledge section lists it with a checkbox, `(proj)` marking its scope](../user-manual-img/ch-09/kms-attached.png)
+
+
 Use cases:
 
 - **Personal notes** — everything you've learned about an API, a library, a client's codebase

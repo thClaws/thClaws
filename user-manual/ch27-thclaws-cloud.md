@@ -8,6 +8,9 @@ git for AI agents — paste a CLI token once in Settings, then every
 catalog op (`/cloud get`, `/cloud publish`, `/cloud list`, …) runs as
 a slash command inside an open thClaws session.
 
+![`/cloud status` — the catalog URL, whether a token is stored, and which Agent Template this folder is bound to](../user-manual-img/ch-27/cloud-status.png)
+
+
 > **What this chapter covers (client side).** Browsing the catalog,
 > publishing your own agents, getting agents into a local folder, and
 > the new `agent.{name, description, uuid}` block in
@@ -15,7 +18,14 @@ a slash command inside an open thClaws session.
 > catalog server lives in the dev plan ([`dev-plan/34`](../dev-plan/34-thclaws-cloud-control-plane.md))
 > and the workspace-private `thclaws-cloud/` source tree.
 
-## The folder-is-an-agent model — recap
+## Agent Templates and the folder-is-an-agent model
+
+The catalog calls a published agent an **Agent Template**: a folder someone
+finished and shared, ready to become an agent in your own workspace. Getting
+one copies it in; from that moment it is yours, with its own conversations and
+settings, and the template it came from stops mattering. Putting several of
+them in one workspace is [chapter 35](ch35-agents-in-a-workspace.md).
+
 
 Anywhere thClaws runs, an **AI agent is a folder**. Three files at the
 root of that folder make it complete:
@@ -145,6 +155,28 @@ start a thClaws session in that folder and use the slash command:
 
 If `manifest.json` is missing or invalid, publish aborts with a clear
 error. Minimum required fields: `id`, `name`, `description`, `version`.
+
+## Publishing an HTML page
+
+Separately from agents, thClaws.cloud will host a **single self-contained HTML
+file** for you at a private URL:
+
+```
+❯ /publish dashboard.html
+published → https://k3m9qp2wv7xa.thclaws.app  (expires in 3 days)
+```
+
+The file has to stand on its own — inline the CSS and JS, because nothing
+beside it is uploaded. What you get back is a 12-character subdomain that is
+unguessable rather than secret: anyone with the link can open it, and it stops
+working after three days.
+
+It needs a thClaws.cloud token and a credit balance above zero, for the same
+reason everything else here does — it is the account that pays for the hosting.
+
+This is the natural end of a "build me a dashboard" session: the agent writes
+the page, you look at it in the Files tab ([chapter 4](ch04-desktop-gui-tour.md)),
+then publish it to send someone the link.
 
 ## Agent identity in `settings.json`
 

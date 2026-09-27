@@ -2,6 +2,9 @@
 
 Plan mode is a **two-phase workflow** for tasks where you want the model to design an approach first, then watch it execute step by step:
 
+![The plan sidebar after `SubmitPlan` — the steps, an Approve & execute button, and a step counter at the foot](../user-manual-img/ch-18/plan-sidebar.png)
+
+
 1. **Plan phase** — the model is restricted to read-only tools (Read, Grep, Glob, Ls). It explores the codebase, reasons about an approach, then publishes a structured plan via `SubmitPlan`. The right-side **plan sidebar** opens with the steps and an **Approve / Cancel** button row. *No code changes happen yet.*
 2. **Execution phase** — once you click Approve, mutating tools unblock and the model marches through the steps. Each transition (in_progress → done) updates a checkmark in the sidebar live.
 

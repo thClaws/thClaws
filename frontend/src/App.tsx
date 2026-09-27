@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+
+type WorkspaceNotice = {
+  id: string;
+  title: string;
+  detail: string;
+  command: string;
+};
 import {
   Terminal,
   MessageSquare,
@@ -179,10 +186,21 @@ function FullscreenExitChrome({
 
 function StartupModal({
   onStart,
+  force = false,
 }: {
   onStart: (cwd: string, initialTab?: Tab) => void;
+  // The user asked for the picker by pressing the folder button. `needs_modal`
+  // is the backend saying "this window has already been told which folder it
+  // is for", which is the right answer for a bot's tree mounting again — and
+  // the wrong one for someone who just asked. Without this the button looked
+  // dead: the screen swapped out and straight back in.
+  force?: boolean;
 }) {
   const [cwd, setCwd] = useState("");
+  // The page mounts one App while the bot list loads and one per bot after,
+  // so `current_cwd` can land again after the user has started typing. Once
+  // they have touched the box it is theirs.
+  const edited = useRef(false);
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState<boolean | null>(null);
   const [picking, setPicking] = useState(false);
@@ -206,7 +224,7 @@ function StartupModal({
         // A slow backend is not a dead one — clear the diagnostic if the
         // answer arrives after the deadline.
         setIpcDead(false);
-        setCwd(msg.path as string);
+        if (!edited.current) setCwd(msg.path as string);
         if (Array.isArray(msg.recent_dirs)) {
           setRecentDirs(msg.recent_dirs as string[]);
         }
@@ -218,7 +236,7 @@ function StartupModal({
           typeof msg.initial_tab === "string"
             ? (msg.initial_tab as Tab)
             : undefined;
-        if (msg.needs_modal === false) {
+        if (msg.needs_modal === false && !force) {
           onStart(msg.path as string, initialTab);
         } else {
           setShowModal(true);
@@ -226,6 +244,7 @@ function StartupModal({
       } else if (msg.type === "directory_picked") {
         setPicking(false);
         if (typeof msg.path === "string") {
+          edited.current = true;
           setCwd(msg.path as string);
           setError("");
         }
@@ -381,6 +400,7 @@ function StartupModal({
             }}
             value={cwd}
             onChange={(e) => {
+              edited.current = true;
               setCwd(e.target.value);
               setError("");
             }}
@@ -731,6 +751,9 @@ export default function App() {
 
   const [started, setStarted] = useState(false);
   const [currentCwd, setCurrentCwd] = useState("");
+  // Set by the folder button, so the picker opens even though this window has
+  // already answered it once. Cleared as soon as it has been honoured.
+  const [askedForPicker, setAskedForPicker] = useState(false);
   // Drop the claim on leaving full-screen — the next shell (or the
   // next full-screen session) must re-declare it. The reference shell
   // re-claims in its `onFullscreen(active=true)` handler.
@@ -793,6 +816,35 @@ export default function App() {
       }
       if (dismissed === version) return;
       setUpdate({ version, url });
+    });
+    return unsub;
+  }, []);
+
+  // finding 11/12: what this workspace needs before its agents can work. The
+  // backend writes both to stderr as well, which a desktop opened from its
+  // icon never shows — and both fail silently, so without this the user sees
+  // an empty panel and has nothing to act on.
+  const [notices, setNotices] = useState<WorkspaceNotice[]>([]);
+  useEffect(() => {
+    const unsub = subscribe((msg) => {
+      if (msg.type !== "workspace_notice") return;
+      const id = typeof msg.id === "string" ? msg.id : "";
+      const title = typeof msg.title === "string" ? msg.title : "";
+      const detail = typeof msg.detail === "string" ? msg.detail : "";
+      const command = typeof msg.command === "string" ? msg.command : "";
+      if (!id || !title) return;
+      let dismissed = "";
+      try {
+        dismissed = localStorage.getItem("thclaws.notice.dismissed") ?? "";
+      } catch {
+        // Blocked storage: show it rather than swallow it.
+      }
+      if (dismissed.split(",").includes(id)) return;
+      // The page mounts one App per bot, so the same notice arrives more
+      // than once.
+      setNotices((prev) =>
+        prev.some((n) => n.id === id) ? prev : [...prev, { id, title, detail, command }],
+      );
     });
     return unsub;
   }, []);
@@ -938,6 +990,7 @@ export default function App() {
     return (
       <>
         <StartupModal
+          force={askedForPicker}
           onStart={(cwd, initialTab) => {
             setCurrentCwd(cwd);
             if (initialTab) {
@@ -948,6 +1001,7 @@ export default function App() {
               // Toggle off any time with ⌘⇧U / Ctrl⇧U.
               if (initialTab === "ui") setFullscreen(true);
             }
+            setAskedForPicker(false);
             setStarted(true);
           }}
         />
@@ -1257,6 +1311,7 @@ export default function App() {
             onClick={() => {
               // Kill the current PTY so a fresh one spawns in the new dir.
               send({ type: "pty_kill" });
+              setAskedForPicker(true);
               setStarted(false);
               setCurrentCwd("");
             }}
@@ -1360,6 +1415,51 @@ export default function App() {
           >
             Later
           </button>
+        </div>
+      )}
+      {notices.length > 0 && (
+        <div className="fixed bottom-20 right-4 z-50 flex max-w-md flex-col gap-2">
+          {notices.map((n) => (
+            <div
+              key={n.id}
+              className="rounded-lg border px-4 py-3 text-sm shadow-lg"
+              style={{
+                background: "var(--bg-secondary)",
+                borderColor: "var(--warning, #b45309)",
+                color: "var(--text-primary)",
+              }}
+            >
+              <div className="font-medium">{n.title}</div>
+              <div className="mt-1 text-xs" style={{ color: "var(--text-secondary)" }}>
+                {n.detail}
+              </div>
+              {n.command && (
+                <div
+                  className="mt-2 select-all rounded px-2 py-1 font-mono text-xs"
+                  style={{ background: "var(--bg-tertiary)" }}
+                >
+                  {n.command}
+                </div>
+              )}
+              <button
+                type="button"
+                className="mt-2 rounded px-2 py-1 text-xs opacity-60 hover:opacity-100"
+                onClick={() => {
+                  try {
+                    const was = localStorage.getItem("thclaws.notice.dismissed") ?? "";
+                    const next = was ? `${was},${n.id}` : n.id;
+                    localStorage.setItem("thclaws.notice.dismissed", next);
+                  } catch {
+                    // Storage blocked — it goes away for this run and comes
+                    // back next launch, which beats not closing.
+                  }
+                  setNotices((prev) => prev.filter((x) => x.id !== n.id));
+                }}
+              >
+                Dismiss
+              </button>
+            </div>
+          ))}
         </div>
       )}
       {modelPicker && (

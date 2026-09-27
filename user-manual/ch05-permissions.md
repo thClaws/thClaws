@@ -54,7 +54,7 @@ permissions: auto
 permissions: ask
 ```
 
-![thClaws Permissions](../user-manual-img/ch-05/thClaws-permissions.png)
+![`/permissions` in the Terminal tab — reading the current mode, switching to `ask`, reading it back](../user-manual-img/ch-05/permissions.png)
 
 ## What the prompt looks like
 

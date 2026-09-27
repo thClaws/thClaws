@@ -1141,6 +1141,33 @@ pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::erro
             cfg.bots.len()
         );
     }
+    // finding 11: an agent installed before agents learned $THCLAWS_AGENT_DIR
+    // looks for its own scripts and state at the workspace root and finds
+    // nothing. It does not error — it reports an empty project, so a GUI shell
+    // draws its chrome around no data. Repairing it here, before anything
+    // starts, is the difference between opening an old project and losing it.
+    // The originals are copied aside first, since this is done unasked.
+    for (slug, r) in crate::bots::agent_paths::repair_stale(&workspace) {
+        eprintln!(
+            "\x1b[36m[bots] repaired '{}' so it can find the files it ships — {} file(s), \
+             {} command(s), {} path(s). The originals are in \
+             .thclaws/bots/{}/.thclaws/state/pre-agent-dir/\x1b[0m",
+            slug, r.files, r.commands, r.literals, slug
+        );
+    }
+    // finding 12: a workspace an older engine migrated twice supervises a
+    // folder that is not an agent. It starts and then does nothing, which is
+    // the worst way to fail — say so here, where the user is looking.
+    if let Some((slug, dir)) = crate::bots::migrate::nested_bot(&workspace) {
+        eprintln!(
+            "\x1b[33m[bots] '{slug}' sits deeper than it needs to — {} holds its own {}, so an \
+             older migration ran twice and the agent runs a level below it. That is followed, \
+             and nothing is missing; `thclaws bots unnest` flattens it and drops the extra \
+             engine process.\x1b[0m",
+            dir.display(),
+            crate::bots::CONFIG_REL
+        );
+    }
     // The first entry is the default a browser reaches — `bots.json` order,
     // not alphabetical.
     sup.set_default(&cfg.bots[0].slug);
@@ -2788,6 +2815,18 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
                 );
             }
             tokio::spawn(async { crate::update_check::refresh().await });
+            // finding 11/12: the same notices the desktop shows. A browser
+            // user — a hosted workspace especially — has no stderr at all, and
+            // an agent that cannot reach its own files draws an empty panel
+            // rather than an error. Only under a host: off one, an agent's
+            // folder IS the workspace and neither problem exists.
+            if crate::workdir::agent_dir().is_some() {
+                for frame in
+                    crate::bots::migrate::workspace_notice_frames(&crate::workdir::workspace_root())
+                {
+                    let _ = initial_dispatch(frame);
+                }
+            }
         }),
         on_zoom: Arc::new(|_scale| {
             // Browser handles its own zoom (Cmd-+/-); no server-side

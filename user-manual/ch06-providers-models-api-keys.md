@@ -295,7 +295,7 @@ if you need it (e.g. the Alibaba Cloud International URL).
 Clear a key with the trash icon; the keychain entry is deleted and the
 env var unset for the running session.
 
-![thClaws setting LLM Keys](../user-manual-img/ch-05/thClaws-setting-llm-keys.png)
+![Settings & API keys — one row per provider, with the key state and where it is stored](../user-manual-img/ch-06/settings-api-keys.png)
 
 ## `.env` files (CI, headless, quick-start)
 

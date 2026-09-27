@@ -8,11 +8,12 @@
 
 ## หน้าต่างหลัก — เลย์เอาต์
 
-![หน้าต่างหลักของ thClaws — แท็บ Terminal กำลังใช้งาน, sidebar แสดงหมวด Provider / Sessions / Knowledge / MCP](../user-manual-img/ch-01/main-window-layout.png)
+![หน้าต่างหลักของ thClaws — แท็บ Chat บน workspace ใหม่: แถบ agent อยู่ซ้ายสุด ถัดมาเป็น sidebar หมวด Provider / Sessions / Knowledge / MCP](../user-manual-img/ch-04/main-window.png)
 
-- **แถบแท็บ** (ด้านบน) — Terminal, Chat, Files และ Team (ถ้าเปิดใช้) ชื่อหน้าต่างจะแสดงโปรเจกต์ปัจจุบัน
-- **Sidebar** (คอลัมน์ซ้าย) — สี่หมวดแบบพับได้ ครอบคลุม provider + model ที่ใช้งานอยู่, session ที่บันทึกไว้, knowledge base ที่แนบไว้ และ MCP server ที่ตั้งค่าไว้
-- **เนื้อหาของแท็บที่ใช้งาน** (ขวา) — เปลี่ยนไปตามแท็บที่คุณอยู่: เทอร์มินัลแบบ live, chat แบบ streaming, ตัวเปิดไฟล์ หรือหน้า team
+- **แถบ agent** (ซ้ายสุด แคบ ๆ) — หนึ่งช่องต่อหนึ่ง agent ใน workspace นี้ ปิดท้ายด้วยปุ่มตั้งค่า workspace และปุ่มเพิ่ม agent — workspace หนึ่งเก็บ agent ได้ถึง 8 ตัว ดู[บทที่ 35](ch35-agents-in-a-workspace.md) ถ้ามี agent ตัวเดียวมันจะเหลือแค่ช่องเดียว จึงมองข้ามได้ง่าย
+- **แถบแท็บ** (ด้านบน) — Chat, Terminal, Files และแท็บเสริมเท่าที่เปิดไว้
+- **Sidebar** (คอลัมน์ซ้าย) — สี่หมวด ครอบคลุม provider + model ที่ใช้งานอยู่, session ที่บันทึกไว้, knowledge base ที่แนบไว้ และ MCP server ที่ตั้งค่าไว้
+- **เนื้อหาของแท็บที่ใช้งาน** (ขวา) — เปลี่ยนไปตามแท็บที่คุณอยู่: chat แบบ streaming, เทอร์มินัลแบบ live, ตัวเปิดไฟล์ หรือหน้า team
 - **แถบสถานะ** (ด้านล่าง) — working directory ปัจจุบันอยู่ทางซ้าย ส่วนไอคอนเฟืองสำหรับ Settings อยู่ทางขวา
 
 ### Sidebar (คอลัมน์ซ้าย)
@@ -21,8 +22,8 @@ Sidebar แสดงอยู่ตลอดเวลา และประก�
 
 | หมวด | แสดง | การกระทำ |
 |---|---|---|
-| **Provider** | provider + model ที่ใช้อยู่ จุดบอกสถานะ และเครื่องหมาย ▾ | คลิกเพื่อเปิด inline model picker (v0.7.2+) |
-| **Sessions** | session ที่บันทึกล่าสุด 10 รายการ (ชื่อหรือ ID) | `+` เพื่อเริ่ม session ใหม่ · วางเมาส์เหนือรายการ → ไอคอนดินสอเพื่อเปลี่ยนชื่อ · คลิกเพื่อโหลด |
+| **Provider** | provider + model ที่ใช้อยู่ จุดบอกสถานะ เครื่องหมาย ▾ และแถว `think` | คลิกที่บรรทัด model เพื่อเปิด inline model picker (v0.7.2+) |
+| **Sessions** | ช่องค้นหา แล้วตามด้วย session ที่บันทึกไว้ (ชื่อหรือ ID) | `+` เพื่อเริ่ม session ใหม่ · พิมพ์เพื่อกรอง · วางเมาส์เหนือรายการ → ไอคอนดินสอเพื่อเปลี่ยนชื่อ · คลิกเพื่อโหลด |
 | **Knowledge** | KMS ทั้งหมดที่ค้นหาได้ พร้อม checkbox เพื่อแนบ | `+` เพื่อสร้าง KMS ใหม่ — ดู[บทที่ 9](ch09-knowledge-bases-kms.md) |
 | **MCP Servers** | MCP server ที่ใช้อยู่ พร้อมจำนวน tool | อ่านอย่างเดียวตรงนี้ — ตั้งค่าผ่าน `/mcp add` |
 
@@ -33,7 +34,30 @@ Sidebar แสดงอยู่ตลอดเวลา และประก�
 
 เมื่อบันทึก key ผ่าน Settings จุดจะเปลี่ยนเป็นสีเขียว และ model ที่ใช้งานอยู่อาจสลับไปยัง provider ตัวแรกที่มี credential ให้โดยอัตโนมัติ — ดู[บทที่ 6](ch06-providers-models-api-keys.md#auto-switch-on-key-save)
 
+**งบการคิด (thinking budget)** — ใต้บรรทัด model มีแถว `think`: `auto · 0 · 1 · 2 · 3` ใช้กำหนดว่าจะให้โมเดลใช้การให้เหตุผลมากแค่ไหนในเทิร์นถัดไป โดยไม่ต้องพิมพ์ slash command `auto` ปล่อยให้ engine ตัดสินจากตัว prompt เอง `0` ปิด extended thinking ส่วน `1`–`3` ขอ budget ที่ใหญ่ขึ้นตามลำดับ โมเดลที่ไม่มีโหมดให้เหตุผลจะไม่สนใจค่านี้ ตัวคุมเดียวกันนี้คือ `/thinking` เมื่ออยู่ใน REPL — ดู[บทที่ 10](ch10-slash-commands.md)
+
+![inline model picker — ค้นหาแบบพิมพ์ไปเจอไป ครอบคลุมทุก model ใน catalogue จัดกลุ่มตาม provider](../user-manual-img/ch-04/model-picker.png)
+
 **Inline model picker** (v0.7.2+): คลิกที่แถว Provider เพื่อเปิด dropdown แบบ search-as-you-type แสดง model ทุกตัวที่ catalogue รู้จัก จัดกลุ่มตาม provider พร้อม model จาก local Ollama ที่ค้นพบ live ผ่าน `/api/tags` ด้วย คลิกแถวเพื่อสลับ — การเปลี่ยนแปลงจะ persist ลง `.thclaws/settings.json` และ provider ที่ใช้งานอยู่จะถูก rebuild ใน place (ใช้ path เดียวกับ `/model`) กด Esc หรือคลิกนอก dropdown เพื่อยกเลิกโดยไม่เปลี่ยนค่า
+
+### แถบ agent (ซ้ายสุด)
+
+![แผง workspace ที่เปิดจากแถบ agent — agent ทุกตัวใน workspace นี้ พร้อมปุ่มเพิ่ม / ลบ / รีสตาร์ท](../user-manual-img/ch-04/agent-rail.png)
+
+แถบแคบ ๆ ที่ขอบซ้ายคือรายชื่อ agent ของ workspace — หนึ่งช่องต่อหนึ่งตัว
+แสดงอักษรย่อ และตัวที่ใช้อยู่จะถูกไฮไลต์ เอาเมาส์ชี้ค้างจะเห็นชื่อกับสถานะ
+(`main — ready`)
+
+ท้ายแถบมีปุ่มสองปุ่ม:
+
+| ปุ่ม | ทำอะไร |
+|---|---|
+| **Workspace settings** | เพิ่ม ลบ หรือรีสตาร์ท agent ใน workspace นี้ |
+| **Add an agent** | ดึง agent จาก Agent Template หรือสร้างตัวเปล่า |
+
+agent แต่ละตัวเก็บบทสนทนา เซสชัน และการตั้งค่าของตัวเอง แต่ทุกตัวอ่านและเขียน
+ไฟล์โปรเจกต์*ชุดเดียวกัน* — working directory ที่แสดงในแถบสถานะใช้ร่วมกัน
+ดู[บทที่ 35](ch35-agents-in-a-workspace.md)
 
 ### Sidebar ขวา (context-sensitive)
 
@@ -68,13 +92,15 @@ Chat อยู่ซ้ายสุดและเป็นแท็บที่
 
 แผง chat แบบ streaming ที่ใช้ประวัติร่วมกับแท็บ Terminal (agent เดียวกัน session เดียวกัน) ข้อความจะ render เป็น Markdown ส่วนการเรียก tool จะแสดงเป็นบล็อก `[tool: Name]` ที่ยุบ/ขยายได้ และการใช้ token จะแสดงต่อท้ายข้อความตอบของ assistant ในแต่ละรอบ
 
+![แท็บ Chat ระหว่างสนทนา — tool call ของ agent แสดงเป็นแถว `browser__*` ที่พับได้ บล็อก Thinking แทรกอยู่ในสาย และปิดท้ายเทิร์นด้วยบรรทัดสรุป token กับค่าใช้จ่าย](../user-manual-img/ch-04/chat-tab.png)
+
 ใช้แท็บ Chat เมื่อคุณชอบ UI แบบสนทนา ส่วนแท็บ Terminal ใช้เมื่อต้องการเห็น output ดิบ ๆ และรัน slash command
 
 #### 2. แท็บ Terminal
 
 เทอร์มินัล xterm.js ที่ฝังอยู่ภายใน รัน `thclaws --cli` (REPL ตัวเดียวกับที่ได้จาก CLI) การกดคีย์จะส่งผ่าน PTY bridge ไปยัง child process ส่วน output ก็ไหลกลับมาผ่าน frame ที่เข้ารหัสด้วย base64
 
-![แท็บ Terminal — agent เพิ่งสแกฟโฟลด์เว็บ static เสร็จ บรรทัด `[tool: Write …]` แสดงการสร้างแต่ละไฟล์ พร้อม token/เวลาที่ใช้ด้านล่าง](../user-manual-img/ch-04/thClaws-gui-terminal.png)
+![แท็บ Terminal — บทสนทนาเดียวกับแท็บ Chat แต่แสดงเป็น REPL แบบที่ได้จาก `thclaws --cli`](../user-manual-img/ch-04/terminal-tab.png)
 
 พฤติกรรมสำคัญที่ควรรู้:
 
@@ -106,11 +132,16 @@ Chat อยู่ซ้ายสุดและเป็นแท็บที่
   `../sources/<alias>.md` เลือกแบบนี้กับเอกสารยาวที่อยากไล่ดูตาม concept
   ส่วนสรุปธรรมดาเหมาะกับ note สั้น ๆ
 
-![โหมด Preview ของแท็บ Files — `script.js` เรนเดอร์ผ่าน CodeMirror พร้อมเลขบรรทัดและการไฮไลต์ syntax ส่วนปุ่ม Edit อยู่มุมขวาบนเพื่อสลับเข้าสู่โหมดแก้ไข](../user-manual-img/ch-04/thClaws-gui-file-viewer.png)
+![แท็บ Files — ต้นไม้โปรเจกต์อยู่ซ้าย เนื้อหาไฟล์อยู่ขวา](../user-manual-img/ch-04/files-tab-tree.png)
+
+ไฟล์ซอร์สจะเปิดใน CodeMirror แบบอ่านอย่างเดียว พร้อมเลขบรรทัดและการไฮไลต์
+syntax ส่วนปุ่ม **Edit** มุมขวาบนใช้สลับเข้าสู่โหมดแก้ไข:
+
+![โหมด Preview ของแท็บ Files — `style.css` ผ่าน CodeMirror พร้อมปุ่ม Refresh / Edit มุมขวาบน](../user-manual-img/ch-04/files-tab-code-viewer.png)
 
 ไฟล์ `.html` จะถูกเรนเดอร์สดใน sandboxed iframe จึงเห็นหน้าเว็บได้เหมือนที่ browser แสดง — style, รูป และ JS แบบ interactive ทำงานได้ครบ
 
-![HTML preview ของแท็บ Files — `index.html` เรนเดอร์อยู่ใน sandboxed iframe พร้อม stylesheet, รูปภาพ และปุ่มที่คลิกได้](../user-manual-img/ch-04/thClaws-gui-file-html-viewer.png)
+![HTML preview ของแท็บ Files — `index.html` เรนเดอร์ใน sandboxed iframe โดย stylesheet และสคริปต์ยังทำงานครบ หน้าจึงออกมาเหมือนที่เบราว์เซอร์แสดง](../user-manual-img/ch-04/files-tab-html-preview.png)
 
 **โหมด Edit** (ไอคอนดินสอ):
 
@@ -122,7 +153,7 @@ Chat อยู่ซ้ายสุดและเป็นแท็บที่
 - ถ้าคลิกไฟล์อื่นใน sidebar ขณะยัง dirty อยู่ ก็จะเจอ native confirm ตัวเดียวกัน — ต้อง save หรือ discard ก่อนจึงจะย้ายไฟล์ได้
 - การ auto-refresh จะหยุด polling ระหว่างที่คุณแก้ไข เพื่อกันไม่ให้ tool call `Write`/`Edit` ของ agent มาทับ buffer ที่กำลังแก้อยู่
 
-![โหมด Edit ของแท็บ Files — `index.html` เปิดอยู่ใน CodeMirror จุด ● หลังชื่อไฟล์หมายถึงยังไม่ได้บันทึก ส่วนปุ่ม Save / Discard จะปรากฏมุมขวาบน](../user-manual-img/ch-04/thClaws-gui-file-editor.png)
+![โหมด Edit ของแท็บ Files — จุด ● หลังชื่อไฟล์หมายถึงยังไม่ได้บันทึก และปุ่ม Save / Discard เข้ามาแทนที่คู่ Refresh / Edit](../user-manual-img/ch-04/files-tab-edit-mode.png)
 
 การเขียนไฟล์ทำผ่าน sandbox ของ working directory เดียวกับที่ agent ใช้ การแก้จึงอยู่ภายใน project tree เสมอ การ save ที่ผู้ใช้สั่งเองจะ **ไม่** ผ่าน approval prompt ของ agent — เพราะปุ่ม Save ถือเป็นการอนุมัติของคุณอยู่แล้ว
 
@@ -132,7 +163,7 @@ Chat อยู่ซ้ายสุดและเป็นแท็บที่
 
 #### 4. แท็บ Team
 
-![หน้าต่างหลักของ thClaws — แท็บ Team กำลังใช้งาน](../user-manual-img/ch-04/thClaws-gui-teams.png)
+![แท็บ Team ตอนที่ยังไม่มีทีมทำงานอยู่](../user-manual-img/ch-04/team-tab.png)
 
 แท็บ Team **ถูกซ่อนไว้โดยค่าเริ่มต้น** จะโผล่ขึ้นมาต่อเมื่อเปิด Agent Teams ผ่านเมนู Settings → Workspace → Agent Teams หรือแก้ `"teamEnabled": true` ใน `.thclaws/settings.json` ด้วยตัวเอง (ปิดเป็นค่า default เพราะทีมสปอว์น process ของ agent หลายตัวขนานกัน กินโทเคนเร็ว) เมื่อเปิดใช้งานแล้ว แท็บนี้จะเป็นที่แสดง pane ของเพื่อนร่วมทีมแต่ละตัว คลิก pane เพื่อ focus และส่ง input ส่วนตัวไปยังสมาชิกคนนั้นได้ รายละเอียดการสร้างทีม การสื่อสารระหว่างสมาชิก รวมถึง tool `TeamCreate` / `SpawnTeammate` / `SendMessage` / `TeamMerge` ดูได้ใน[บทที่ 17](ch17-agent-teams.md)
 
@@ -143,6 +174,8 @@ Chat อยู่ซ้ายสุดและเป็นแท็บที่
 agent พกมากับตัวเอง (Media Studio ก็เป็นตัวหนึ่ง) แท็บนี้ทำหน้าที่เป็นตัวเลือก
 — เลือก shell แล้วมันจะโหลดใน iframe คุยกับ engine ผ่าน bridge
 `window.thclaws.*` ไม่ใช่ผ่านบทสนทนาของคุณ ดู[บทที่ 26](ch26-gui-shells.md)
+
+![แท็บ UI — ตัวเลือก GUI Shell ตอนที่ยังไม่ได้ติดตั้ง shell ใดเลย](../user-manual-img/ch-04/ui-tab.png)
 
 (เดิมชื่อแท็บ "Shell" จนกระทั่งแท็บ Shell แบบ PTY ด้านล่างมาเอาชื่อไป)
 
@@ -155,27 +188,65 @@ agent พกมากับตัวเอง (Media Studio ก็เป็น�
 คือ prompt หรือ slash command ส่วนแท็บ Shell คือ shell เปล่าๆ ที่ไม่มี agent อยู่
 เหมือนเปิดโปรแกรมเทอร์มินัลของคุณเองแต่มาอยู่ในแท็บ
 
+![แท็บ Shell — `$SHELL` เปล่า ๆ ไม่มี agent อยู่ในวง](../user-manual-img/ch-04/shell-tab.png)
+
 #### 7. แท็บ Browser
 
-**โผล่เมื่อตั้ง `browserEnabled` เท่านั้น** แสดงสถานะและกิจกรรมสดของ Chromium
-ที่ engine ดูแลไว้สำหรับงาน browser automation — อยู่หน้าไหน agent เพิ่งทำอะไร
-ดูภาพสด และ takeover เพื่อเข้าไปคุมเองกลางทางได้ ดู[บทที่ 28](ch28-browser-automation.md)
+**เปิดเป็นค่าเริ่มต้นตั้งแต่ v0.49.2** ปิดได้ที่ Settings → Optional features →
+Browser tools แสดงสถานะและกิจกรรมสดของ Chromium ที่ engine ดูแลไว้สำหรับงาน
+browser automation
+
+![แท็บ Browser — บรรทัดสถานะของ browser ที่ engine ดูแล ภาพหน้าเว็บ บันทึกกิจกรรม และแผง Agent ที่ใช้บทสนทนาเดียวกับแท็บ Chat](../user-manual-img/ch-04/browser-tab.png)
+
+ส่วนหัวบอกคำสั่ง `playwright-mcp` และไบนารี Chromium ที่ใช้อยู่แบบเป๊ะ ๆ พร้อม
+บอกว่าภาพสดพร้อมหรือยัง ปุ่ม **Take over** ส่งคีย์บอร์ดกับเมาส์มาให้คุณคุมเอง
+กลางทาง ส่วน **capture** ถ่ายภาพหน้าปัจจุบัน แผง **Agent** ทางขวาคือบทสนทนา
+เดียวกับแท็บ Chat คุณจึงสั่งงานต่อได้โดยไม่ต้องออกจากแท็บนี้
+
+ภาพสดต้องใช้ Chromium ของ Playwright เอง — `npx playwright install chromium`
+ถ้าไม่มี tool ยังทำงานได้ (playwright-mcp จะเปิดเบราว์เซอร์ของมันเอง) แต่ภาพ
+พรีวิวกับการ takeover จะปิดอยู่ ดู[บทที่ 28](ch28-browser-automation.md)
 
 ### เมนู Settings (ไอคอนเฟือง)
 
-คลิกเฟือง ⚙ มุมขวาล่าง (ที่ status bar) เพื่อเปิดเมนู popup:
+คลิกเฟือง ⚙ มุมขวาล่าง (ที่แถบสถานะ) เพื่อเปิดเมนู Settings แถวที่มี `›` จะ
+กางเมนูย่อยเมื่อเอาเมาส์ชี้ค้าง — ถ้าคลิกมันจะปิดเมนูแทน
 
-![เมนู Settings ของ thClaws](../user-manual-img/ch-04/thClaws-settings-menu.png)
+![เมนู Settings](../user-manual-img/ch-04/settings-menu.png)
 
 | รายการ | เปิด |
 |---|---|
-| **Global instructions** | Tiptap markdown editor บน `~/.config/thclaws/AGENTS.md` |
-| **Folder instructions** | Tiptap editor บน `./AGENTS.md` (ใน working directory) |
-| **Provider API keys** | Settings modal สำหรับ key — ดู[บทที่ 6](ch06-providers-models-api-keys.md) |
-| **LINE Connect...** | จับคู่ thClaws กับ LINE OA ของคุณเพื่อขับ agent จากมือถือ — ดู[บทที่ 21](ch21-line-and-browser-chat.md) |
-| **APPEARANCE → Light / Dark / System** | สลับธีม — อธิบายด้านล่าง |
-| **APPEARANCE → GUI scale** | ปรับขนาด zoom สำหรับจอ HiDPI / 4K — 75 / 90 / 100 / 110 / 125 / 150 / 175 / 200% (v0.7.3+) |
-| **WORKSPACE → Agent Teams** | เปิด/ปิด Agent Teams feature (เซ็ต `teamEnabled` ใน `.thclaws/settings.json`) — ดู[บทที่ 17](ch17-agent-teams.md) |
+| **Instructions** `›` | Global (`~/.config/thclaws/AGENTS.md`) หรือ Folder (`./AGENTS.md`) — ดู[บทที่ 8](ch08-memory-and-agents-md.md) |
+| **Settings & API keys** | key ของ provider, gateway, thClaws.cloud และ auto-learn — ดู[บทที่ 6](ch06-providers-models-api-keys.md) |
+| **Connect a channel…** `›` | LINE, Telegram, Messenger — ดูบทที่ [21](ch21-line-and-browser-chat.md), [23](ch23-telegram.md), [24](ch24-messenger.md) |
+| **Appearance** `›` | Light / Dark / System |
+| **GUI scale** | dropdown ปรับขนาด (75–200%) อยู่ในเมนูหลักเลย |
+| **WORKSPACE → Reload settings** | อ่าน `.thclaws/settings.json` ใหม่ด้วยมือ (ปกติมีตัวเฝ้าไฟล์ทำให้อยู่แล้ว) |
+| **WORKSPACE → Optional features** `›` | สวิตช์ฟีเจอร์ทั้งหกตัว ดูด้านล่าง |
+
+![เมนูย่อย Instructions — Global และ Folder AGENTS.md](../user-manual-img/ch-04/settings-instructions.png)
+
+![เมนูย่อย Connect a channel — LINE, Telegram และ Messenger รวมอยู่ที่เดียว](../user-manual-img/ch-04/settings-connect-channel.png)
+
+#### Optional features
+
+![เมนูย่อย Optional features — สวิตช์หกตัว แต่ละตัวบอกว่าเพิ่ม tool อะไรและต้องมีอะไรก่อน](../user-manual-img/ch-04/settings-optional-features.png)
+
+เมนูย่อยนี้คือวิธีที่รองรับอย่างเป็นทางการในการเปิด-ปิดฟีเจอร์ แต่ละสวิตช์เขียน
+ค่าที่ตรงกันลงใน `.thclaws/settings.json` ให้เอง คุณจึงไม่ต้องไปแก้ไฟล์นั้นด้วยมือ
+
+| สวิตช์ | ค่าเริ่มต้น | ได้อะไร | ต้องมีอะไร |
+|---|---|---|---|
+| **Agent Teams** | ปิด | `TeamCreate`, `SpawnTeammate`, … และแท็บ Team | — |
+| **Media tools** | ปิด | `TextToImage`, `TextToVideo`, … | key ของ GEMINI / GOOGLE |
+| **HAL tools** | ปิด | `YouTubeTranscript`, `WebScrape` | key ของ HAL หรือผ่าน gateway |
+| **Shell tab** | ปิด | แท็บ Shell ที่หนุนด้วย PTY | — |
+| **Browser tools** | **เปิด** | tool `browser__*` และแท็บ Browser | มี `node` / `npx` ใน PATH |
+| **Sensitive-data masking** | ปิด | เลขบัตรประชาชน เบอร์โทร ทะเบียนรถ ชื่อคนไทย ออกจากเครื่องเป็น `[ID_1]` แล้วคืนค่าจริงตอนตอบ ข้ามให้โมเดลที่รันในเครื่อง | — ดู[บทที่ 32](ch32-thai-pii-masking.md) |
+
+`.thclaws/settings.json` ที่ผิดรูปจะทำให้ทุกสวิตช์ข้างบนอ่านได้เป็น **ปิด**
+โดยไม่มีข้อความแจ้งเตือนใด ๆ ถ้าสวิตช์ไหนเปิดแล้วไม่ติด ให้ตรวจก่อนว่าไฟล์
+เป็น JSON ที่ถูกต้อง
 
 Tiptap editor แปลง markdown ไป-กลับผ่าน `tiptap-markdown`: คุณแก้ใน UI แบบ rich-text (หัวเรื่อง ตัวหนา list code fence) แล้วบันทึกลงดิสก์เป็น markdown จากนั้น agent ก็อ่านไฟล์นั้นในรอบถัดไป การแปลงไม่มีข้อมูลสูญหายสำหรับ Markdown มาตรฐาน
 
@@ -183,9 +254,11 @@ path ที่แสดงด้านบนของ editor คือชื่�
 
 ### Appearance (Light / Dark / System)
 
+![เมนูย่อย Appearance — Light, Dark, System](../user-manual-img/ch-04/settings-appearance.png)
+
 ด้านล่างของเมนูเฟืองจะมีตัวเลือกธีมสามแบบ — Light, Dark, System — โดยตัวที่ใช้งานอยู่จะมีเครื่องหมายถูกกำกับไว้ คลิกเลือกแล้วจะมีผลทันที และจะถูกบันทึกลง `~/.config/thclaws/theme.json` (เป็นของผู้ใช้เอง ไม่ถูก commit ไปกับโปรเจกต์) เมนูจะเปิดค้างไว้หลังคลิก เพื่อให้ลองสลับไปมาได้โดยไม่ต้องเปิดเฟืองใหม่
 
-![หน้าต่างหลักของ thClaws ใน dark theme](../user-manual-img/ch-01/main-window-layout-dark.png)
+![หน้าต่างหลักของ thClaws ใน dark theme](../user-manual-img/ch-01/main-window-dark.png)
 
 **Light** และ **Dark** เป็น override แบบชัดเจน จะถูกใช้แม้ OS จะตั้งค่าตรงข้ามอยู่ก็ตาม ส่วน **System** จะตามค่า `prefers-color-scheme` และเปลี่ยนตามเมื่อ OS สลับธีม (macOS Appearance, Linux DE theme, Windows personalization) โดยไม่ต้อง restart แอป
 

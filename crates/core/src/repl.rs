@@ -5242,25 +5242,39 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             // point one customer's traffic at another's workspace —
             // refuse instead, the way AzureAIFoundry does for the same
             // reason.
-            let base = std::env::var("SIS_BASE_URL")
-                .ok()
-                .map(|u| u.trim().to_string())
-                .filter(|u| !u.is_empty())
-                .ok_or_else(|| {
-                    Error::Config(
-                        "SIS_BASE_URL not set — a SIS endpoint is workspace-specific \
-                         (https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1). \
-                         Add it in Settings or export the env var."
-                            .into(),
-                    )
-                })?;
-            // Same shape `compat_endpoint` produces, minus its default:
-            // accept a base or an already-complete endpoint.
-            let url = if base.ends_with("/chat/completions") {
-                base
-            } else {
-                format!("{}/chat/completions", base.trim_end_matches('/'))
-            };
+            // Gateway first, when one is configured: the hosted path meters
+            // this provider like every other, and the gateway holds the key
+            // and the workspace URL so neither has to exist on the runner.
+            // Without this arm the overlay is computed and then ignored —
+            // the request goes straight to the upstream and NOTHING is
+            // metered, which is exactly the failure the three-layer rule
+            // warns about.
+            let (api_key, url) =
+                match crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind) {
+                    Some(o) => (o.access_key, format!("{}/chat/completions", o.base_url)),
+                    None => {
+                        let base = std::env::var("SIS_BASE_URL")
+                            .ok()
+                            .map(|u| u.trim().to_string())
+                            .filter(|u| !u.is_empty())
+                            .ok_or_else(|| {
+                                Error::Config(
+                                    "SIS_BASE_URL not set — a SIS endpoint is workspace-specific \
+                                 (https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1). \
+                                 Add it in Settings or export the env var."
+                                        .into(),
+                                )
+                            })?;
+                        // Same shape `compat_endpoint` produces, minus its
+                        // default: accept a base or an already-complete endpoint.
+                        let url = if base.ends_with("/chat/completions") {
+                            base
+                        } else {
+                            format!("{}/chat/completions", base.trim_end_matches('/'))
+                        };
+                        (api_key, url)
+                    }
+                };
             Ok(Arc::new(
                 OpenAIProvider::new(api_key)
                     .with_base_url(url)

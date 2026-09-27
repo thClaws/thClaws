@@ -919,6 +919,10 @@ fn run_gui_inner(
     let host_root_for_proto = host_conn
         .as_ref()
         .map(|_| std::env::current_dir().unwrap_or_default());
+    let bridge_for_files = bot_link.clone();
+    let host_root_for_files = host_conn
+        .as_ref()
+        .map(|_| std::env::current_dir().unwrap_or_default());
     let active_bot_dir = move || -> Option<std::path::PathBuf> {
         let root = host_root_for_proto.as_ref()?;
         let slug = bridge_for_proto
@@ -926,7 +930,19 @@ fn run_gui_inner(
             .ok()?
             .as_ref()
             .map(|b| b.slug.clone())?;
-        Some(crate::bots::bot_dir(root, &slug))
+        Some(crate::bots::resolve_agent_dir(root, &slug))
+    };
+    // Where the USER's files are, which is the workspace the agent runs in —
+    // not the agent's own folder. A chapter's `../images/…` lives here, and
+    // serving it from the agent folder is how the previews came up broken.
+    let active_workspace = move || -> Option<std::path::PathBuf> {
+        let root = host_root_for_files.as_ref()?;
+        let slug = bridge_for_files
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|b| b.slug.clone())?;
+        Some(crate::bots::resolve_agent(root, &slug).0)
     };
     // The workspace the host serves — what the folder picker offers to
     // change, and what a pick inside it leaves alone.
@@ -1172,14 +1188,23 @@ fn run_gui_inner(
                 // Under a host a relative path is relative to the bot's
                 // folder, not the shelf; the shelf never holds a bot's
                 // `images/…`, so it is tried last rather than first.
-                let in_bot = active_bot_dir()
-                    .map(|dir| dir.join(&decoded).to_string_lossy().into_owned());
+                // Two candidates under a host, and they are different
+                // folders: the user's files live in the workspace the agent
+                // runs in, while an asset the agent ships is in its own. The
+                // workspace comes first — a chapter's images are the common
+                // case — and the shelf the window holds is tried last, since
+                // it holds neither.
+                let candidates: Vec<String> = [active_workspace(), active_bot_dir()]
+                    .into_iter()
+                    .flatten()
+                    .map(|dir| dir.join(&decoded).to_string_lossy().into_owned())
+                    .collect();
                 let resolved = crate::sandbox::Sandbox::check(&abs_first)
-                    .or_else(|e| match &in_bot {
-                        Some(p) if std::path::Path::new(p).is_file() => {
-                            crate::sandbox::Sandbox::check(p)
-                        }
-                        _ => Err(e),
+                    .or_else(|e| {
+                        candidates
+                            .iter()
+                            .find(|p| std::path::Path::new(p).is_file())
+                            .map_or(Err(e), |p| crate::sandbox::Sandbox::check(p))
                     })
                     .or_else(|_| crate::sandbox::Sandbox::check(&decoded));
                 // HTTP Range support — <video>/<audio> in shells stream large
@@ -1309,6 +1334,11 @@ fn run_gui_inner(
                 // point someone is listening.
                 if kind == "frontend_ready" {
                     dispatch_update_notice(&proxy_for_ipc);
+                    if let Some(root) = host_root_for_ipc.as_ref() {
+                        for frame in crate::bots::migrate::workspace_notice_frames(root) {
+                            let _ = proxy_for_bots.send_event(UserEvent::Dispatch(frame));
+                        }
+                    }
                 }
                 if kind == "get_cwd" {
                     let slug = bridge_for_ipc
@@ -1317,7 +1347,21 @@ fn run_gui_inner(
                         .and_then(|b| b.as_ref().map(|b| b.slug.clone()))
                         .unwrap_or_default();
                     let root = host_root_for_ipc.clone().unwrap_or_default();
-                    let dir = crate::bots::bot_dir(&root, &slug);
+                    // The agent that actually runs, which a doubly-migrated
+                    // workspace puts a level further down — its settings are
+                    // what carry `guiShell.tabDefault`.
+                    let dir = crate::bots::resolve_agent_dir(&root, &slug);
+                    // The picker picks a WORKSPACE — a folder that may hold
+                    // several agents — so that is what the box shows. Answering
+                    // with the bot's folder rewrote what the user had typed,
+                    // and the page asks again for every bot it mounts, so the
+                    // box kept jumping back to `…/.thclaws/bots/<slug>` while
+                    // they were still choosing.
+                    let shown = if root.as_os_str().is_empty() {
+                        dir.clone()
+                    } else {
+                        root.clone()
+                    };
                     let initial_tab = std::fs::read_to_string(dir.join(".thclaws/settings.json"))
                         .ok()
                         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -1335,7 +1379,7 @@ fn run_gui_inner(
                     let _ = proxy_for_bots.send_event(UserEvent::Dispatch(
                         serde_json::json!({
                             "type": "current_cwd",
-                            "path": dir.to_string_lossy(),
+                            "path": shown.to_string_lossy(),
                             "needs_modal": first,
                             "recent_dirs": crate::recent_dirs::load_recent_dirs(),
                             "initial_tab": initial_tab,

@@ -39,7 +39,7 @@ baseline กลางได้
 คือทางลัดสำหรับแก้ไข project instructions โดยไม่ต้องเปิด text editor
 ภายนอก
 
-![Settings menu — Global instructions / Folder instructions / Provider API keys / Appearance / Workspace](../user-manual-img/ch-08/thclaws-settings-menu.png)
+![เมนู Settings — Instructions, Settings & API keys, Connect a channel, Appearance, GUI scale และหมวด Workspace](../user-manual-img/ch-04/settings-menu.png)
 
 - **Global instructions** — แก้ไข `~/.config/thclaws/AGENTS.md` ที่เป็น
   baseline ของทุก session บนเครื่องนี้

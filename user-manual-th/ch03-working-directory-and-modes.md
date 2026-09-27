@@ -81,10 +81,10 @@ Team) พร้อม sidebar แสดงส่วน provider/sessions/knowled
 ทัวร์ฉบับเต็ม พร้อมภาพหน้าจอและคีย์ลัด
 
 Terminal Tab:
-![thClaws Desktop GUI](../user-manual-img/ch-03/thclaws-gui-terminal.png)
+![แท็บ Terminal ในแอปเดสก์ท็อป — REPL ตัวเดียวกับที่ได้จาก `thclaws --cli`](../user-manual-img/ch-04/terminal-tab.png)
 
 Chat Tab:
-![thClaws Desktop GUI](../user-manual-img/ch-03/thclaws-gui.png)
+![หน้าต่างหลักของแอปเดสก์ท็อป — แถบ agent, sidebar และแท็บ Chat](../user-manual-img/ch-04/main-window.png)
 
 ### CLI แบบโต้ตอบ
 
@@ -95,7 +95,7 @@ thclaws --cli
 agent ตัวเดียวกัน เพียงแต่อยู่ใน terminal ทุกฟีเจอร์ในคู่มือเล่มนี้
 ใช้งานได้ที่นี่ — เพราะนี่คือกระดูกสันหลังที่ GUI ห่อหุ้มไว้นั่นเอง
 
-![thClaws Interactive CLI](../user-manual-img/ch-03/thclaws-interactive-cli.png)
+![CLI REPL ตอนเปิด — บรรทัด startup, แบนเนอร์ที่บอกเวอร์ชัน โมเดล โหมด permission และรหัสเซสชัน แล้วจึงเป็นพรอมต์ `>`](../user-manual-img/ch-03/interactive-cli.png)
 
 ภายใน REPL บรรทัดที่คุณพิมพ์จะถูกแบ่งออกเป็นสามประเภท:
 
@@ -161,7 +161,7 @@ chain ของ `--resume` นี้คือกลไกเบื้องห�
 งานประจำที่ต่อบทสนทนาเดียวโตขึ้นเรื่อยๆ แทนที่จะเริ่มจากศูนย์ทุกครั้ง
 ดู[บทที่ 19](ch19-scheduling.md#heartbeats)
 
-![thClaws Non-Interactive Mode](../user-manual-img/ch-03/thclaws-non-interactive.png)
+![โหมด print — หนึ่งเทิร์น เห็น tool ที่เรียก คำตอบ แล้วจบ](../user-manual-img/ch-03/non-interactive.png)
 
 ### `--serve` (HTTP/WebSocket server)
 
@@ -172,7 +172,7 @@ thclaws --serve --bind 0.0.0.0        # bind all interfaces (auth required)
 thclaws --serve --gui                 # plus open desktop window on same engine
 ```
 
-![thClaws --serve mode](../user-manual-img/ch-03/thclaws-serve-mode.png)
+![`--serve` ตอนเปิด — URL ของ host แล้วตามด้วย URL ของ agent ที่เอาไปเปิดในเบราว์เซอร์](../user-manual-img/ch-03/serve-mode.png)
 
 engine ตัวเดียวกันถูก expose ผ่าน HTTP + WebSocket — เปิดได้สอง use case:
 

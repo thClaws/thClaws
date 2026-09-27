@@ -4,6 +4,9 @@ Slash commands are the control plane. Type `/` followed by a name to
 run a command instead of sending the line to the model. Type `/help`
 any time to see the full list.
 
+![Typing `/` in the Chat box opens the command palette — every command grouped by what it touches, with its description](../user-manual-img/ch-10/slash-palette.png)
+
+
 > **CLI and GUI are peers.** Every command in this chapter works
 > identically from the CLI REPL, the GUI's Terminal tab, and the GUI's
 > Chat tab — the `/<word>` input goes through the same dispatcher in
@@ -45,8 +48,12 @@ tried first.
 | `/resume ID\|NAME` | (CLI flag `--resume`) restart with a session loaded |
 | `/clear` | Wipe in-memory history (doesn't touch saved files) |
 | `/history` | Print a message-count summary |
+| `/translate [--language=<code>] <text or file>` | Translate text or a file in a side conversation — an alias for `/agent translator …`, so it never touches your session |
+| `/summarize [--language=<code>] <text>` | Summarise in a side conversation — an alias for `/agent summarizer …`. `--language` sets the summary's language, not the source's |
+| `/extract <url or file>` | Clip a page or file into clean markdown, images downloaded alongside. Runs isolated, so the raw page never enters your context — the point of it for long pages |
 | `/compact` | Summarise history to free tokens |
 | `/cwd` | Show the working directory (sandbox root) |
+| `/pwd` | Same thing — the shell name for it |
 
 ### Memory & context
 

@@ -305,7 +305,7 @@ DashScope ถูกล็อกไว้ที่ค่าเริ่มต้�
 ล้าง key ได้ด้วยไอคอนถังขยะ entry ใน keychain จะถูกลบ และ
 env var จะถูก unset สำหรับ session ที่กำลังรันอยู่
 
-![thClaws setting LLM Keys](../user-manual-img/ch-05/thClaws-setting-llm-keys.png)
+![Settings & API keys — หนึ่งแถวต่อหนึ่ง provider บอกสถานะของ key และที่เก็บ](../user-manual-img/ch-06/settings-api-keys.png)
 
 ## ไฟล์ `.env` (CI, headless, quick-start)
 

@@ -2,6 +2,9 @@
 
 Scheduling lets you run thClaws prompts on a recurring cron schedule — every weekday morning, every Sunday night, every five minutes — or once at a time you name, without having to remember to type the prompt yourself. Each scheduled job spawns its own `thclaws --print` subprocess in its own working directory, so two schedules in different projects are fully independent.
 
+![`/schedule` — one row per job: state, last result, name, cron expression and next fire](../user-manual-img/ch-19/schedule-list.png)
+
+
 The feature ships in three layers, each useful on its own:
 
 | Layer | What it does | When it fires |

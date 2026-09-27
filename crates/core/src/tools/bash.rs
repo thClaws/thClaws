@@ -386,6 +386,7 @@ async fn run_shell_command_inner(
     // is additive; user shells can still override per-command via
     // `VAR=value cmd` syntax.
     apply_noninteractive_env(&mut cmd);
+    apply_agent_dir_env(&mut cmd);
     scrub_sensitive_env(&mut cmd);
 
     // Own process group, so a kill reaches the whole tree rather than the one
@@ -1412,6 +1413,21 @@ fn scrub_sensitive_env(cmd: &mut tokio::process::Command) {
         cmd.env("THCLAWS_GATEWAY_API_KEY", key);
         cmd.env("THCLAWS_GATEWAY_BASE_URL", base);
     }
+}
+
+/// finding 11: a shell's cwd is the workspace root, so a bare `.thclaws/…`
+/// in a command reaches the HOST's folder, not the agent's — an agent could
+/// not run the scripts it ships. Path resolution cannot fix this for a shell
+/// string, so the agent's folder is handed over as an environment variable
+/// and agents address their own assets through it.
+fn apply_agent_dir_env(cmd: &mut tokio::process::Command) {
+    // Always set, never conditional. Off a host the agent's folder IS the
+    // workspace, so this is the shell's own cwd and the same command works
+    // either way — which is what lets the rewritten text carry no fallback
+    // of its own. An unset variable would expand to nothing and turn
+    // `$THCLAWS_AGENT_DIR/.thclaws/x` into `/.thclaws/x`.
+    let dir = crate::workdir::agent_dir().unwrap_or_else(crate::workdir::workspace_root);
+    cmd.env("THCLAWS_AGENT_DIR", dir);
 }
 
 fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {

@@ -4,6 +4,9 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 คำสั่งเพื่อรันคำสั่งนั้น แทนที่จะส่งบรรทัดดังกล่าวให้โมเดล พิมพ์
 `/help` ได้ตลอดเวลาเพื่อดูรายการทั้งหมด
 
+![พิมพ์ `/` ในกล่อง Chat แล้ว command palette จะเปิดขึ้น — จัดกลุ่มตามสิ่งที่คำสั่งไปแตะ พร้อมคำอธิบายของแต่ละคำสั่ง](../user-manual-img/ch-10/slash-palette.png)
+
+
 > **CLI กับ GUI ใช้ได้เหมือนกัน** ทุกคำสั่งในบทนี้ทำงานเหมือนกันทั้ง
 > จาก CLI REPL, แท็บ Terminal ของ GUI และแท็บ Chat ของ GUI —
 > input `/<word>` วิ่งผ่าน dispatcher ตัวเดียวกันในทั้งสามที่ คำสั่ง
@@ -45,9 +48,13 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | `/resume ID\|NAME` | (CLI flag `--resume`) เริ่มใหม่พร้อมโหลด session |
 | `/clear` | ล้างประวัติในหน่วยความจำ (ไม่แตะไฟล์ที่บันทึกไว้) |
 | `/history` | พิมพ์สรุปจำนวนข้อความ |
+| `/translate [--language=<code>] <ข้อความหรือพาธไฟล์>` | แปลข้อความหรือไฟล์ในบทสนทนาแยก — เป็น alias ของ `/agent translator …` จึงไม่ไปแตะเซสชันที่คุยอยู่ |
+| `/summarize [--language=<code>] <ข้อความ>` | สรุปในบทสนทนาแยก — alias ของ `/agent summarizer …`; `--language` กำหนดภาษาของ*บทสรุป* ไม่ใช่ภาษาต้นทาง |
+| `/extract <url หรือไฟล์>` | คลิปหน้าเว็บหรือไฟล์ออกมาเป็น markdown สะอาด ๆ พร้อมโหลดรูปมาเก็บไว้ด้วย รันแยกจากบทสนทนา หน้าดิบจึงไม่เข้ามากิน context ของคุณ — ซึ่งเป็นเหตุผลทั้งหมดที่มีคำสั่งนี้สำหรับหน้ายาว ๆ |
 | `/compact` | ตัดข้อความเก่าออก เขียน checkpoint ลง JSONL เพื่อประหยัด token (auto-run ที่ 80% ของ context window ด้วย) |
 | `/fork` | บันทึก session ปัจจุบัน, สรุปประวัติด้วย LLM, เริ่ม session ใหม่ที่ seed ด้วย summary — ใช้ตอนไฟล์ JSONL ใหญ่เกิน 5 MB (ดู[บทที่ 7](ch07-sessions.md)) |
 | `/cwd` | แสดง working directory (sandbox root) |
+| `/pwd` | อันเดียวกัน — เรียกด้วยชื่อแบบ shell |
 
 ### Memory และ context
 
