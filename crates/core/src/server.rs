@@ -208,12 +208,56 @@ struct MultiTenantState {
 /// `--serve` child of its own window (bots/supervisor.rs): loopback only,
 /// behind a per-launch token, marked `THCLAWS_SUPERVISED`. Refusing that
 /// would refuse the app itself.
+///
+/// The env marks alone are the user's to set, so the parent must also be this
+/// same binary — the window that spawned the child. That stops the two-variable
+/// shortcut; it is not a sandbox (the user can still reach the app's own
+/// loopback agents).
 fn desktop_internal_serve(bind: &SocketAddr) -> bool {
     desktop_internal_serve_with(
         bind,
         std::env::var("THCLAWS_SUPERVISED").ok().as_deref(),
         std::env::var("THCLAWS_SERVE_TOKEN").ok().as_deref(),
-    )
+    ) && parent_is_this_binary()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn parent_is_this_binary() -> bool {
+    let ppid = unsafe { libc::getppid() };
+    let own = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok());
+    match (exe_of(ppid), own) {
+        (Some(parent), Some(own)) => parent == own,
+        _ => false,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn parent_is_this_binary() -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn exe_of(pid: libc::pid_t) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()?
+        .canonicalize()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn exe_of(pid: libc::pid_t) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    std::path::PathBuf::from(std::ffi::OsString::from_vec(buf))
+        .canonicalize()
+        .ok()
 }
 
 fn desktop_internal_serve_with(
@@ -224,6 +268,16 @@ fn desktop_internal_serve_with(
     bind.ip().is_loopback()
         && supervised == Some("1")
         && token.is_some_and(|t| !t.trim().is_empty())
+}
+
+/// `Multipart` caps a request at axum's 2 MB default unless the route says
+/// otherwise, which refused every upload past 2 MB long before the 25 MB
+/// per-file cap `serve_upload` enforces. Room for a full batch plus the
+/// multipart framing.
+fn upload_body_limit() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(
+        crate::uploads::UPLOAD_MAX_FILES * crate::uploads::UPLOAD_MAX_BYTES as usize + 1024 * 1024,
+    )
 }
 
 /// Spin up the server. Spawns the worker, builds the Axum router,
@@ -1039,7 +1093,7 @@ fn classic_router(state: ServeState) -> Router {
     let gated = Router::new()
         .route("/", get(serve_index))
         .route("/ws", get(ws_handler))
-        .route("/upload", post(serve_upload))
+        .route("/upload", post(serve_upload).layer(upload_body_limit()))
         .route("/api/branding", get(serve_branding))
         .route("/gui-shell/{shell_id}", get(serve_gui_shell_index))
         .route("/gui-shell/{shell_id}/", get(serve_gui_shell_index))
@@ -1090,6 +1144,14 @@ fn classic_router(state: ServeState) -> Router {
 ///
 /// Step 3 starts exactly one bot, named by a hand-edited `.thclaws/bots.json`.
 pub async fn run_supervisor(bind: SocketAddr) -> crate::error::Result<()> {
+    // A user-launched host is `--serve` whatever it binds; only the desktop
+    // window's own host (run_supervisor_on, bound by the app) may stay on
+    // loopback under allow_serve = false.
+    if !crate::policy::serve_allowed() {
+        return Err(crate::error::Error::Tool(
+            "--serve is disabled by org policy (policies.runtime.allow_serve = false)".into(),
+        ));
+    }
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(|e| crate::error::Error::Tool(format!("bind {bind}: {e}")))?;
@@ -1244,6 +1306,7 @@ fn supervisor_router(sup: Arc<crate::bots::supervisor::BotSupervisor>) -> Router
         .route("/", get(serve_index))
         .route("/ws", get(supervisor_ws))
         .route("/bots", get(supervisor_bots).post(supervisor_add_bot))
+        .route("/bots/templates", get(supervisor_bot_templates))
         .route("/bots/{slug}", axum::routing::delete(supervisor_remove_bot))
         .route("/bots/{slug}/restart", post(supervisor_restart_bot))
         .route("/file-asset/{*rel}", get(supervisor_forward))
@@ -1254,8 +1317,7 @@ fn supervisor_router(sup: Arc<crate::bots::supervisor::BotSupervisor>) -> Router
         .route("/gui-shell/{shell_id}", get(supervisor_forward))
         .route("/gui-shell/{shell_id}/", get(supervisor_forward))
         .route("/gui-shell/{shell_id}/{*rel}", get(supervisor_forward))
-        // No body-limit layer, matching the classic router's `/upload`: the
-        // host must not be a different size of pipe than serving directly.
+        // The host forwards the raw body; the agent's `/upload` enforces the cap.
         .route("/upload", post(supervisor_forward))
         // dev-plan/60 G5: /cloud push|pull teleports the whole workspace, so
         // under a host it is the host's to serve — no single agent's tree is
@@ -1497,6 +1559,13 @@ async fn supervisor_add_bot(
         )
             .into_response(),
     }
+}
+
+/// The catalogue's Agent Templates, for the host panel's picker — the panel
+/// used to ask for a template name with no way to see which exist. Same URL
+/// and token `/cloud get` would use, so what is listed is what installs.
+async fn supervisor_bot_templates() -> Response {
+    Json(crate::bots::install::templates().await).into_response()
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1899,7 +1968,10 @@ fn build_shell_router(
             .route("/chat/", get(serve_index))
             .route("/chat", get(serve_index))
             .route("/chat/ws", get(ws_handler))
-            .route("/chat/upload", post(serve_upload));
+            .route(
+                "/chat/upload",
+                post(serve_upload).layer(upload_body_limit()),
+            );
     }
 
     let mut router = router.with_state(state);
@@ -3183,6 +3255,42 @@ mod tests {
         assert!(!ok(&lo, None, Some("tok")), "a user's own --serve");
         assert!(!ok(&lo, Some("1"), None), "no per-launch token");
         assert!(!ok(&lo, Some("1"), Some("  ")), "blank token");
+    }
+
+    /// The env marks are the user's to set; a process the app did not spawn
+    /// (here: the test binary, whose parent is cargo) must not pass.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn env_marks_alone_do_not_make_a_desktop_agent() {
+        assert!(!super::parent_is_this_binary());
+    }
+
+    /// Positive control: the same binary as parent (the test binary running
+    /// itself, as the window runs `current_exe()`) does pass.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_child_of_this_binary_passes() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::tests::parent_probe",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("THCLAWS_PARENT_PROBE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("PARENT=true"), "{stdout}");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    #[ignore]
+    fn parent_probe() {
+        if std::env::var("THCLAWS_PARENT_PROBE").is_ok() {
+            println!("PARENT={}", super::parent_is_this_binary());
+        }
     }
 
     /// The host can name a shell's agent without asking the browser, which is

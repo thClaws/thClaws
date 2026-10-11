@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { basePath, botQuery, send, subscribe, type IPCMessage } from "../hooks/useIPC";
 import { currentBranding } from "../hooks/useBranding";
 import type { BotStatus } from "./BotRail";
@@ -13,6 +13,37 @@ import type { BotStatus } from "./BotRail";
 // chat request.
 
 type ActionResult = { log?: string[] };
+
+type Template = { slug: string; name: string; description: string };
+type Templates = { templates: Template[]; error?: string };
+
+/** The catalogue's Agent Templates, through the host (it holds the cloud URL
+ * and token `/cloud get` installs with). Same bridge split as `hostAction`. */
+async function fetchTemplates(): Promise<Templates> {
+  if (typeof window !== "undefined" && window.ipc) {
+    return new Promise<Templates>((resolve) => {
+      const off = subscribe((msg: IPCMessage) => {
+        if (msg.type !== "bots_templates_result") return;
+        off();
+        resolve({
+          templates: Array.isArray(msg.templates) ? (msg.templates as Template[]) : [],
+          error: msg.ok === false && typeof msg.error === "string" ? msg.error : undefined,
+        });
+      });
+      send({ type: "bots_templates" });
+    });
+  }
+  try {
+    const res = await fetch(`${basePath()}bots/templates${botQuery(null)}`);
+    const v = (await res.json()) as Record<string, unknown>;
+    return {
+      templates: Array.isArray(v.templates) ? (v.templates as Template[]) : [],
+      error: v.ok === false && typeof v.error === "string" ? v.error : undefined,
+    };
+  } catch (e) {
+    return { templates: [], error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 /**
  * One host mutation. In a browser it is an HTTP call to the host; on the
@@ -69,11 +100,27 @@ export function HostPanel({
   onClose: () => void;
   onChanged: () => void | Promise<unknown>;
 }) {
-  const [slug, setSlug] = useState("");
-  const [blankSlug, setBlankSlug] = useState("");
+  // One "add an agent" form: blank is the default — it needs only a name —
+  // and a template is picked from the catalogue's list, never typed. Two
+  // free-text boxes side by side read as "type a name here", and a name typed
+  // into the template box went off to the catalogue and came back a 404.
+  const [mode, setMode] = useState<"blank" | "template">("blank");
+  const [name, setName] = useState("");
+  const [template, setTemplate] = useState("");
+  const [templates, setTemplates] = useState<Templates | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [log, setLog] = useState<string[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    void fetchTemplates().then((t) => {
+      if (live) setTemplates(t);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -88,19 +135,16 @@ export function HostPanel({
     }
   };
 
-  const add = () =>
+  const canAdd = !busy && (mode === "blank" ? !!name.trim() : !!template);
+  const addAgent = () =>
     run(async () => {
-      const done = await hostAction("bots_add", slug.trim());
+      const done =
+        mode === "blank"
+          ? await hostAction("bots_add", name.trim(), false, true)
+          : await hostAction("bots_add", template);
       setLog(done.log ?? []);
-      setSlug("");
-    });
-
-  // A bot with no agent — the same as opening thClaws on a new folder.
-  const addBlank = () =>
-    run(async () => {
-      const done = await hostAction("bots_add", blankSlug.trim(), false, true);
-      setLog(done.log ?? []);
-      setBlankSlug("");
+      setName("");
+      setTemplate("");
     });
 
   const remove = (s: string) => run(() => hostAction("bots_remove", s));
@@ -160,47 +204,71 @@ export function HostPanel({
           ))}
         </ul>
 
-        <label className="block text-xs text-[var(--text-secondary)] mb-1">
-          Get from Agent Templates
-        </label>
-        <div className="flex gap-2">
-          <input
-            value={slug}
-            onChange={(e) => setSlug(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && slug.trim() && !busy) void add();
-            }}
-            placeholder="template name, e.g. hello-world"
-            className="flex-1 px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-primary)]"
-          />
-          <button
-            disabled={busy || !slug.trim()}
-            onClick={() => void add()}
-            className="px-3 py-1 rounded bg-[var(--accent)] text-[var(--accent-fg)] disabled:opacity-40"
+        <h3 className="font-semibold mb-2">Add an agent</h3>
+        <div className="flex gap-4 mb-2">
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="radio"
+              checked={mode === "blank"}
+              onChange={() => setMode("blank")}
+            />
+            Blank agent
+          </label>
+          <label
+            className={`flex items-center gap-1.5 ${
+              templates?.templates.length ? "cursor-pointer" : "opacity-50"
+            }`}
           >
-            {busy ? "Working…" : "Get"}
-          </button>
+            <input
+              type="radio"
+              checked={mode === "template"}
+              disabled={!templates?.templates.length}
+              onChange={() => setMode("template")}
+            />
+            From an Agent Template
+          </label>
         </div>
 
-        <label className="block text-xs text-[var(--text-secondary)] mt-4 mb-1">
-          Or start a blank agent
-        </label>
-        <div className="flex gap-2">
+        {mode === "blank" ? (
           <input
-            value={blankSlug}
-            onChange={(e) => setBlankSlug(e.target.value)}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && blankSlug.trim() && !busy) void addBlank();
+              if (e.key === "Enter" && canAdd) void addAgent();
             }}
-            placeholder="agent name, e.g. scratch"
-            className="flex-1 px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-primary)]"
+            placeholder="name for the new agent, e.g. scratch"
+            className="w-full px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-primary)]"
           />
-          <button
-            disabled={busy || !blankSlug.trim()}
-            onClick={() => void addBlank()}
-            className="px-3 py-1 rounded border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--bg-tertiary)]"
+        ) : (
+          <select
+            value={template}
+            onChange={(e) => setTemplate(e.target.value)}
+            className="w-full px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-primary)]"
           >
-            {busy ? "Working…" : "Create"}
+            <option value="">Choose a template…</option>
+            {templates?.templates.map((t) => (
+              <option key={t.slug} value={t.slug} title={t.description}>
+                {t.name} ({t.slug})
+              </option>
+            ))}
+          </select>
+        )}
+        <p className="mt-1 text-xs text-[var(--text-secondary)]">
+          {mode === "template"
+            ? (templates?.templates.find((t) => t.slug === template)?.description ??
+              "The template is copied into the workspace as a new agent.")
+            : templates && !templates.templates.length
+              ? "An empty agent, like opening thClaws on a new folder. No Agent Templates are available here yet."
+              : "An empty agent, like opening thClaws on a new folder."}
+        </p>
+
+        <div className="flex justify-end mt-3">
+          <button
+            disabled={!canAdd}
+            onClick={() => void addAgent()}
+            className="px-3 py-1 rounded bg-[var(--accent)] text-[var(--accent-fg)] disabled:opacity-40"
+          >
+            {busy ? "Working…" : mode === "blank" ? "Create agent" : "Add template"}
           </button>
         </div>
 

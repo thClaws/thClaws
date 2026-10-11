@@ -121,6 +121,15 @@ impl WebSearchTool {
     /// - `"serply"` → Serply (if key) → DDG
     /// - `"duckduckgo"` / `"ddg"` → DDG only (no fallback; user explicitly
     ///   chose the bottom of the chain)
+    /// A local search key, never on a gateway-locked install: signed out
+    /// there means no search, not the user's own Tavily/Brave account.
+    fn local_key(&self, var: &str) -> Option<String> {
+        if self.locked {
+            return None;
+        }
+        std::env::var(var).ok().filter(|k| !k.is_empty())
+    }
+
     fn resolve_candidates(&self) -> Vec<Backend> {
         let engine = self.engine.as_str();
         let mut out = Vec::new();
@@ -142,28 +151,22 @@ impl WebSearchTool {
         if try_tavily {
             if let Some(gw) = &self.gateway {
                 out.push(Backend::Tavily(gw.token.clone()));
-            } else if let Ok(key) = std::env::var("TAVILY_API_KEY") {
-                if !key.is_empty() {
-                    out.push(Backend::Tavily(key));
-                }
+            } else if let Some(key) = self.local_key("TAVILY_API_KEY") {
+                out.push(Backend::Tavily(key));
             }
         }
         if try_brave {
             if let Some(gw) = &self.gateway {
                 out.push(Backend::Brave(gw.token.clone()));
-            } else if let Ok(key) = std::env::var("BRAVE_SEARCH_API_KEY") {
-                if !key.is_empty() {
-                    out.push(Backend::Brave(key));
-                }
+            } else if let Some(key) = self.local_key("BRAVE_SEARCH_API_KEY") {
+                out.push(Backend::Brave(key));
             }
         }
         if try_serpapi {
             if let Some(gw) = &self.gateway {
                 out.push(Backend::SerpApi(gw.token.clone()));
-            } else if let Ok(key) = std::env::var("SERPAPI_API_KEY") {
-                if !key.is_empty() {
-                    out.push(Backend::SerpApi(key));
-                }
+            } else if let Some(key) = self.local_key("SERPAPI_API_KEY") {
+                out.push(Backend::SerpApi(key));
             }
         }
         // You.com is BYOK-only (no gateway route) — same direct-key path
@@ -652,7 +655,7 @@ impl Tool for WebSearchTool {
         );
         if candidates.is_empty() {
             return Err(Error::Tool(if self.locked {
-                "web search is not available on this deployment".into()
+                "web search on this deployment goes through its gateway — sign in first".into()
             } else {
                 "no search backends available — check engine config".into()
             }));
@@ -848,6 +851,24 @@ mod tests {
         assert!(chain(tool("youcom")).is_empty());
         std::env::remove_var("YDC_API_KEY");
         std::env::remove_var("SERPLY_API_KEY");
+    }
+
+    #[test]
+    fn a_signed_out_locked_install_never_uses_local_search_keys() {
+        let _e = scoped_env();
+        std::env::set_var("TAVILY_API_KEY", "t");
+        std::env::set_var("BRAVE_SEARCH_API_KEY", "b");
+        std::env::set_var("SERPAPI_API_KEY", "s");
+        let tool = WebSearchTool {
+            client: reqwest::Client::new(),
+            engine: "auto".to_string(),
+            gateway: None,
+            locked: true,
+        };
+        assert!(tool.resolve_candidates().is_empty());
+        std::env::remove_var("TAVILY_API_KEY");
+        std::env::remove_var("BRAVE_SEARCH_API_KEY");
+        std::env::remove_var("SERPAPI_API_KEY");
     }
 
     #[test]

@@ -237,6 +237,29 @@ pub async fn list_frame(addr: SocketAddr, token: &str, active: &str) -> String {
     serde_json::json!({ "type": "bots_list_result", "bots": bots, "active": active }).to_string()
 }
 
+/// The host's `/bots/templates`, as a `bots_templates_result` frame.
+pub async fn templates_frame(addr: SocketAddr, token: &str) -> String {
+    let url = format!("http://{addr}/bots/templates");
+    let v = match reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap_or_default()
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+    {
+        Ok(r) => r
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_else(|e| serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("host unreachable: {e}") }),
+    };
+    let mut v = v;
+    v["type"] = serde_json::json!("bots_templates_result");
+    v.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::tag;

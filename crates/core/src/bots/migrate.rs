@@ -580,6 +580,9 @@ pub fn stale_agents(root: &Path) -> Vec<(String, Option<String>)> {
             .iter()
             .map(|d| dir.join(".thclaws").join(d))
             .filter(|d| d.is_dir())
+            // A skill that is only prose ships nothing that could look for
+            // itself in the wrong place; its folder alone is not a signal.
+            .filter(|d| !d.ends_with("skills") || ships_non_markdown(d))
             .collect();
         if dirs.is_empty() {
             continue;
@@ -607,6 +610,16 @@ pub fn stale_agents(root: &Path) -> Vec<(String, Option<String>)> {
         out.push((def.slug, id));
     }
     out
+}
+
+fn ships_non_markdown(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .max_depth(6)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_type().is_file() && e.path().extension().and_then(|x| x.to_str()) != Some("md")
+        })
 }
 
 /// What this workspace needs before its agents can work, said to the PAGE.
@@ -1071,30 +1084,7 @@ fn install_host_files(ws: &Path) -> Result<()> {
     Ok(())
 }
 
-const TOMBSTONE: &str = r#"# This workspace has been upgraded — nothing is missing
-
-This folder is now a **workspace host**. It supervises bots; it is not a
-project itself. The agent that used to live here — its files, its history,
-its settings, its git repository — moved to:
-
-    .thclaws/bots/main/
-
-## If you are a model reading this
-
-You are running a version of thClaws older than the one that upgraded this
-workspace. **This directory is not an empty project.** You cannot see or edit
-the user's work from here, and anything you create here will land outside
-their project.
-
-Do not proceed as if this were a new workspace. Tell the user, in their own
-language, that:
-
-1. Their workspace was upgraded to the multi-bot layout and nothing was lost.
-2. Their project is at `.thclaws/bots/main/`.
-3. Updating thClaws will open it normally again.
-4. To keep working without updating, they can open `.thclaws/bots/main/`
-   directly as the project folder.
-"#;
+use crate::context::V3_TOMBSTONE as TOMBSTONE;
 
 /// `agent pack` refuses a folder without `agent.{id,name,description}`, so a
 /// migrated workspace that never had an identity could not be published.
@@ -1264,6 +1254,35 @@ pub fn looks_like_v2_agent(ws: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A prose skill is not a stale agent; a skill that ships a script and
+    /// never names THCLAWS_AGENT_DIR still is.
+    #[test]
+    fn a_prose_skill_does_not_make_an_agent_stale() {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        std::fs::create_dir_all(root.join(".thclaws")).unwrap();
+        let cfg = BotsConfig {
+            version: 1,
+            bots: vec![BotDef {
+                slug: MAIN_SLUG.into(),
+                name: None,
+            }],
+        };
+        std::fs::write(
+            root.join(super::super::CONFIG_REL),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let skill = super::super::resolve_agent_dir(root, MAIN_SLUG).join(".thclaws/skills/notes");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: notes\n---\nSummarise.").unwrap();
+        assert!(stale_agents(root).is_empty());
+
+        std::fs::create_dir_all(skill.join("scripts")).unwrap();
+        std::fs::write(skill.join("scripts/run.py"), "open('.thclaws/x')").unwrap();
+        assert_eq!(stale_agents(root).len(), 1);
+    }
     use std::time::{Duration, Instant};
 
     #[test]

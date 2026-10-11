@@ -988,6 +988,7 @@ impl WorkerState {
             self.tool_registry.remove("YouTubeTranscript");
             self.tool_registry.remove("WebScrape");
         }
+        self.apply_tool_filter();
         let prev_perm = self.agent.permission_mode;
         // `/thinking` and the sidebar selector both persist to settings
         // before ReloadConfig, so the reloaded config is the truth.
@@ -1036,7 +1037,22 @@ impl WorkerState {
     /// (`/reload` or a model swap). Saving folder instructions from
     /// the Settings menu emitted "system prompt rebuilt" but the new
     /// content didn't actually reach the model until a restart.
+    /// Settings' allow/deny lists, re-applied wherever tools can have been
+    /// registered since start. MCP tools arrive after the boot-time filter
+    /// (McpReady, `/mcp add`, connectors), so a `disallowedTools` entry for
+    /// `server__tool` used to be ignored on this surface.
+    fn apply_tool_filter(&mut self) {
+        let no_keep: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        self.tool_registry.apply_filter(
+            self.config.allowed_tools.as_deref(),
+            self.config.disallowed_tools.as_deref(),
+            &no_keep,
+        );
+    }
+
     pub fn rebuild_system_prompt(&mut self) {
+        // Before the factory snapshot below copies the registry to subagents.
+        self.apply_tool_filter();
         let mcp_instructions = crate::mcp::collect_mcp_instructions(&self.mcp_clients);
         self.system_prompt = build_system_prompt(
             &self.config,
@@ -2284,6 +2300,14 @@ async fn run_worker(
                 state.agent.clear_history();
                 state.session = Session::new(&state.config.model, state.cwd.to_string_lossy());
                 state.warned_file_size = false;
+                // The prompt was built once at start; memory written since
+                // (MemoryWrite, `# name:` notes), edited AGENTS.md and skills
+                // the agent wrote only reach the model when it is rebuilt.
+                let skills = crate::skills::SkillStore::discover();
+                if let Ok(mut store) = state.skill_store.lock() {
+                    *store = skills;
+                }
+                state.rebuild_system_prompt();
                 // New session = clean slate for plan state and the
                 // persistence path. Broadcasts `PlanUpdate(None)` so
                 // the sidebar dismisses if it was open.

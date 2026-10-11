@@ -1497,6 +1497,15 @@ fn run_gui_inner(
                     });
                     return;
                 }
+                if kind == "bots_templates" {
+                    let (addr, token) = (*host_addr, host_token.clone());
+                    let proxy_tpl = proxy_for_bots.clone();
+                    tokio::spawn(async move {
+                        let frame = crate::bots::desktop::templates_frame(addr, &token).await;
+                        let _ = proxy_tpl.send_event(UserEvent::Dispatch(frame));
+                    });
+                    return;
+                }
                 if matches!(kind, "bots_add" | "bots_remove" | "bots_restart") {
                     // Host mutations from the panel. Over the bridge rather
                     // than `fetch`, because the page's `/bots` fetch would go

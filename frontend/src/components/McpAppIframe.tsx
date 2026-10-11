@@ -182,14 +182,27 @@ function savePipRect(uri: string, rect: PipRect) {
   }
 }
 
+function isRemoteHttpPage(): boolean {
+  if (typeof window === "undefined") return false;
+  const { protocol, hostname } = window.location;
+  if (protocol !== "http:" && protocol !== "https:") return false;
+  return !["localhost", "127.0.0.1", "[::1]", "::1"].includes(hostname);
+}
+
 export function McpAppIframe({
   uri,
   html,
   parentToolName,
   toolResult,
-  allowSameOrigin = false,
+  allowSameOrigin: requestedSameOrigin = false,
   autoSize = false,
 }: Props) {
+  // On a hosted workspace the page shares its origin with the cloud web
+  // app (and its localStorage JWT), and "trusted" is a flag in a
+  // workspace file the agent can write — so a srcdoc widget never gets
+  // that origin there. The loopback preview servers that need it are
+  // unreachable from a remote browser anyway.
+  const allowSameOrigin = requestedSameOrigin && !isRemoteHttpPage();
   const [mode, setMode] = useState<DisplayMode>("inline");
   const [pipRect, setPipRect] = useState<PipRect>(() => loadPipRect(uri));
   // Honored only when autoSize === true. Falls back to the fixed

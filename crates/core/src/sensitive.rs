@@ -80,8 +80,11 @@ impl fmt::Debug for Span {
     }
 }
 
-// A bare 13-digit run; the checksum decides whether it is a real Thai ID.
-static RE_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d{13}").unwrap());
+// 13 digits, bare or in the printed 1-4-5-2-1 grouping with a space or dash
+// between groups (1-1007-00123-45-5); the checksum decides whether it is a
+// real Thai ID.
+static RE_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\d[ -]?\d{4}[ -]?\d{5}[ -]?\d{2}[ -]?\d").unwrap());
 // Thai mobile: 0[689] + 8 more digits; separators (space/dash) may fall between
 // any digits (0812345678, 081-234-5678, 08-1234-5678, +66 81 234 5678).
 static RE_PHONE: LazyLock<Regex> =
@@ -351,9 +354,16 @@ fn detect_inner(scan: &str, orig: &str, map: Option<&[usize]>, custom: &[String]
     };
 
     // ID: regex finds any 13-digit run, checksum filters to real IDs (kills FP).
-    for m in RE_ID.find_iter(scan) {
-        if thai_id_valid(m.as_str()) && !digit_adjacent(scan, m.start(), m.end()) {
+    // A rejected match can start on a digit just before the ID ("2566 1101…")
+    // and swallow its head, so retry one digit later instead of skipping past.
+    let mut at = 0;
+    while let Some(m) = RE_ID.find_at(scan, at) {
+        let digits: String = m.as_str().chars().filter(char::is_ascii_digit).collect();
+        if thai_id_valid(&digits) && !digit_adjacent(scan, m.start(), m.end()) {
             push(m.start(), m.end(), PiiType::ThaiId, &mut spans);
+            at = m.end();
+        } else {
+            at = m.start() + 1;
         }
     }
     let mut raw = Vec::new();
@@ -880,6 +890,35 @@ mod tests {
             .collect();
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].value, "1101700230708");
+    }
+
+    /// The printed card groups the digits 1-4-5-2-1; people copy it with
+    /// dashes or spaces, and those reached the model unmasked.
+    #[test]
+    fn detect_id_in_its_printed_grouping() {
+        let t = "บัตร 1-1017-00230-70-8 และ 3 1006 00445 63 5 แต่ไม่ใช่ 1-1017-00230-70-0";
+        let ids: Vec<_> = detect(t, &[])
+            .into_iter()
+            .filter(|s| s.kind == PiiType::ThaiId)
+            .map(|s| s.value)
+            .collect();
+        assert_eq!(ids, vec!["1-1017-00230-70-8", "3 1006 00445 63 5"]);
+    }
+
+    #[test]
+    fn detect_id_after_a_spaced_number() {
+        for t in [
+            "พ.ศ. 2566 1101700230708",
+            "โทร 0812345678 1101700230708",
+            "1 1101700230708",
+        ] {
+            let ids: Vec<_> = detect(t, &[])
+                .into_iter()
+                .filter(|s| s.kind == PiiType::ThaiId)
+                .map(|s| s.value)
+                .collect();
+            assert_eq!(ids, vec!["1101700230708"], "{t}");
+        }
     }
 
     #[test]

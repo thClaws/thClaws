@@ -1779,7 +1779,7 @@ pub fn locked_model_override(
     })
 }
 
-fn kind_is_reachable(cfg: &crate::config::AppConfig, kind: ProviderKind) -> bool {
+pub(crate) fn kind_is_reachable(cfg: &crate::config::AppConfig, kind: ProviderKind) -> bool {
     kind_has_credentials(Some(kind)) || thclaws_gateway::for_kind(cfg, kind).is_some()
 }
 

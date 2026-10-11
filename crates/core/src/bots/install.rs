@@ -64,16 +64,24 @@ pub async fn install(
     .await;
 
     if !outcome.ok {
+        let not_found = outcome.lines.iter().any(|l| l.contains("status 404"));
         if is_new {
             // Nothing of the user's is in there — leaving it would put an
             // empty or half-extracted folder on the shelf for the host UI to
             // show as a bot.
             let _ = std::fs::remove_dir_all(&dir);
         }
+        if not_found {
+            return Err(Error::Config(format!(
+                "There is no Agent Template named '{slug}'. Pick one from the list, or start \
+                 a blank agent to make an empty one with that name."
+            )));
+        }
         return Err(Error::Tool(outcome.lines.join("\n")));
     }
 
     seed_workspace_gateway_choice(workspace, &dir);
+    seed_workspace_model(workspace, &dir);
     let newly_registered = register(workspace, slug)?;
     Ok(Installed {
         slug: slug.to_string(),
@@ -81,6 +89,28 @@ pub async fn install(
         lines: outcome.lines,
         newly_registered,
     })
+}
+
+/// `{ok, templates: [{slug, name, description}]}` from the catalogue this
+/// workspace installs from, or `{ok: false, error}`. Errors are a value, not a
+/// status, so the panel can still offer a blank agent when it cannot list.
+pub async fn templates() -> serde_json::Value {
+    let url = crate::cloud::resolve_cloud_url(crate::cloud::persisted_url().as_deref(), None);
+    let client = crate::cloud::client::Client::new(&url, crate::cloud::token());
+    match client.list_agents(false).await {
+        Ok(list) => serde_json::json!({
+            "ok": true,
+            "templates": list
+                .into_iter()
+                .map(|a| serde_json::json!({
+                    "slug": a.slug,
+                    "name": a.name,
+                    "description": a.description,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e, "templates": [] }),
+    }
 }
 
 /// Add a bot with no agent in it — the same thing as opening thClaws on a
@@ -116,6 +146,7 @@ pub fn create_blank(workspace: &Path, slug: &str) -> Result<Installed> {
     // already exist" and skip the documented template.
     crate::config::ProjectConfig::ensure_default_exists_in(&dir);
     seed_workspace_gateway_choice(workspace, &dir);
+    seed_workspace_model(workspace, &dir);
     let newly_registered = register(workspace, slug)?;
     Ok(Installed {
         slug: slug.to_string(),
@@ -207,6 +238,100 @@ fn seed_workspace_gateway_choice(workspace: &Path, dest: &Path) {
     }
 }
 
+/// Put a freshly added bot on the model its workspace is using, unless the
+/// bundle pins one this install can reach.
+///
+/// A catalogue pin is the author's choice for their own install: book-author
+/// pins `deepseek-v4-pro`, which an org-locked tenant does not route, and a
+/// blank agent would otherwise open on the credential-aware default rather
+/// than the model the user picked. Copied at install, never afterwards, like
+/// the gateway choice.
+fn seed_workspace_model(workspace: &Path, dest: &Path) {
+    let model_in = |path: PathBuf| -> Option<String> {
+        let v = std::fs::read(path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())?;
+        v.get("model")
+            .and_then(|m| m.as_str())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+    };
+    // Same order as the gateway seed: host root, then the original agent a
+    // migration moved the user's choice into, then the user level — where
+    // a hosted runner's HOSTED_DEFAULT_MODEL lands.
+    let current = model_in(workspace.join(".thclaws/settings.json"))
+        .or_else(|| {
+            BotsConfig::load(workspace)
+                .ok()
+                .and_then(|c| c.bots.first().map(|b| b.slug.clone()))
+                .map(|slug| bot_dir(workspace, &slug).join(".thclaws/settings.json"))
+                .and_then(model_in)
+        })
+        .or_else(|| crate::config::AppConfig::load().ok().map(|c| c.model));
+    let Some(current) = current else {
+        return;
+    };
+    let path = dest.join(".thclaws/settings.json");
+    let mut base = std::fs::read(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(obj) = base.as_object_mut() else {
+        return;
+    };
+    let pinned = obj
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+    let gateway = obj.get("gatewayProxy").and_then(|v| v.as_bool()) == Some(true);
+    if !takes_workspace_model(pinned.as_deref(), &current, |m| model_reachable(m, gateway)) {
+        return;
+    }
+    obj.insert("model".into(), serde_json::json!(current));
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if let Ok(body) = serde_json::to_string_pretty(obj) {
+        let _ = std::fs::write(&path, body);
+    }
+}
+
+/// Whether a new bot should take the workspace's `current` model: always
+/// when the bundle pins none, never when its pin is reachable here.
+fn takes_workspace_model(
+    pinned: Option<&str>,
+    current: &str,
+    reachable: impl Fn(&str) -> bool,
+) -> bool {
+    match pinned {
+        None => true,
+        Some(p) if p == current => false,
+        Some(p) => !reachable(p),
+    }
+}
+
+/// Can this install send `model` a request? The host's config, with the
+/// gateway routes the bot was just given — the host root a migration left
+/// minimal carries no `gatewayProxy`, so its own reading would say BYOK.
+/// An unreadable config keeps the pin: not knowing is not "unreachable".
+fn model_reachable(model: &str, gateway: bool) -> bool {
+    let Some(kind) = crate::providers::ProviderKind::detect(model) else {
+        return false;
+    };
+    let Ok(mut cfg) = crate::config::AppConfig::load() else {
+        return true;
+    };
+    if gateway && cfg.gateway_use_for.is_empty() {
+        cfg.gateway_use_for = crate::shared::gateway_routed_providers();
+    }
+    crate::providers::kind_is_reachable(&cfg, kind)
+}
+
 /// Add `slug` to `.thclaws/bots.json`. `true` when it was not already there.
 pub fn register(workspace: &Path, slug: &str) -> Result<bool> {
     super::validate_slug(slug)?;
@@ -290,6 +415,62 @@ mod tests {
             cfg.bots.iter().map(|b| b.slug.as_str()).collect::<Vec<_>>(),
             vec!["main", "scratch"]
         );
+    }
+
+    #[test]
+    fn a_new_bot_runs_on_the_model_the_workspace_is_using() {
+        let ws = v3_workspace();
+        let main = bot_dir(ws.path(), "main");
+        std::fs::create_dir_all(main.join(".thclaws")).unwrap();
+        std::fs::write(
+            main.join(".thclaws/settings.json"),
+            r#"{"model":"sis/qwen3.8-flash"}"#,
+        )
+        .unwrap();
+        let model_of = |dir: &Path| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(dir.join(".thclaws/settings.json")).unwrap(),
+            )
+            .unwrap()["model"]
+                .clone()
+        };
+
+        // The blank template says `"model": null` — no choice in it.
+        let blank = create_blank(ws.path(), "scratch").unwrap();
+        assert_eq!(model_of(&blank.dir), "sis/qwen3.8-flash");
+
+        // A bundle with no pin, and one whose pin is the same model.
+        for (slug, body) in [
+            ("plain", r#"{"x":1}"#),
+            ("same", r#"{"model":"sis/qwen3.8-flash"}"#),
+        ] {
+            let dir = bot_dir(ws.path(), slug);
+            std::fs::create_dir_all(dir.join(".thclaws")).unwrap();
+            std::fs::write(dir.join(".thclaws/settings.json"), body).unwrap();
+            seed_workspace_model(ws.path(), &dir);
+            assert_eq!(model_of(&dir), "sis/qwen3.8-flash", "{slug}");
+        }
+    }
+
+    #[test]
+    fn a_reachable_pin_is_kept_and_an_unreachable_one_is_not() {
+        let reach = |m: &str| m == "deepseek-v4-pro";
+        assert!(takes_workspace_model(None, "sis/qwen3.8-flash", reach));
+        assert!(!takes_workspace_model(
+            Some("deepseek-v4-pro"),
+            "sis/qwen3.8-flash",
+            reach
+        ));
+        assert!(takes_workspace_model(
+            Some("claude-opus-4-1"),
+            "sis/qwen3.8-flash",
+            reach
+        ));
+        assert!(!takes_workspace_model(
+            Some("sis/qwen3.8-flash"),
+            "sis/qwen3.8-flash",
+            |_| false
+        ));
     }
 
     fn write_settings(path: &Path, body: &str) {

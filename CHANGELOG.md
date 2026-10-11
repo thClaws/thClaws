@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.141.0] — 2026-10-10
+
+**A release about consent and boundaries.** Approvals — for spawned commands, symlinked writes, shares, and served workspaces — now land where the settings say they should, and a handful of server-side stumbles got fixed.
+
+### Changed
+
+- **`--serve` policy is tightened and unified.** With `allow_serve=false` a `--serve` host is now refused even on loopback, and the desktop exemption only applies when the desktop app is the actual parent.
+
+### Fixed
+
+- **Writes through an approved symlink open exactly what was approved.** The landing is resolved once, by the sandbox check, and Write opens that path; the final open still refuses a link swapped in afterwards. Thanks @mikemikimike ([#223](https://github.com/thClaws/thClaws/pull/223)).
+- **A gateway-locked install never falls back to local keys.** An unpriced model, WebSearch, Gemini TTS and HAL are refused with a sign-in message instead of quietly using a key found on the machine.
+- **MCP spawn approvals are keyed on the whole command.** The allowlist an MCP tool needs to launch a process now matches the full command line, a bare legacy allowlist entry still covers the user's own servers, and a refused launch names the whole command it blocked.
+- **New agents inherit the workspace instructions and pick up new skills.** An agent now starts from the workspace's instructions and picks up skills that were registered after the engine loaded.
+- **Thai ID numbers are masked no matter how they're written.** IDs printed with dashes or spaces, or appearing right after a spaced number, are now caught and masked by the sensitive-data scanner.
+- **Subagents follow the live permission mode.** A subagent now obeys the current approval mode rather than the one it was started with.
+- **Tools registered after boot respect `disallowedTools`.** A tool added after the session started could still run when the session had forbidden it; the restriction now covers late-registered tools too.
+- **Enterprise workspace sharing is refused, not just hidden.** The share API now refuses on Enterprise Editions and old shares stay revocable, matching the no-sharing policy instead of silently reaching it.
+- **`/talk` no longer opens the relay socket on Enterprise Editions.** The endpoint now stays closed upfront rather than opening a socket it should never use.
+- **Renaming a session in the GUI does it for real.** The `/rename` command now sets the session's stored name, not just the copy shown on screen.
+- **A reloaded tab gets back the approval it was waiting on.** If a served workspace is reloaded while an approval is pending, the pending approval is restored instead of being lost.
+- **Uploads over 2 MB no longer fail.** Larger file uploads to a served workspace used to break; they now go through.
+- **A template never wipes a starting multi-agent workspace.** When a hosted workspace already has several agents, applying a template no longer clears them.
+
 ## [0.140.0] — 2026-10-06
 
 **A release about first launches.** Two things that only went wrong the first

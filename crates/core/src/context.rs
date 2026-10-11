@@ -184,6 +184,38 @@ fn load_claude_md_compat_flag() -> bool {
 /// (user-level Claude Code memory). Default behavior (`false`) skips
 /// those — the user's Claude Code identity isn't generic agent
 /// instructions and shouldn't bleed into thClaws's prompt.
+/// The AGENTS.md a v3 upgrade (`bots::migrate`) leaves in the workspace
+/// root for old binaries. Kept here because the instruction walk skips it
+/// in every build, and `bots` only exists with the `gui` feature.
+pub(crate) const V3_TOMBSTONE: &str = r#"# This workspace has been upgraded — nothing is missing
+
+This folder is now a **workspace host**. It supervises bots; it is not a
+project itself. The agent that used to live here — its files, its history,
+its settings, its git repository — moved to:
+
+    .thclaws/bots/main/
+
+## If you are a model reading this
+
+You are running a version of thClaws older than the one that upgraded this
+workspace. **This directory is not an empty project.** You cannot see or edit
+the user's work from here, and anything you create here will land outside
+their project.
+
+Do not proceed as if this were a new workspace. Tell the user, in their own
+language, that:
+
+1. Their workspace was upgraded to the multi-bot layout and nothing was lost.
+2. Their project is at `.thclaws/bots/main/`.
+3. Updating thClaws will open it normally again.
+4. To keep working without updating, they can open `.thclaws/bots/main/`
+   directly as the project folder.
+"#;
+
+fn is_v3_tombstone(contents: &str) -> bool {
+    contents == V3_TOMBSTONE
+}
+
 /// `<…>/.thclaws/bots` — the shelf a bot sits on. Reaching it while walking
 /// up means the walk has left the bot and entered the host.
 fn is_bot_shelf(dir: &Path) -> bool {
@@ -249,12 +281,25 @@ pub fn find_claude_md_with(start: &Path, claude_md_compat: bool) -> Option<Strin
     let mut ancestor_groups: Vec<Vec<String>> = Vec::new();
     let mut cur = Some(start);
     while let Some(dir) = cur {
-        // dev-plan/59: a bot lives at `<ws>/.thclaws/bots/<slug>/`, and above
-        // it is the host — someone else's tree. Without this stop, every bot
-        // would load the host's AGENTS.md, which after a v2→v3 migration is
-        // the tombstone addressed to an OLD binary: every migrated bot would
-        // open by telling its user the workspace needs upgrading.
+        // dev-plan/59: a bot lives at `<ws>/.thclaws/bots/<slug>/`. Above the
+        // shelf only the workspace root itself counts: since dev-plan/61 its
+        // AGENTS.md is the user's Folder instructions, shared by every agent
+        // (Settings → Instructions → Folder writes it there). A v3 tombstone
+        // left for old binaries is skipped, and nothing above the root loads.
         if is_bot_shelf(dir) {
+            if let Some(ws) = dir.parent().and_then(|t| t.parent()) {
+                let mut group: Vec<String> = Vec::new();
+                for name in ["CLAUDE.md", "AGENTS.md"] {
+                    if let Ok(contents) = std::fs::read_to_string(ws.join(name)) {
+                        if !is_v3_tombstone(&contents) {
+                            group.push(contents);
+                        }
+                    }
+                }
+                if !group.is_empty() {
+                    ancestor_groups.push(group);
+                }
+            }
             break;
         }
         let mut group: Vec<String> = Vec::new();
@@ -524,34 +569,29 @@ pub fn scan_claude_md_oversize(start: &Path) -> Vec<ClaudeMdOversize> {
 mod tests {
 
     /// dev-plan/59: the ancestor walk must stop at the shelf. A bot at
-    /// `<ws>/.thclaws/bots/<slug>/` is not part of the host's project, and
-    /// the host's AGENTS.md after a migration is a tombstone addressed to an
-    /// older binary — loading it would make every migrated bot open by
-    /// telling its user the workspace is broken.
+    /// Since dev-plan/61 the workspace root's AGENTS.md is the user's Folder
+    /// instructions and every bot loads it; a v3 tombstone addressed to old
+    /// binaries never does, and nothing above the root leaks in.
     #[test]
-    fn a_bot_does_not_inherit_the_hosts_instructions() {
+    fn a_bot_inherits_the_workspace_root_but_not_a_tombstone() {
         let ws = tempfile::tempdir().unwrap();
         let bot = ws.path().join(".thclaws/bots/main");
         std::fs::create_dir_all(&bot).unwrap();
-        std::fs::write(
-            ws.path().join("AGENTS.md"),
-            "TOMBSTONE: this workspace has been upgraded",
-        )
-        .unwrap();
         std::fs::write(bot.join("AGENTS.md"), "I am the research bot.").unwrap();
+        std::fs::write(ws.path().join("AGENTS.md"), "Discounts cap at 10%.").unwrap();
 
         let loaded = find_claude_md_with(&bot, false).unwrap_or_default();
         assert!(loaded.contains("I am the research bot."), "{loaded}");
-        assert!(
-            !loaded.contains("TOMBSTONE"),
-            "the host's instructions leaked into a bot:\n{loaded}"
-        );
+        assert!(loaded.contains("Discounts cap at 10%."), "{loaded}");
 
-        // A bot with no instructions of its own inherits nothing either.
-        let bare = ws.path().join(".thclaws/bots/bare");
-        std::fs::create_dir_all(&bare).unwrap();
-        let loaded = find_claude_md_with(&bare, false).unwrap_or_default();
-        assert!(!loaded.contains("TOMBSTONE"), "{loaded}");
+        let tomb = V3_TOMBSTONE;
+        std::fs::write(ws.path().join("AGENTS.md"), tomb).unwrap();
+        let loaded = find_claude_md_with(&bot, false).unwrap_or_default();
+        assert!(loaded.contains("I am the research bot."), "{loaded}");
+        assert!(
+            !loaded.contains(tomb),
+            "a tombstone leaked into a bot:\n{loaded}"
+        );
     }
 
     /// The stop is specific to the shelf: an ordinary `bots/` folder in

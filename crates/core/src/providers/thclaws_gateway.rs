@@ -333,13 +333,10 @@ mod tests {
         assert_eq!(base_url_for(None, Some("  ".into())), GATEWAY_BASE_URL);
         assert_eq!(base_url_for(None, None), GATEWAY_BASE_URL);
     }
-    use std::sync::Mutex;
 
-    // Tests below mutate the process-global `THCLAWS_GATEWAY_*` env
-    // vars. Cargo runs lib tests in parallel; this mutex serialises
-    // the env-touching tests so a sibling test reading the resolved
-    // value mid-mutation doesn't see ghost state.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Tests below mutate the process-global `THCLAWS_GATEWAY_*` env vars;
+    // they share the crate-wide env lock with every other test that does
+    // (repl's build_provider tests set THCLAWS_GATEWAY_PROVIDERS).
 
     /// SIS asked for the same usage reporting they saw on our side, which
     /// means their Qwen server has to ride the METERED path. Three of the
@@ -352,6 +349,7 @@ mod tests {
     /// This pins the segment; the arm that consumes it is exercised live.
     #[test]
     fn sis_is_routable_through_the_gateway() {
+        let _g = crate::kms::test_env_lock();
         assert_eq!(provider_segment(ProviderKind::Sis), Some("sis"));
         // The segment name is the gateway's route path, so a rename on
         // either side silently stops metering.
@@ -379,7 +377,7 @@ mod tests {
 
     #[test]
     fn byok_beats_gateway_overlay() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = crate::kms::test_env_lock();
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw-test-key");
         std::env::set_var("DEEPSEEK_API_KEY", "sk-own-key");
         let c = cfg(&["deepseek"]);
@@ -397,7 +395,7 @@ mod tests {
 
     #[test]
     fn shared_agent_mode_keeps_gateway_forced() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = crate::kms::test_env_lock();
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw-test-key");
         std::env::set_var("ZAI_API_KEY", "sk-own-key");
         std::env::set_var("THCLAWS_SHARED_AGENT_DIR", "/tmp/shared-agent-test");
@@ -474,7 +472,7 @@ mod tests {
 
     #[test]
     fn is_active_requires_toggle_and_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
         assert!(is_active(&cfg(&["openai"])), "toggle + key → active");
         assert!(!is_active(&cfg(&[])), "no provider toggled → inactive");
@@ -488,7 +486,7 @@ mod tests {
 
     #[test]
     fn hides_unpriced_models_requires_toggle_and_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
         let cfg_on = cfg(&["dashscope", "google"]);
         assert!(hides_unpriced_models(&cfg_on, "dashscope"));
@@ -510,7 +508,7 @@ mod tests {
 
     #[test]
     fn for_kind_returns_none_when_provider_not_enabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         let config = cfg(&["openai"]);
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
         let out = for_kind(&config, ProviderKind::Gemini);
@@ -520,7 +518,7 @@ mod tests {
 
     #[test]
     fn for_kind_returns_none_when_access_key_missing() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         let config = cfg(&["openai"]);
         std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
         let out = for_kind(&config, ProviderKind::OpenAI);
@@ -535,7 +533,7 @@ mod tests {
 
     #[test]
     fn for_kind_uses_fixed_base_url_by_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         let config = cfg(&["openai", "anthropic"]);
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
         std::env::remove_var("THCLAWS_GATEWAY_BASE_URL");
@@ -550,7 +548,7 @@ mod tests {
 
     #[test]
     fn for_kind_honors_base_url_env_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::kms::test_env_lock();
         let config = cfg(&["openrouter"]);
         std::env::set_var("THCLAWS_GATEWAY_API_KEY", "k");
         std::env::set_var(

@@ -4835,9 +4835,11 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
     // Gateway-locked install (THCLAWS_GATEWAY_PROVIDERS set): the same rule,
     // keyed on the providers that install's gateway actually routes — so
     // `/model` cannot reach the Agent SDK, a local runtime or any upstream
-    // the gateway does not serve.
+    // the gateway does not serve. Keyed on the per-model overlay, not just
+    // `for_kind`: an unpriced model has no overlay and would otherwise fall
+    // through to the branches below on a local key, off the gateway.
     if crate::shared::gateway_providers_locked()
-        && crate::providers::thclaws_gateway::for_kind(config, kind).is_none()
+        && crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind).is_none()
     {
         return Err(crate::error::Error::Config(format!(
             "'{}' is not available on this deployment — only its gateway's models can be used",
@@ -16356,6 +16358,40 @@ mod tests {
     /// `std::env::var(name).is_ok()` returns true for empty values. Still
     /// load-bearing: `provider_has_credentials` gates that switch.
     /// Trace: https://github.com/thClaws/thClaws (screenshot in Thai)
+    #[test]
+    fn a_locked_install_refuses_an_unpriced_model_on_a_local_key() {
+        let _guard = crate::kms::test_env_lock();
+        let vars = [
+            "THCLAWS_GATEWAY_PROVIDERS",
+            "THCLAWS_GATEWAY_API_KEY",
+            "DASHSCOPE_API_KEY",
+        ];
+        let saved: Vec<_> = vars.iter().map(|v| std::env::var(v).ok()).collect();
+        std::env::set_var("THCLAWS_GATEWAY_PROVIDERS", "dashscope");
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_test");
+        std::env::set_var("DASHSCOPE_API_KEY", "sk-local");
+
+        let mut cfg = AppConfig::default();
+        cfg.gateway_use_for = vec!["dashscope".into()];
+        cfg.model = "dashscope/ccai-pro".into();
+        let unpriced = build_provider(&cfg).map(|_| ());
+        cfg.model = "dashscope/deepseek-v3.2".into();
+        let priced = build_provider(&cfg).map(|_| ());
+
+        for (v, old) in vars.iter().zip(saved) {
+            match old {
+                Some(x) => std::env::set_var(v, x),
+                None => std::env::remove_var(v),
+            }
+        }
+        let err = unpriced.expect_err("unpriced model must not build on a locked install");
+        assert!(
+            format!("{err}").contains("not available on this deployment"),
+            "{err}"
+        );
+        priced.expect("a priced model routes through the gateway");
+    }
+
     #[test]
     fn empty_env_var_treated_as_unset() {
         let _guard = crate::kms::test_env_lock();

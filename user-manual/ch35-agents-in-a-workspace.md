@@ -37,9 +37,9 @@ not.**
 | Shared by every agent | Kept per agent |
 |---|---|
 | Every file in the project — the agent's working directory is the workspace root | `AGENTS.md` and `CLAUDE.md` — its instructions |
-| The git repository | `settings.json` — its provider, model, permission mode, feature toggles |
-| | Sessions and conversation history |
-| | Knowledge bases ([chapter 9](ch09-knowledge-bases-kms.md)) |
+| The git repository, if there is one | `settings.json` — its provider, model, permission mode, feature toggles |
+| Project knowledge bases ([chapter 9](ch09-knowledge-bases-kms.md)) | Sessions and conversation history |
+| Memory ([chapter 8](ch08-memory-and-agents-md.md)) | Its skills and MCP servers |
 | | Its browser profile, including logins ([chapter 28](ch28-browser-automation.md)) |
 | | `manifest.json` — the Agent Template it came from |
 
@@ -94,8 +94,9 @@ thclaws bots remove <slug>           # unlist it; the folder stays on disk
 thclaws bots remove <slug> --purge   # and delete its folder
 ```
 
-Without `--purge` nothing is lost — sessions, knowledge bases and browser
-logins stay where they are, and re-adding the agent picks them up again.
+Without `--purge` nothing is lost — sessions and browser logins stay in the
+agent's folder. Adding the same Agent Template again picks them up; a blank
+agent's name stays taken while its folder is there.
 
 ## How it runs
 
@@ -146,7 +147,7 @@ thclaws bots unmigrate
 - **A `.thclaws/settings.json` that fails to parse makes every opt-in flag read
   as off**, silently, for that agent only. If a feature refuses to switch on
   for one agent but works for another, check that agent's file is valid JSON.
-- **An agent's own folder is its working directory**, while your files are at
-  the workspace root one level up. Tools that take an absolute path are
-  unambiguous; a bare relative path is resolved against the agent's folder, so
-  say where you mean when it matters.
+- **A relative path means the workspace root** for file tools and shell
+  commands alike — except `.thclaws/…`, which a file tool resolves in the
+  agent's own folder (a shell reaches that folder through
+  `$THCLAWS_AGENT_DIR`).

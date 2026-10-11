@@ -816,6 +816,22 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             // Every ready, not once: BotShell remounts App per bot and a
             // frame sent before the new App subscribes is lost.
             (ctx.dispatch)(crate::branding::payload().to_string());
+            // Same for a pending approval: the WS connect replays it once,
+            // before the remounted App's modal subscribes, and the turn then
+            // waits forever. The modal drops ids it already holds.
+            for req in ctx.approver.unresolved_requests() {
+                (ctx.dispatch)(
+                    serde_json::json!({
+                        "type": "approval_request",
+                        "id": req.id,
+                        "tool_name": req.tool_name,
+                        "input": req.input,
+                        "summary": req.summary,
+                        "originator": req.originator,
+                    })
+                    .to_string(),
+                );
+            }
             let dispatch = ctx.dispatch.clone();
             crate::desktop_update::listen(
                 ctx.viewer_id,

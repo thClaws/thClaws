@@ -95,6 +95,9 @@ fn current_mode_slot() -> &'static Mutex<PermissionMode> {
     SLOT.get_or_init(|| Mutex::new(PermissionMode::default()))
 }
 
+/// `ApprovalRequest::tool_name` of an MCP stdio spawn prompt.
+pub const MCP_SPAWN_TOOL: &str = "MCP server spawn";
+
 /// Snapshot of the active mode. Cheap — just a Mutex read.
 pub fn current_mode() -> PermissionMode {
     current_mode_slot()
@@ -110,6 +113,17 @@ pub fn set_current_mode(mode: PermissionMode) {
     if let Ok(mut g) = current_mode_slot().lock() {
         *g = mode;
     }
+    MODE_SET.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+static MODE_SET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The active mode once anything has set it, else `None` (a bare process —
+/// headless runs, tests — where the slot still holds its `Ask` default).
+pub fn live_mode() -> Option<PermissionMode> {
+    MODE_SET
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(current_mode)
 }
 
 /// Stash for "the mode we were in before EnterPlanMode flipped us into
@@ -341,7 +355,9 @@ impl ApprovalSink for ReplApprover {
     }
 
     async fn approve(&self, req: &ApprovalRequest) -> ApprovalDecision {
-        if self.session_allowed.load(Ordering::Relaxed) {
+        // "Allow for session" covers tool calls, not launching a new
+        // program: an MCP spawn always reaches the user.
+        if self.session_allowed.load(Ordering::Relaxed) && req.tool_name != MCP_SPAWN_TOOL {
             return ApprovalDecision::Allow;
         }
         let preview = req.summary.clone().unwrap_or_else(|| {
@@ -366,7 +382,9 @@ impl ApprovalSink for ReplApprover {
         match answer.as_str() {
             "y" | "yes" => ApprovalDecision::Allow,
             "yolo" => {
-                self.session_allowed.store(true, Ordering::Relaxed);
+                if req.tool_name != MCP_SPAWN_TOOL {
+                    self.session_allowed.store(true, Ordering::Relaxed);
+                }
                 ApprovalDecision::Allow
             }
             _ => ApprovalDecision::Deny,
@@ -462,7 +480,9 @@ impl ApprovalSink for GuiApprover {
     }
 
     async fn approve(&self, req: &ApprovalRequest) -> ApprovalDecision {
-        if self.session_allowed.load(Ordering::Relaxed) {
+        // "Allow for session" covers tool calls, not launching a new
+        // program: an MCP spawn always reaches the user.
+        if self.session_allowed.load(Ordering::Relaxed) && req.tool_name != MCP_SPAWN_TOOL {
             return ApprovalDecision::Allow;
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -491,7 +511,9 @@ impl ApprovalSink for GuiApprover {
         }
         match resp_rx.await {
             Ok(ApprovalDecision::AllowForSession) => {
-                self.session_allowed.store(true, Ordering::Relaxed);
+                if req.tool_name != MCP_SPAWN_TOOL {
+                    self.session_allowed.store(true, Ordering::Relaxed);
+                }
                 ApprovalDecision::Allow
             }
             Ok(d) => d,

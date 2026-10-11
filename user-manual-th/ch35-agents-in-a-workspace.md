@@ -36,9 +36,9 @@ my-project/                  ← ไฟล์ของคุณ ทุก agent 
 | ทุก agent ใช้ร่วมกัน | แยกของใครของมัน |
 |---|---|
 | ไฟล์ทุกไฟล์ในโปรเจกต์ — working directory ของ agent คือรากของ workspace | `AGENTS.md` และ `CLAUDE.md` — คำสั่งประจำตัว |
-| git repository | `settings.json` — provider, model, โหมด permission, สวิตช์ฟีเจอร์ |
-| | เซสชันและประวัติบทสนทนา |
-| | knowledge base ([บทที่ 9](ch09-knowledge-bases-kms.md)) |
+| git repository (ถ้ามี) | `settings.json` — provider, model, โหมด permission, สวิตช์ฟีเจอร์ |
+| knowledge base ของโปรเจกต์ ([บทที่ 9](ch09-knowledge-bases-kms.md)) | เซสชันและประวัติบทสนทนา |
+| memory ([บทที่ 8](ch08-memory-and-agents-md.md)) | skill และ MCP server ของมัน |
 | | โปรไฟล์ browser รวมถึงการล็อกอินที่ค้างไว้ ([บทที่ 28](ch28-browser-automation.md)) |
 | | `manifest.json` — Agent Template ที่มันมาจาก |
 
@@ -92,8 +92,9 @@ thclaws bots remove <slug>           # ถอดออกจากทะเบ�
 thclaws bots remove <slug> --purge   # ลบโฟลเดอร์ทิ้งด้วย
 ```
 
-ถ้าไม่ใส่ `--purge` จะไม่มีอะไรหาย เซสชัน knowledge base และการล็อกอินของ
-browser ยังอยู่ที่เดิม และถ้าเพิ่ม agent ตัวเดิมกลับเข้ามาก็จะได้ของเดิมคืน
+ถ้าไม่ใส่ `--purge` จะไม่มีอะไรหาย เซสชันและการล็อกอินของ browser ยังอยู่ใน
+โฟลเดอร์ของ agent ถ้าเพิ่ม Agent Template ตัวเดิมกลับเข้ามาจะได้ของเดิมคืน ส่วน
+agent เปล่าจะใช้ชื่อเดิมซ้ำไม่ได้ตราบที่โฟลเดอร์ยังอยู่
 
 ## มันรันยังไง
 
@@ -143,7 +144,6 @@ thclaws bots unmigrate
 - **`.thclaws/settings.json` ที่ parse ไม่ผ่านจะทำให้ทุกสวิตช์อ่านได้เป็นปิด**
   โดยไม่มีคำเตือน และมีผลเฉพาะ agent ตัวนั้น ถ้าฟีเจอร์หนึ่งเปิดไม่ติดกับ
   agent ตัวหนึ่งแต่ตัวอื่นใช้ได้ ให้ตรวจก่อนว่าไฟล์ของตัวนั้นเป็น JSON ที่ถูกต้อง
-- **โฟลเดอร์ของ agent คือ working directory ของมัน** ขณะที่ไฟล์ของคุณอยู่ที่
-  รากของ workspace ซึ่งสูงขึ้นไปหนึ่งชั้น เครื่องมือที่รับพาธเต็มจะไม่กำกวม
-  ส่วนพาธสัมพัทธ์เปล่า ๆ จะถูกตีความเทียบกับโฟลเดอร์ของ agent ฉะนั้นเวลาสำคัญ
-  ให้ระบุให้ชัดว่าหมายถึงที่ไหน
+- **พาธสัมพัทธ์หมายถึงรากของ workspace** ทั้งเครื่องมือไฟล์และคำสั่ง shell —
+  ยกเว้น `.thclaws/…` ที่เครื่องมือไฟล์ตีความในโฟลเดอร์ของ agent เอง (shell
+  เข้าโฟลเดอร์นั้นผ่าน `$THCLAWS_AGENT_DIR`)

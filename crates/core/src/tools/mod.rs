@@ -701,9 +701,11 @@ mod tests {
     /// Process-wide lock to serialize env-var manipulation across the
     /// requires_env / tool_defs filter tests. Same pattern as
     /// `search::tests::env_lock`.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    // The crate-wide lock: a module-local one did not serialise against the
+    // HAL/gateway tests in config, web and shared_session, which flip the
+    // same variables (HAL_API_KEY, THCLAWS_USES_GATEWAY).
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::kms::test_env_lock()
     }
 
     /// RAII guard that restores an env var to its prior value on drop.
@@ -758,7 +760,7 @@ mod tests {
 
     #[test]
     fn tool_defs_are_sorted_and_complete() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         // HAL tools should be filtered from the default list when
         // HAL_API_KEY is unset. Force-clear so a local export doesn't
         // make the snapshot flaky.
@@ -835,7 +837,7 @@ mod tests {
 
     #[test]
     fn requires_env_default_empty_means_always_visible() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let _hal = EnvGuard::new("HAL_API_KEY");
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(StubTool {
@@ -848,7 +850,7 @@ mod tests {
 
     #[test]
     fn requires_env_filter_excludes_when_unset() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let _key = EnvGuard::new("FAKE_TEST_KEY_UNSET");
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(StubTool {
@@ -864,7 +866,7 @@ mod tests {
 
     #[test]
     fn requires_env_filter_includes_when_set() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let key = EnvGuard::new("FAKE_TEST_KEY_PRESENT");
         key.set("any-non-empty-value");
         let mut reg = ToolRegistry::new();
@@ -878,7 +880,7 @@ mod tests {
 
     #[test]
     fn requires_env_gateway_served_key_visible_when_gateway_active() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         // HAL_API_KEY is gateway-served: with no local key but the gateway
         // active, a tool requiring it stays visible (the gateway injects the
         // real key). Uses the env signal — THCLAWS_USES_GATEWAY short-circuits
@@ -900,7 +902,7 @@ mod tests {
 
     #[test]
     fn requires_env_treats_empty_string_as_unset() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let key = EnvGuard::new("FAKE_TEST_KEY_EMPTY");
         key.set(""); // explicit empty — should still hide the tool
         let mut reg = ToolRegistry::new();
@@ -935,7 +937,7 @@ mod tests {
 
     #[test]
     fn gated_tool_hidden_until_gate_opened() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         reset_gates();
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(GatedStub));
@@ -953,7 +955,7 @@ mod tests {
 
     #[tokio::test]
     async fn gated_tool_call_rejected_until_gate_opened() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         reset_gates();
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(GatedStub));
@@ -969,7 +971,7 @@ mod tests {
 
     #[tokio::test]
     async fn requires_env_call_path_rejects_when_unset() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let _key = EnvGuard::new("FAKE_TEST_KEY_CALL");
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(StubTool {
@@ -1034,7 +1036,7 @@ mod tests {
 
     #[test]
     fn hal_tools_hidden_without_key_visible_with_key() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         let key = EnvGuard::new("HAL_API_KEY");
         key.unset();
         // HAL tools are opt-in (no longer in with_builtins — they register

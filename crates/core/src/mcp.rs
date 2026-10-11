@@ -272,9 +272,10 @@ fn mcp_allowlist_path() -> Option<std::path::PathBuf> {
 
 #[derive(Default, Serialize, Deserialize)]
 struct McpAllowlist {
-    /// Approved stdio commands. We key by the `command` string as it
-    /// appears in the MCP config. Users who change PATH or substitute
-    /// the binary will re-trigger approval if the command string differs.
+    /// Approved stdio invocations: the command AND its arguments, as
+    /// `invocation()` renders them. Keyed on the command alone, approving
+    /// `npx` once let every later npx package spawn unasked. Older files
+    /// hold bare commands, which now only match a server with no args.
     #[serde(default)]
     commands: Vec<String>,
 }
@@ -312,6 +313,24 @@ impl McpAllowlist {
         self.commands.iter().any(|c| c == cmd)
     }
 
+    /// An allowlist written before entries carried arguments holds bare
+    /// commands (`npx`). One still covers a server from the user's OWN
+    /// mcp.json, so headless and scheduled runs keep the servers they had —
+    /// never one from a project's mcp.json, which is what a cloned repo
+    /// controls and what the bare entry used to let through.
+    fn grandfathers(
+        &self,
+        config: &McpServerConfig,
+        key: &str,
+        user_servers: &[McpServerConfig],
+    ) -> bool {
+        key != config.command
+            && self.contains(&config.command)
+            && user_servers
+                .iter()
+                .any(|s| s.name == config.name && invocation(s) == key)
+    }
+
     fn insert(&mut self, cmd: &str) {
         if !self.contains(cmd) {
             self.commands.push(cmd.to_string());
@@ -319,8 +338,15 @@ impl McpAllowlist {
     }
 }
 
+/// What the allowlist remembers for a stdio server: the full command line.
+fn invocation(config: &McpServerConfig) -> String {
+    shell_words::join(
+        std::iter::once(config.command.as_str()).chain(config.args.iter().map(String::as_str)),
+    )
+}
+
 /// Gate an MCP stdio spawn through an allowlist. The first time we see
-/// a given command string, ask the user to approve it.
+/// a given command line, ask the user to approve it.
 ///
 /// If an `approver` is supplied (GUI mode wires a `GuiApprover`), the
 /// decision routes through the same approval UI used for tool calls —
@@ -345,36 +371,46 @@ async fn check_stdio_command_allowed(
         return Ok(());
     }
 
+    let key = invocation(config);
     let mut allowlist = McpAllowlist::load();
-    if allowlist.contains(&config.command) {
+    if allowlist.contains(&key) {
+        return Ok(());
+    }
+    if allowlist.grandfathers(
+        config,
+        &key,
+        &crate::config::AppConfig::load_user_mcp_servers(),
+    ) {
+        allowlist.insert(&key);
+        allowlist.save();
         return Ok(());
     }
 
     if let Some(approver) = approver {
         let req = crate::permissions::ApprovalRequest {
-            tool_name: "MCP server spawn".to_string(),
+            tool_name: crate::permissions::MCP_SPAWN_TOOL.to_string(),
             input: serde_json::json!({
                 "name": config.name,
                 "command": config.command,
                 "args": config.args,
             }),
             summary: Some(format!(
-                "Allow thClaws to spawn `{}` for MCP server `{}`? The \
-                 binary will run with your user privileges.",
-                config.command, config.name
+                "Allow thClaws to run `{}` for MCP server `{}`? It will \
+                 run with your user privileges.",
+                key, config.name
             )),
             originator: crate::permissions::AgentOrigin::Main,
         };
         return match approver.approve(&req).await {
             crate::permissions::ApprovalDecision::Allow
             | crate::permissions::ApprovalDecision::AllowForSession => {
-                allowlist.insert(&config.command);
+                allowlist.insert(&key);
                 allowlist.save();
                 Ok(())
             }
             crate::permissions::ApprovalDecision::Deny => Err(Error::Provider(format!(
                 "mcp spawn refused by user: `{}`",
-                config.command
+                key
             ))),
         };
     }
@@ -384,11 +420,11 @@ async fn check_stdio_command_allowed(
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err(Error::Provider(format!(
-            "mcp spawn refused: command `{}` for server `{}` is not in the \
-             user allowlist. Approve it by running thclaws interactively \
-             once, editing {}, or setting THCLAWS_MCP_ALLOW_ALL=1 in a \
-             trusted context.",
-            config.command,
+            "mcp spawn refused: `{}` for server `{}` is not in the user \
+             allowlist (entries match the whole command line). Approve it by \
+             running thclaws interactively once, editing {}, or setting \
+             THCLAWS_MCP_ALLOW_ALL=1 in a trusted context.",
+            key,
             config.name,
             mcp_allowlist_path()
                 .map(|p| p.display().to_string())
@@ -414,17 +450,13 @@ async fn check_stdio_command_allowed(
     let _ = stdin.lock().read_line(&mut line);
     let answer = line.trim().to_ascii_lowercase();
     if answer == "y" || answer == "yes" {
-        allowlist.insert(&config.command);
+        allowlist.insert(&key);
         allowlist.save();
-        eprintln!(
-            "\x1b[32m[mcp] `{}` added to allowlist.\x1b[0m",
-            config.command
-        );
+        eprintln!("\x1b[32m[mcp] `{key}` added to allowlist.\x1b[0m");
         Ok(())
     } else {
         Err(Error::Provider(format!(
-            "mcp spawn refused by user: {}",
-            config.command
+            "mcp spawn refused by user: `{key}`"
         )))
     }
 }
@@ -2257,6 +2289,63 @@ pub async fn reauth_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Approving one npx package must not approve the next one.
+    #[test]
+    fn the_spawn_allowlist_keys_on_the_whole_command_line() {
+        let server = |args: &[&str]| McpServerConfig {
+            name: "x".into(),
+            transport: "stdio".into(),
+            command: "npx".into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            env: HashMap::new(),
+            url: String::new(),
+            headers: HashMap::new(),
+            trusted: false,
+            engine_managed: false,
+        };
+        let weather = invocation(&server(&["-y", "open-meteo-mcp-server@2.5.2"]));
+        let clock = invocation(&server(&["-y", "time-mcp@1.0.6"]));
+        assert_ne!(weather, clock);
+        let mut list = McpAllowlist::default();
+        list.insert(&weather);
+        assert!(list.contains(&weather) && !list.contains(&clock));
+        // A pre-fix file holding the bare command no longer covers a package.
+        let legacy = McpAllowlist {
+            commands: vec!["npx".into()],
+        };
+        assert!(!legacy.contains(&clock));
+    }
+
+    #[test]
+    fn a_bare_legacy_entry_covers_only_the_users_own_servers() {
+        let server = |name: &str, args: &[&str]| McpServerConfig {
+            name: name.into(),
+            transport: "stdio".into(),
+            command: "npx".into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            env: HashMap::new(),
+            url: String::new(),
+            headers: HashMap::new(),
+            trusted: false,
+            engine_managed: false,
+        };
+        let mine = server("weather", &["-y", "open-meteo-mcp-server@2.5.2"]);
+        let user_level = vec![mine.clone()];
+        let legacy = McpAllowlist {
+            commands: vec!["npx".into()],
+        };
+        assert!(legacy.grandfathers(&mine, &invocation(&mine), &user_level));
+        // A project's server — not in the user's mcp.json — gets no pass,
+        // nor does one that reuses a user server's name with other args.
+        let cloned = server("evil", &["-y", "evil-pkg"]);
+        assert!(!legacy.grandfathers(&cloned, &invocation(&cloned), &user_level));
+        let renamed = server("weather", &["-y", "evil-pkg"]);
+        assert!(!legacy.grandfathers(&renamed, &invocation(&renamed), &user_level));
+        // Without the bare entry there is nothing to grandfather.
+        let empty = McpAllowlist::default();
+        assert!(!empty.grandfathers(&mine, &invocation(&mine), &user_level));
+    }
     use tokio::io::duplex;
 
     /// The handshake gets a far longer budget than a tool call, because a

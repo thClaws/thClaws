@@ -695,16 +695,30 @@ pub async fn dispatch(
             let title = title.trim();
             if title.is_empty() {
                 emit(events_tx, "usage: /rename <title>".into());
-            } else {
-                state.session.title = Some(title.to_string());
-                if let Some(store) = &state.session_store {
-                    let history = state.agent.history_snapshot();
-                    if !history.is_empty() {
-                        state.session.sync(history);
-                    }
-                    let _ = store.save(&mut state.session);
+            } else if let Some(store) = &state.session_store {
+                // A title lives only as a `rename` line in the file, which
+                // `save` never writes — the sidebar and /sessions read it from
+                // there. Same order as the CLI: land the file, then rename.
+                let history = state.agent.history_snapshot();
+                if !history.is_empty() {
+                    state.session.sync(history);
                 }
-                emit(events_tx, format!("session renamed → {title}"));
+                match store
+                    .save(&mut state.session)
+                    .and_then(|_| store.rename(&state.session.id, title))
+                {
+                    Ok(updated) => {
+                        state.session.title = updated.title;
+                        emit(events_tx, format!("session renamed → {title}"));
+                        let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
+                            &state.session_store,
+                            &state.session.id,
+                        )));
+                    }
+                    Err(e) => emit(events_tx, format!("rename failed: {e}")),
+                }
+            } else {
+                emit(events_tx, "no session store available".into());
             }
         }
 

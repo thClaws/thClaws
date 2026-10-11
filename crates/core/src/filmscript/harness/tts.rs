@@ -483,7 +483,12 @@ async fn gemini_tts(prompt: &str, voice: &str, model: Option<&str>) -> Result<Ve
     ) {
         Ok(ep) => gemini_generate(prompt, voice, model, &ep).await,
         // No gemini key AND no gateway (desktop w/o gemini) → OpenRouter BYOK.
+        // Never on a gateway-locked install: that would be the user's own
+        // OpenRouter account, off the org's gateway.
         Err(e) => {
+            if crate::shared::gateway_providers_locked() {
+                return Err(e);
+            }
             if let Some(key) = env_key("OPENROUTER_API_KEY").filter(|k| k != "gateway-placeholder")
             {
                 return gemini_openrouter(prompt, voice, model, &key).await;

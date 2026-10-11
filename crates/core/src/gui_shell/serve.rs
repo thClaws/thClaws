@@ -240,6 +240,17 @@ pub fn serve_project_asset(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         );
+    // A hosted workspace on a path-scheme install (`<tenant>/u/<h>/<s>/`)
+    // shares its origin with the web app, whose JWT sits in localStorage.
+    // Workspace HTML/SVG is whatever the agent or a fetched page wrote, so
+    // it gets an opaque origin wherever it is opened — top-level tab or
+    // iframe. Not PDFs: a sandboxed document can't host the PDF viewer.
+    if is_scriptable_document(mime) {
+        rb = rb.header(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(WORKSPACE_DOC_CSP),
+        );
+    }
     if let Some((start, end, total)) = range_meta {
         rb = rb.status(StatusCode::PARTIAL_CONTENT).header(
             header::CONTENT_RANGE,
@@ -248,6 +259,13 @@ pub fn serve_project_asset(
     }
     rb.body(Body::from(bytes))
         .expect("build project-asset response")
+}
+
+pub const WORKSPACE_DOC_CSP: &str =
+    "sandbox allow-scripts allow-popups allow-forms allow-downloads allow-modals";
+
+fn is_scriptable_document(mime: &str) -> bool {
+    mime.starts_with("text/html") || mime.starts_with("image/svg+xml")
 }
 
 fn mime_for_path(path: &std::path::Path) -> &'static str {
@@ -524,6 +542,33 @@ mod tests {
             created_at: 0,
             ttl_secs: None,
         }
+    }
+
+    #[test]
+    fn workspace_html_and_svg_get_an_opaque_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            ("a.html", "<script>1</script>"),
+            ("A.HTM", "x"),
+            ("b.svg", "<svg/>"),
+            ("c.png", "x"),
+            ("d.pdf", "x"),
+        ] {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        let csp = |rel: &str| {
+            serve_project_asset(dir.path(), rel, None)
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+        for rel in ["a.html", "A.HTM", "b.svg"] {
+            let v = csp(rel).unwrap_or_else(|| panic!("{rel} has no CSP"));
+            assert!(v.starts_with("sandbox "), "{rel}: {v}");
+            assert!(!v.contains("allow-same-origin"), "{rel}: {v}");
+        }
+        assert_eq!(csp("c.png"), None);
+        assert_eq!(csp("d.pdf"), None);
     }
 
     #[test]

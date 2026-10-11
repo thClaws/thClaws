@@ -588,7 +588,10 @@ impl AgentFactory for ProductionAgentFactory {
             .with_max_iterations(max_iter)
             .with_max_tokens(self.max_tokens)
             .with_approver(self.approver.clone())
-            .with_permission_mode(self.permission_mode);
+            // The live mode, not the one captured at worker start: after
+            // auto → `/permissions ask` the child would otherwise keep Auto
+            // and run Write/Bash without asking.
+            .with_permission_mode(crate::permissions::live_mode().unwrap_or(self.permission_mode));
         if let Some(c) = self.cancel.clone() {
             agent = agent.with_cancel(c);
         }

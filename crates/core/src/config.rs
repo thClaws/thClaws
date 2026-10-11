@@ -2706,7 +2706,7 @@ impl AppConfig {
 
     /// Load MCP servers from user-level paths:
     /// `~/.config/thclaws/mcp.json`, then `~/.claude/mcp.json` as fallback.
-    fn load_user_mcp_servers() -> Vec<crate::mcp::McpServerConfig> {
+    pub(crate) fn load_user_mcp_servers() -> Vec<crate::mcp::McpServerConfig> {
         let Some(home) = crate::util::home_dir() else {
             return vec![];
         };
