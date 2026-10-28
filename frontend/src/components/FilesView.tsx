@@ -294,6 +294,16 @@ function shortPath(p: string): string {
   return p.includes("/") ? `../${last}` : last;
 }
 
+/// A file the dashboard bridge may read or write: a plain name beside the
+/// dashboard, never a path, a dotfile, the agent's own instruction files,
+/// or anything under `.thclaws/`.
+function isDashboardFile(dir: string, filename: string): boolean {
+  if (typeof filename !== "string" || filename.length === 0 || filename.length > 255) return false;
+  if (/[/\\\0]/.test(filename) || filename.startsWith(".")) return false;
+  if (/^(agents|claude)\.md$/i.test(filename)) return false;
+  return !dir.split(/[/\\]/).some((seg) => seg === ".thclaws");
+}
+
 function isMarkdownPath(path: string): boolean {
   // Used to gate the iframe's `srcDoc` branch (vs. the asset-URL fetch
   // branch). Backend-rendered HTML previews — Markdown source files
@@ -1155,6 +1165,8 @@ export function FilesView({ active }: Props) {
   // The markdown preview frame, so the postMessage bridge below can check
   // that a link message really came from it.
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  // The HTML preview frame — the only sender the dashboard bridge trusts.
+  const htmlFrameRef = useRef<HTMLIFrameElement | null>(null);
   useEffect(() => {
     openLinkedFileRef.current = openLinkedFile;
     showHiddenRef.current = showHidden;
@@ -1368,9 +1380,11 @@ export function FilesView({ active }: Props) {
   //   - thclaws-dashboard-load  {filename}           →  file_read IPC
   // Each pairs with a *-ack response back to the same iframe.
   //
-  // Sender origin isn't checked because the iframe runs sandboxed
-  // from a `thclaws://` asset URL — the attack surface is bounded
-  // to our own dashboard content.
+  // Only the HTML preview frame this pane opened may ask, and only for a
+  // plain file beside it: any other frame (an MCP widget, a GUI shell, a
+  // page in the lightbox) can post this shape too, and a `filename` with a
+  // path in it reached every workspace file, `.thclaws/` and `.env`
+  // included.
   //
   // The load path correlates async file_read responses to requesting
   // iframes via a single-slot pendingDashboardLoad ref. Concurrent
@@ -1392,6 +1406,8 @@ export function FilesView({ active }: Props) {
           }
         | undefined;
       if (!d || !preview) return;
+      if (d.type !== "thclaws-dashboard-save" && d.type !== "thclaws-dashboard-load") return;
+      if (!e.source || e.source !== htmlFrameRef.current?.contentWindow) return;
 
       // Resolve `filename` (e.g. "TASKS.md") against the directory of
       // the currently-previewed file. So opening
@@ -1399,7 +1415,23 @@ export function FilesView({ active }: Props) {
       // "TASKS.md" hits `/proj/business-cards/TASKS.md`.
       const slash = preview.path.lastIndexOf("/");
       const dir = slash > 0 ? preview.path.slice(0, slash) : ".";
-      const targetPath = `${dir}/${d.filename || "TASKS.md"}`;
+      const filename = d.filename || "TASKS.md";
+      if (!isDashboardFile(dir, filename)) {
+        (e.source as Window).postMessage(
+          {
+            type:
+              d.type === "thclaws-dashboard-save"
+                ? "thclaws-dashboard-save-ack"
+                : "thclaws-dashboard-load-ack",
+            reqId: d.reqId,
+            ok: false,
+            error: "not a file this dashboard may use",
+          },
+          "*",
+        );
+        return;
+      }
+      const targetPath = `${dir}/${filename}`;
 
       if (d.type === "thclaws-dashboard-save") {
         try {
@@ -1937,6 +1969,7 @@ export function FilesView({ active }: Props) {
                 />
               ) : (
                 <iframe
+                  ref={htmlFrameRef}
                   key={`html-${preview.path}-${previewVersion}`}
                   src={assetUrl(preview.path)}
                   className="w-full flex-1 min-h-0 rounded border"

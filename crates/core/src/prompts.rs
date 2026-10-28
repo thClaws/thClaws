@@ -211,6 +211,20 @@ pub fn build_full_system_prompt(
         system.push_str(&services_section);
     }
 
+    // (4b) On an AI Server box, going online is the user's call.
+    if crate::aiserver::local_ai() {
+        system.push_str("\n\n# Internet use\n");
+        system.push_str(crate::aiserver::WEB_ONLY_WHEN_ASKED);
+    }
+
+    // (4c) Organisation RAG (dev-plan/72): its MCP server sends no
+    // instructions, so say once when to reach for it.
+    let org_rag_section = org_rag_prompt_section(&config.mcp_servers);
+    if !org_rag_section.is_empty() {
+        system.push_str("\n\n");
+        system.push_str(&org_rag_section);
+    }
+
     // (5) MCP server instructions — per-server briefings from each
     // MCP `InitializeResult.instructions`. Slot sits between
     // Services and Documents because all three describe "what tools
@@ -326,6 +340,21 @@ fn append_repl_slash_shortcut_priming(system: &mut String) {
 /// configured, because unfamiliar tool names in the long tools-param
 /// list got glossed over. Moved here from `shared_session.rs` so CLI +
 /// print + agent_runtime get the same nudge.
+pub(crate) fn org_rag_prompt_section(servers: &[crate::mcp::McpServerConfig]) -> String {
+    if !servers
+        .iter()
+        .any(|s| s.name == "org-rag" && s.engine_managed)
+    {
+        return String::new();
+    }
+    "# Organisation documents\n\
+     The `org-rag` tools (`search_knowledge`, `read_document`, `list_sources`) \
+     search the organisation's shared document store, limited to what this user \
+     may read. Search them before answering questions about the organisation's \
+     rules, policies or documents, and cite the file and page of what you use."
+        .to_string()
+}
+
 pub(crate) fn services_prompt_section(browser_active: bool) -> String {
     let mut bullets: Vec<String> = Vec::new();
 
@@ -829,6 +858,26 @@ pub(crate) fn team_grounding_prompt(model: &str, team_enabled: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn org_rag_section_only_for_the_engine_managed_server() {
+        let mk = |name: &str, managed: bool| crate::mcp::McpServerConfig {
+            name: name.into(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Default::default(),
+            url: "https://g/rag/mcp".into(),
+            headers: Default::default(),
+            trusted: false,
+            engine_managed: managed,
+        };
+        assert!(org_rag_prompt_section(&[]).is_empty());
+        assert!(org_rag_prompt_section(&[mk("org-rag", false)]).is_empty());
+        assert!(org_rag_prompt_section(&[mk("other", true)]).is_empty());
+        let s = org_rag_prompt_section(&[mk("org-rag", true)]);
+        assert!(s.contains("search_knowledge") && s.contains("page"));
+    }
 
     /// dev-plan/55: with masking armed the model sees `[PHONE_1]` where the
     /// user typed a number. Live-testing v1 showed what happens without the

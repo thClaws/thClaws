@@ -416,15 +416,46 @@ fn shell_reply(request_id: u64, body: serde_json::Value) -> String {
 /// `tools.invoke:<tool>` permission — then only the declared tools (or
 /// the `tools.invoke:*` wildcard) are allowed. A shell that declares NO
 /// `tools.invoke:*` permission runs in legacy/unfettered mode (built-in
-/// + hand-installed dev shells that predate the scheme), and an
-/// unresolvable shell id is left unchanged too — so this is additive and
-/// never breaks existing shells. Marketplace shells are pushed to declare
-/// at publish time, not here.
-fn shell_tool_invoke_allowed(shell_id: &str, tool_name: &str) -> bool {
-    let Some(shell) = crate::gui_shell::ShellRegistry::new().resolve(shell_id) else {
-        return true; // unknown shell → legacy behaviour, unchanged
+/// + hand-installed dev shells that predate the scheme). An unresolvable
+/// shell id is refused, and the org's `deny_tools` applies to every shell.
+fn shell_tool_invoke_allowed(shell_id: &str, tool_name: &str) -> std::result::Result<(), String> {
+    let perms = if shell_id.is_empty() {
+        None
+    } else {
+        crate::gui_shell::ShellRegistry::new()
+            .resolve(shell_id)
+            .map(|s| s.manifest().permissions.clone())
     };
-    tool_allowed_by_perms(&shell.manifest().permissions, tool_name)
+    shell_tool_invoke_check(
+        shell_id,
+        perms.as_deref(),
+        &crate::policy::denied_tools(),
+        tool_name,
+    )
+}
+
+/// Pure gate for `gui_shell_tool_invoke`: the org's `deny_tools` first
+/// (same rule as the agent loop), then an installed shell's manifest. An
+/// unknown or missing shell id is refused — it is client-supplied.
+fn shell_tool_invoke_check(
+    shell_id: &str,
+    shell_perms: Option<&[String]>,
+    denied: &[String],
+    tool_name: &str,
+) -> std::result::Result<(), String> {
+    if !crate::policy::tool_allowed_in(denied, tool_name) {
+        return Err(crate::policy::tool_denied_message(tool_name));
+    }
+    let Some(perms) = shell_perms else {
+        return Err(format!("unknown GUI shell '{shell_id}'"));
+    };
+    if !tool_allowed_by_perms(perms, tool_name) {
+        return Err(format!(
+            "tool '{tool_name}' not in this shell's manifest permissions \
+             (declare \"tools.invoke:{tool_name}\" to allow it)"
+        ));
+    }
+    Ok(())
 }
 
 /// Decode a base64 blob, write it into `<base>/_uploads/<unique>`, and
@@ -791,8 +822,112 @@ fn parse_attachments(msg: &Value) -> Vec<(String, String)> {
     attachments
 }
 
+/// Sandbox check for an IPC arm that mutates a file. Multiuser uses
+/// `check_write` so a member can't rewrite `.thclaws/` (settings, hooks)
+/// through the Files tab any more than through the Write tool; single-user
+/// keeps `check`, as before.
+fn ipc_check_mut(path: &str) -> crate::error::Result<std::path::PathBuf> {
+    if crate::workdir::is_multiuser() {
+        crate::sandbox::Sandbox::check_write(path)
+    } else {
+        crate::sandbox::Sandbox::check(path)
+    }
+}
+
+/// Multiuser: Folder instructions are the member's own `AGENTS.md`; the
+/// pod-global (`~/.config`) scope has no owner among members.
+fn ipc_instructions_path(scope: &str) -> Option<std::path::PathBuf> {
+    if !crate::workdir::is_multiuser() {
+        return crate::instructions::instructions_path(scope);
+    }
+    match scope {
+        "global" => None,
+        _ => Some(crate::workdir::current_workdir().join("AGENTS.md")),
+    }
+}
+
+const SHARED_SHELL_REFUSAL: &str =
+    "The shell tab isn't available in shared workspaces — a pod shell can read every member's folder.";
+const SHARED_SETTING_REFUSAL: &str =
+    "This setting is shared by every member of this workspace and can't be changed from here.";
+
+/// C2: IPC arms that act on pod-global state (a shell, secrets, settings,
+/// the owner's connectors) and so must not run for one member of a
+/// multiuser pod.
+fn multiuser_refusal(ty: &str) -> Option<&'static str> {
+    match ty {
+        "pty_open" | "pty_input" | "pty_resize" | "pty_close" | "shell_tab_enabled_set" => {
+            Some(SHARED_SHELL_REFUSAL)
+        }
+        "api_key_set"
+        | "api_key_clear"
+        | "secrets_backend_set"
+        | "endpoint_set"
+        | "endpoint_clear"
+        | "gateway_settings_set"
+        | "cloud_config_set"
+        | "cloud_sign_out"
+        | "cloud_browser_login"
+        | "remote_agent_set"
+        | "agent_config_set"
+        | "agent_unbind"
+        | "agent_save"
+        | "team_enabled_set"
+        | "media_tools_enabled_set"
+        | "hal_enabled_set"
+        | "sensitive_enabled_set"
+        | "browser_enabled_set"
+        | "openrouter_free_only_set"
+        | "fusion_config_set"
+        | "line_pair"
+        | "line_disconnect"
+        | "telegram_connect"
+        | "telegram_disconnect"
+        | "telegram_pairing_approve"
+        | "telegram_pairing_reject"
+        | "messenger_pair"
+        | "messenger_disconnect"
+        | "phone_home_connect"
+        | "phone_home_disconnect"
+        | "phone_home_pair"
+        | "gui_shell_key_set"
+        | "gui_shell_mode_set"
+        | "gui_shell_set_default" => Some(SHARED_SETTING_REFUSAL),
+        _ => None,
+    }
+}
+
+fn multiuser_refusal_frame(ty: &str, msg: &Value, reason: &str) -> String {
+    match ty {
+        "pty_open" => {
+            serde_json::json!({ "type": "pty_open_result", "ok": false, "error": reason })
+        }
+        "shell_tab_enabled_set" => serde_json::json!({
+            "type": "shell_tab_enabled_result", "enabled": false, "ok": false, "error": reason,
+        }),
+        t if t.starts_with("gui_shell_") => {
+            let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            return shell_reply(id, serde_json::json!({ "error": reason }));
+        }
+        _ => serde_json::json!({ "type": "ipc_refused", "request": ty, "error": reason }),
+    }
+    .to_string()
+}
+
 pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
     let ty = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if crate::workdir::is_multiuser() {
+        if let Some(reason) = multiuser_refusal(ty) {
+            (ctx.dispatch)(multiuser_refusal_frame(ty, &msg, reason));
+            return true;
+        }
+        if ty == "shell_tab_enabled_get" {
+            (ctx.dispatch)(
+                serde_json::json!({ "type": "shell_tab_enabled", "enabled": false }).to_string(),
+            );
+            return true;
+        }
+    }
     match ty {
         "app_close" => {
             (ctx.on_quit)();
@@ -1613,6 +1748,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     _ => None,
                 };
                 match parsed {
+                    Some(m) if crate::policy::permission_mode_refusal(m).is_some() => {
+                        serde_json::json!({ "error": crate::policy::permission_mode_refusal(m) })
+                    }
                     Some(m) => {
                         crate::permissions::set_current_mode_and_broadcast(m);
                         serde_json::json!({ "result": { "mode": mode } })
@@ -2520,12 +2658,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     }
                     // dev-plan/39 Tier 3: enforce the manifest tool allowlist
                     // (no-op for shells that don't declare tools.invoke:*).
-                    if !shell_tool_invoke_allowed(&shell_id, &tool_name) {
-                        return Err(format!(
-                            "tool '{tool_name}' not in this shell's manifest permissions \
-                             (declare \"tools.invoke:{tool_name}\" to allow it)"
-                        ));
-                    }
+                    shell_tool_invoke_allowed(&shell_id, &tool_name)?;
                     let mut registry = crate::tools::ToolRegistry::with_builtins();
                     if media_enabled {
                         registry.register(Arc::new(crate::tools::TextToImageTool));
@@ -4275,7 +4408,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         "get_cwd" => {
             // dev-plan/61: the folder the user's files are in, which for an
             // agent under a workspace host is the workspace, not its own folder.
-            let cwd = crate::workdir::workspace_root()
+            let cwd = crate::workdir::current_workdir()
                 .to_string_lossy()
                 .to_string();
             // Serve mode: cwd is fixed (cloud runner template mounts
@@ -4402,7 +4535,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .get("scope")
                 .and_then(|v| v.as_str())
                 .unwrap_or("folder");
-            let path = crate::instructions::instructions_path(scope);
+            let path = ipc_instructions_path(scope);
             let content = path
                 .as_ref()
                 .and_then(|p| std::fs::read_to_string(p).ok())
@@ -4422,7 +4555,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .and_then(|v| v.as_str())
                 .unwrap_or("folder");
             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error, path) = match crate::instructions::instructions_path(scope) {
+            let (ok, error, path) = match ipc_instructions_path(scope) {
                 Some(path) => {
                     if let Some(parent) = path.parent() {
                         let _ = std::fs::create_dir_all(parent);
@@ -6947,8 +7080,13 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .get("show_hidden")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let resolved = crate::sandbox::Sandbox::check(&raw_path)
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+            let resolved = crate::sandbox::Sandbox::check(&raw_path).unwrap_or_else(|_| {
+                if crate::workdir::is_multiuser() {
+                    crate::workdir::current_workdir()
+                } else {
+                    std::env::current_dir().unwrap_or_default()
+                }
+            });
             if let Ok(entries) = std::fs::read_dir(&resolved) {
                 let mut items: Vec<serde_json::Value> = entries
                     .flatten()
@@ -7117,7 +7255,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         // host the agent runs in its own folder, but
                         // /file-asset serves from the root, so slides cached
                         // under the agent folder 404'd.
-                        let workspace = crate::workdir::workspace_root();
+                        let workspace = crate::workdir::current_workdir();
                         let deck = path.clone();
                         let raw = raw_path.to_string();
                         let mode_s = mode.to_string();
@@ -7409,8 +7547,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         "file_write" => {
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
-            {
+            let (ok, error): (bool, Option<String>) = match ipc_check_mut(raw_path) {
                 Ok(path) => {
                     if let Some(parent) = path.parent() {
                         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -7456,22 +7593,21 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             };
             let dispatch = ctx.dispatch.clone();
             let (src, dst) = (raw_path.to_string(), out_raw.clone());
-            tokio::spawn(async move {
+            let scope = crate::workdir::scoped_root();
+            tokio::spawn(crate::workdir::rescope(scope, async move {
                 let mut ocr = false;
-                let (ok, error): (bool, Option<String>) = match (
-                    crate::sandbox::Sandbox::check(&src),
-                    crate::sandbox::Sandbox::check(&dst),
-                ) {
-                    (Ok(src_path), Ok(dst_path)) => {
-                        if dst_path.exists() {
-                            (false, Some(format!("{dst} already exists")))
-                        } else {
-                            // Never the consent-gated uploads: the consent for
-                            // those lives in `Tool::requires_approval`, which an
-                            // IPC arm never passes through (dev-plan/66). Only an
-                            // EE install's own document service may OCR a scan
-                            // from here (dev-plan/69).
-                            match crate::tools::pdf_read::markdown_text(&src_path).await {
+                let (ok, error): (bool, Option<String>) =
+                    match (crate::sandbox::Sandbox::check(&src), ipc_check_mut(&dst)) {
+                        (Ok(src_path), Ok(dst_path)) => {
+                            if dst_path.exists() {
+                                (false, Some(format!("{dst} already exists")))
+                            } else {
+                                // Never the consent-gated uploads: the consent for
+                                // those lives in `Tool::requires_approval`, which an
+                                // IPC arm never passes through (dev-plan/66). Only an
+                                // EE install's own document service may OCR a scan
+                                // from here (dev-plan/69).
+                                match crate::tools::pdf_read::markdown_text(&src_path).await {
                                 Err(e) => (false, Some(e.to_string())),
                                 Ok(text) if text.trim().is_empty() => (
                                     false,
@@ -7491,10 +7627,10 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                                     }
                                 }
                             }
+                            }
                         }
-                    }
-                    (Err(e), _) | (_, Err(e)) => (false, Some(format!("access denied: {e}"))),
-                };
+                        (Err(e), _) | (_, Err(e)) => (false, Some(format!("access denied: {e}"))),
+                    };
                 dispatch(
                     serde_json::json!({
                         "type": "pdf_to_markdown_result",
@@ -7502,7 +7638,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     })
                     .to_string(),
                 );
-            });
+            }));
         }
 
         // "Convert to…" from the Files tab: the same conversion as the
@@ -7539,7 +7675,8 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     .to_string(),
                 );
             } else {
-                tokio::spawn(async move {
+                let scope = crate::workdir::scoped_root();
+                tokio::spawn(crate::workdir::rescope(scope, async move {
                     let (ok, out, error) =
                         match crate::tools::doc_convert::convert_file(&raw_path, &to, None).await {
                             Ok(done) => (true, Some(done.out.display().to_string()), None),
@@ -7552,7 +7689,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         })
                         .to_string(),
                     );
-                });
+                }));
             }
         }
 
@@ -7636,8 +7773,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         "file_delete" => {
             let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
-            {
+            let (ok, error): (bool, Option<String>) = match ipc_check_mut(raw_path) {
                 Ok(path) => {
                     if !path.exists() {
                         (false, Some("path no longer exists".into()))
@@ -7674,27 +7810,25 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
             let from_raw = msg.get("from").and_then(|v| v.as_str()).unwrap_or("");
             let to_raw = msg.get("to").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error): (bool, Option<String>) = match (
-                crate::sandbox::Sandbox::check(from_raw),
-                crate::sandbox::Sandbox::check(to_raw),
-            ) {
-                (Ok(from), Ok(to)) => {
-                    if !from.exists() {
-                        (false, Some("source no longer exists".into()))
-                    } else if to.exists() {
-                        (
-                            false,
-                            Some("a file or folder with that name already exists".into()),
-                        )
-                    } else {
-                        match std::fs::rename(&from, &to) {
-                            Ok(()) => (true, None),
-                            Err(e) => (false, Some(format!("rename: {e}"))),
+            let (ok, error): (bool, Option<String>) =
+                match (ipc_check_mut(from_raw), ipc_check_mut(to_raw)) {
+                    (Ok(from), Ok(to)) => {
+                        if !from.exists() {
+                            (false, Some("source no longer exists".into()))
+                        } else if to.exists() {
+                            (
+                                false,
+                                Some("a file or folder with that name already exists".into()),
+                            )
+                        } else {
+                            match std::fs::rename(&from, &to) {
+                                Ok(()) => (true, None),
+                                Err(e) => (false, Some(format!("rename: {e}"))),
+                            }
                         }
                     }
-                }
-                (Err(e), _) | (_, Err(e)) => (false, Some(format!("access denied: {e}"))),
-            };
+                    (Err(e), _) | (_, Err(e)) => (false, Some(format!("access denied: {e}"))),
+                };
             (ctx.dispatch)(
                 serde_json::json!({
                     "type": "file_rename_result",
@@ -7711,8 +7845,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         // Sandbox-checked; refuses to clobber an existing path.
         "file_mkdir" => {
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
-            {
+            let (ok, error): (bool, Option<String>) = match ipc_check_mut(raw_path) {
                 Ok(path) => {
                     if path.exists() {
                         (
@@ -7744,8 +7877,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         // `create_new` (atomic exists-check).
         "file_create" => {
             let raw_path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let (ok, error): (bool, Option<String>) = match crate::sandbox::Sandbox::check(raw_path)
-            {
+            let (ok, error): (bool, Option<String>) = match ipc_check_mut(raw_path) {
                 Ok(path) => {
                     let parent_made = match path.parent() {
                         Some(parent) => std::fs::create_dir_all(parent)
@@ -8181,6 +8313,65 @@ mod tests {
         let wild = vec!["tools.invoke:*".to_string()];
         assert!(tool_allowed_by_perms(&wild, "Bash"));
         assert!(tool_allowed_by_perms(&wild, "AnythingElse"));
+    }
+
+    /// H3: a shell id the registry can't resolve is client-supplied and
+    /// refused, not treated as a legacy shell.
+    #[test]
+    fn gui_shell_invoke_unknown_shell_id_denied() {
+        assert!(shell_tool_invoke_check("no-such-shell", None, &[], "Read").is_err());
+        assert!(shell_tool_invoke_check("", None, &[], "Read").is_err());
+        assert!(shell_tool_invoke_allowed("definitely-not-a-shell-7f3a", "Read").is_err());
+        assert!(shell_tool_invoke_allowed("", "Read").is_err());
+        let legacy: Vec<String> = vec![];
+        assert!(shell_tool_invoke_check("media-studio", Some(&legacy), &[], "Read").is_ok());
+    }
+
+    /// H3: the org's deny_tools applies on the gui-shell path like in the
+    /// agent loop — even for a shell whose manifest grants every tool.
+    #[test]
+    fn gui_shell_invoke_policy_denied_tool_denied() {
+        let denied = vec!["Bash".to_string()];
+        let wild = vec!["tools.invoke:*".to_string()];
+        let legacy: Vec<String> = vec![];
+        for perms in [&wild, &legacy] {
+            let err = shell_tool_invoke_check("s", Some(perms), &denied, "Bash").unwrap_err();
+            assert!(err.contains("organisation"), "{err}");
+            assert!(shell_tool_invoke_check("s", Some(perms), &denied, "bash").is_err());
+            assert!(shell_tool_invoke_check("s", Some(perms), &denied, "Read").is_ok());
+        }
+    }
+
+    /// C2: pod-global arms are refused for a multiuser member; file arms
+    /// are not (they run under the member's scoped root instead).
+    #[test]
+    fn multiuser_refuses_shell_and_global_setters() {
+        for ty in [
+            "pty_open",
+            "pty_input",
+            "shell_tab_enabled_set",
+            "api_key_set",
+            "gui_shell_mode_set",
+        ] {
+            assert!(multiuser_refusal(ty).is_some(), "{ty}");
+        }
+        for ty in [
+            "file_read",
+            "file_write",
+            "file_list",
+            "shell_input",
+            "model_set",
+        ] {
+            assert!(multiuser_refusal(ty).is_none(), "{ty}");
+        }
+        let frame: Value = serde_json::from_str(&multiuser_refusal_frame(
+            "pty_open",
+            &serde_json::json!({}),
+            SHARED_SHELL_REFUSAL,
+        ))
+        .unwrap();
+        assert_eq!(frame["type"], "pty_open_result");
+        assert_eq!(frame["ok"], false);
     }
 
     /// dev-plan/39 Tier 3: the `gui_shell_approval_respond` IPC arm

@@ -3050,10 +3050,10 @@ mod tests {
         // A router, not local inference: masking and the org-policy gateway
         // must keep treating its traffic as leaving the host.
         assert!(!ProviderKind::LiteLlm.is_local());
+        // The EE Pack's gateway relays to the box's LiteLLM (dev-plan/73).
         assert_eq!(
             crate::providers::thclaws_gateway::provider_segment(ProviderKind::LiteLlm),
-            None,
-            "self-hosted — never metered through the thClaws gateway"
+            Some("litellm")
         );
     }
 

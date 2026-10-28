@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { botQuery, send, subscribe, type IPCMessage } from "../hooks/useIPC";
 import { useTheme } from "../hooks/useTheme";
+import { shellFrameToIpc } from "../lib/shellFrame";
 
 // dev-plan/33 Tier 1: render a GUI Shell inside a sandboxed iframe.
 // Marshals postMessage between the iframe and the IPC backend so the
@@ -35,6 +36,160 @@ const TIER1_SESSION_ID = "tier1";
 // must not forward these as `gui_shell_*` backend arms — App.tsx
 // handles them directly on the window.
 const PARENT_ONLY_TYPES = new Set(["ready", "hotkey", "ui"]);
+
+// In a browser (--serve / cloud) the shell is agent-supplied script on the
+// same origin as this app — on a path-scheme install, the origin whose
+// localStorage holds the platform JWT. Without allow-same-origin it gets an
+// opaque origin and reaches us only through postMessage (the server also
+// sends `CSP: sandbox` for the shell, which covers a shell opened as a link).
+// The desktop webview keeps allow-same-origin until the opaque-origin shell
+// has been run against the thclaws:// scheme on all three platforms.
+const SHELL_SANDBOX =
+  typeof window !== "undefined" && window.ipc
+    ? "allow-scripts allow-same-origin"
+    : "allow-scripts";
+
+const RELAY_METHODS = new Set(["GET", "HEAD", "POST"]);
+const RELAY_REQUEST_HEADERS = new Set(["accept", "content-type", "range"]);
+const RELAY_RESPONSE_HEADERS = [
+  "content-type",
+  "content-length",
+  "content-range",
+  "last-modified",
+  "etag",
+];
+
+type RelayPayload = {
+  url?: unknown;
+  method?: unknown;
+  headers?: unknown;
+  body?: unknown;
+};
+
+/**
+ * The URL a sandboxed shell may have this page fetch for it, or null. The
+ * shell has an opaque origin, so its own fetch() carries no session cookie;
+ * we fetch for it, but only from its own folder, workspace files that are
+ * not dot-paths, and the upload route — the same reach its bridge already
+ * grants, never the app's /api or another shell.
+ */
+function relayTarget(
+  raw: unknown,
+  method: string,
+  frameSrc: string,
+  shellId: string,
+): URL | null {
+  if (typeof raw !== "string") return null;
+  let target: URL;
+  let frame: URL;
+  try {
+    frame = new URL(frameSrc, window.location.href);
+    target = new URL(raw, frame);
+  } catch {
+    return null;
+  }
+  const hostOf = (u: URL | Location) => `${u.protocol}//${u.host}`;
+  if (hostOf(target) !== hostOf(window.location)) return null;
+  const m = frame.pathname.match(/^(.*?\/)gui-shell\//);
+  if (!m) return null;
+  const root = m[1];
+  const path = target.pathname;
+  if (!path.startsWith(root)) return null;
+  const rest = path.slice(root.length);
+  const segs = rest.split("/").map((s) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return "\0";
+    }
+  });
+  if (segs.some((s) => s === ".." || /[\0/\\]/.test(s))) return null;
+  if (method === "POST") return rest === "upload" ? target : null;
+  if (segs[0] === "gui-shell") {
+    return segs[1] === shellId && segs.length > 2 ? target : null;
+  }
+  if (segs[0] === "file-asset") {
+    if (segs.slice(1).some((s) => s.startsWith("."))) return null;
+    return segs.length > 1 ? target : null;
+  }
+  return null;
+}
+
+// Fetch on behalf of the sandboxed shell (see `relayTarget`).
+async function relayFetch(
+  reply: Window,
+  requestId: unknown,
+  payload: RelayPayload | undefined,
+  frameSrc: string,
+  shellId: string,
+) {
+  const answer = (msg: Record<string, unknown>, transfer: Transferable[] = []) =>
+    reply.postMessage({ ns: "thclaws-shell-fetch", replyTo: requestId, ...msg }, "*", transfer);
+  const p = payload ?? {};
+  const method = typeof p.method === "string" ? p.method.toUpperCase() : "GET";
+  const target = RELAY_METHODS.has(method)
+    ? relayTarget(p.url, method, frameSrc, shellId)
+    : null;
+  if (!target) {
+    answer({ error: "blocked by the thClaws host: not this shell's file" });
+    return;
+  }
+  const extra = new URLSearchParams(botQuery().replace(/^\?/, ""));
+  extra.forEach((v, k) => {
+    if (!target.searchParams.has(k)) target.searchParams.set(k, v);
+  });
+  const headers = new Headers();
+  if (Array.isArray(p.headers)) {
+    for (const pair of p.headers) {
+      if (!Array.isArray(pair) || pair.length !== 2) continue;
+      const [k, v] = pair;
+      if (typeof k === "string" && typeof v === "string" && RELAY_REQUEST_HEADERS.has(k.toLowerCase())) {
+        headers.set(k, v);
+      }
+    }
+  }
+  let body: BodyInit | undefined;
+  const raw = p.body;
+  if (method === "POST" && raw != null) {
+    if (typeof raw === "string" || raw instanceof Blob || raw instanceof ArrayBuffer) {
+      body = raw;
+    } else if (
+      typeof raw === "object" &&
+      Array.isArray((raw as { formData?: unknown }).formData)
+    ) {
+      const fd = new FormData();
+      for (const entry of (raw as { formData: unknown[] }).formData) {
+        if (!Array.isArray(entry) || typeof entry[0] !== "string") continue;
+        const v = entry[1];
+        if (v instanceof Blob) fd.append(entry[0], v, v instanceof File ? v.name : undefined);
+        else fd.append(entry[0], String(v));
+      }
+      body = fd;
+      headers.delete("content-type");
+    }
+  }
+  try {
+    const res = await fetch(target.href, {
+      method,
+      headers,
+      body,
+      credentials: "same-origin",
+      redirect: "error",
+    });
+    const buf = method === "HEAD" ? null : await res.arrayBuffer();
+    const outHeaders: [string, string][] = [];
+    for (const name of RELAY_RESPONSE_HEADERS) {
+      const v = res.headers.get(name);
+      if (v != null) outHeaders.push([name, v]);
+    }
+    answer(
+      { status: res.status, statusText: res.statusText, headers: outHeaders, body: buf },
+      buf ? [buf] : [],
+    );
+  } catch (err) {
+    answer({ error: String(err) });
+  }
+}
 
 export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -86,6 +241,16 @@ export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
       ) {
         return;
       }
+      if (data.type === "fetch") {
+        void relayFetch(
+          e.source as Window,
+          data.requestId,
+          data.payload,
+          iframeRef.current?.src ?? "",
+          shellId,
+        );
+        return;
+      }
       if (data.type === "ready") {
         // Replay current full-screen state + theme to a freshly-loaded
         // shell so thclaws.ui.onFullscreen()/onTheme() fire with the
@@ -107,14 +272,8 @@ export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
       if (PARENT_ONLY_TYPES.has(data.type)) return;
       // type is "run" / "cancel" -> backend arms are gui_shell_run /
       // gui_shell_cancel.
-      const payload = data.payload || {};
-      send({
-        type: `gui_shell_${data.type}`,
-        id: data.requestId,
-        sessionId: data.sessionId ?? TIER1_SESSION_ID,
-        shellId: data.shellId ?? shellId,
-        ...payload,
-      });
+      const frame = shellFrameToIpc(data, shellId, TIER1_SESSION_ID);
+      if (frame) send(frame);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -196,7 +355,7 @@ export function UIView({ active, shellId, fullscreen = false }: UIViewProps) {
         ref={iframeRef}
         src={src}
         title={`GUI Shell: ${shellId}`}
-        sandbox="allow-scripts allow-same-origin"
+        sandbox={SHELL_SANDBOX}
         className="w-full h-full border-0"
         style={{ display: "block", background: "transparent" }}
       />

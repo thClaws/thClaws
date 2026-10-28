@@ -1199,18 +1199,18 @@ async fn main() {
     // servers that need to reach the user's authenticated LLM provider
     // (e.g. thclaws-gamedev-mcp's HTTP-transport server forwarding game
     // AI moves). Binds 127.0.0.1:18443 by default (override with
-    // $THCLAWS_LOOPBACK_PORT) with `THCLAWS_API_TOKEN=disable-auth` so
-    // the out-of-process server doesn't need to discover a per-launch
-    // token. Skipped under `--print` (short-lived runs don't host MCP
-    // widgets) and `--serve` (that path already mounts /v1 on the
-    // user's chosen bind; a parallel loopback would double-bind on
-    // operators who pick 18443 for serve, and serve users know their
-    // own URL already). Bind failures are logged + ignored — MCP-Apps
-    // widgets that don't need the bridge keep working without it.
+    // $THCLAWS_LOOPBACK_PORT) behind a per-launch bearer, exported as
+    // `THCLAWS_API_TOKEN` + `THCLAWS_LOOPBACK_URL` before anything below
+    // spawns a child (MCP servers, the v3 host's agents), and written to
+    // `~/.config/<app>/loopback.json` for clients we did not spawn. Not
+    // started under `allow_serve: false`. Skipped under `--print`
+    // (short-lived runs don't host MCP widgets) and `--serve` (that path
+    // already mounts /v1 on the user's chosen bind). Failures are logged
+    // + ignored — MCP-Apps widgets that don't need the bridge keep working.
     if !cli.print && !cli.serve {
         if let Err(e) = thclaws_core::api_v1::spawn_loopback().await {
             eprintln!(
-                "\x1b[33m[api_v1] loopback listener failed to bind: {e} — out-of-process MCP-Apps tools relying on the /v1 bridge (e.g. GamedevAiMove) won't be reachable; set THCLAWS_LOOPBACK_PORT to pick a free port\x1b[0m"
+                "\x1b[33m[api_v1] loopback listener not started: {e} — out-of-process MCP-Apps tools relying on the /v1 bridge (e.g. GamedevAiMove) won't be reachable; set THCLAWS_LOOPBACK_PORT if the port is taken\x1b[0m"
             );
         }
     }

@@ -275,8 +275,200 @@
     window.addEventListener("message", (e) => {
       const data = e.data;
       if (!data || data.ns !== "thclaws-shell-event") return;
+      // Only the host may speak for the backend — not a frame this shell
+      // embeds, nor a page it opened.
+      if (e.source !== window.parent) return;
       handleShellEvent(data);
     });
+  }
+
+  // On --serve / cloud the shell is served with `CSP: sandbox` (no
+  // allow-same-origin), so it has an opaque origin: it cannot read the host
+  // app's storage or cookies, which is the point. Three things change for
+  // the shell, and these shims keep existing shells working:
+  //   - localStorage / sessionStorage throw → an in-memory stand-in.
+  //   - fetch() to its own host is now cross-origin and carries no session
+  //     cookie → relayed through the host page (which still has both); the
+  //     host only accepts this shell's own folder, /file-asset and /upload.
+  //   - <img>/<video>/<audio>/stylesheet loads carry no cookie either, so a
+  //     load the gateway bounces is retried once through the same relay and
+  //     swapped in as a blob: URL.
+  // The desktop webview keeps a same-origin shell (parent.document is
+  // reachable), so none of this runs there.
+  const sandboxed =
+    !isModeB &&
+    window.parent !== window &&
+    (() => {
+      try {
+        void window.parent.document;
+        return false;
+      } catch (e) {
+        return true;
+      }
+    })();
+  if (sandboxed) {
+    const memoryStorage = () => {
+      const m = new Map();
+      return {
+        get length() { return m.size; },
+        key: (i) => Array.from(m.keys())[i] ?? null,
+        getItem: (k) => (m.has(String(k)) ? m.get(String(k)) : null),
+        setItem: (k, v) => { m.set(String(k), String(v)); },
+        removeItem: (k) => { m.delete(String(k)); },
+        clear: () => { m.clear(); },
+      };
+    };
+    for (const name of ["localStorage", "sessionStorage"]) {
+      try {
+        void window[name];
+      } catch (e) {
+        try {
+          Object.defineProperty(window, name, {
+            value: memoryStorage(),
+            configurable: true,
+          });
+        } catch (e2) {}
+      }
+    }
+
+    const hostOf = (u) => u.protocol + "//" + u.host;
+    const here = hostOf(location);
+    const nativeFetch = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
+    const relayPending = new Map();
+    let nextRelayId = 1;
+    window.addEventListener("message", (e) => {
+      const data = e.data;
+      if (!data || data.ns !== "thclaws-shell-fetch" || e.source !== window.parent) return;
+      const slot = relayPending.get(data.replyTo);
+      if (!slot) return;
+      relayPending.delete(data.replyTo);
+      if (data.error) {
+        slot.reject(new TypeError(String(data.error)));
+        return;
+      }
+      const nullBody = [101, 204, 205, 304].includes(data.status);
+      try {
+        slot.resolve(
+          new Response(nullBody ? null : data.body, {
+            status: data.status,
+            statusText: data.statusText || "",
+            headers: data.headers || [],
+          }),
+        );
+      } catch (err) {
+        slot.reject(new TypeError(String(err)));
+      }
+    });
+
+    const encodeBody = async (body) => {
+      if (body == null) return null;
+      if (typeof body === "string") return body;
+      if (body instanceof URLSearchParams) return body.toString();
+      if (body instanceof FormData) {
+        const entries = [];
+        body.forEach((v, k) => entries.push([k, v]));
+        return { formData: entries };
+      }
+      if (body instanceof Blob || body instanceof ArrayBuffer) return body;
+      if (ArrayBuffer.isView(body)) {
+        return body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
+      }
+      throw new TypeError("thclaws bridge: unsupported fetch body in a sandboxed shell");
+    };
+
+    const relayFetch = async (href, init) => {
+      init = init || {};
+      const signal = init.signal;
+      if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const headers = [];
+      try {
+        new Headers(init.headers || {}).forEach((v, k) => headers.push([k, v]));
+      } catch (e) {}
+      if (init.body instanceof URLSearchParams && !headers.some(([k]) => k === "content-type")) {
+        headers.push(["content-type", "application/x-www-form-urlencoded;charset=UTF-8"]);
+      }
+      const body = await encodeBody(init.body);
+      return new Promise((resolve, reject) => {
+        const id = nextRelayId++;
+        relayPending.set(id, { resolve, reject });
+        if (signal) {
+          signal.addEventListener("abort", () => {
+            if (relayPending.delete(id)) reject(new DOMException("Aborted", "AbortError"));
+          });
+        }
+        window.parent.postMessage(
+          {
+            ns: "thclaws-shell",
+            type: "fetch",
+            requestId: id,
+            shellId,
+            sessionId,
+            payload: {
+              url: href,
+              method: String(init.method || "GET").toUpperCase(),
+              headers,
+              body,
+            },
+          },
+          "*",
+        );
+      });
+    };
+
+    if (nativeFetch) {
+      window.fetch = function (input, init) {
+        let href;
+        if (typeof input === "string" || input instanceof URL) {
+          href = String(input);
+        } else if (input instanceof Request && init == null && input.method === "GET") {
+          href = input.url;
+        } else {
+          return nativeFetch(input, init);
+        }
+        let u;
+        try {
+          u = new URL(href, document.baseURI);
+        } catch (e) {
+          return nativeFetch(input, init);
+        }
+        if (hostOf(u) !== here) return nativeFetch(input, init);
+        return relayFetch(u.href, init);
+      };
+    }
+
+    const retried = new WeakSet();
+    window.addEventListener(
+      "error",
+      (ev) => {
+        const el = ev.target;
+        if (!(el instanceof Element) || retried.has(el)) return;
+        let attr = null;
+        if (/^(IMG|VIDEO|AUDIO|SOURCE)$/.test(el.tagName)) attr = "src";
+        else if (el.tagName === "LINK" && /(^|\s)stylesheet(\s|$)/i.test(el.rel || "")) attr = "href";
+        if (!attr) return;
+        const raw = el.getAttribute(attr);
+        if (!raw) return;
+        let u;
+        try {
+          u = new URL(raw, document.baseURI);
+        } catch (e) {
+          return;
+        }
+        if (hostOf(u) !== here) return;
+        retried.add(el);
+        relayFetch(u.href, { method: "GET" })
+          .then((r) => (r.ok ? r.blob() : null))
+          .then((blob) => {
+            if (!blob) return;
+            el.setAttribute(attr, URL.createObjectURL(blob));
+            if (el.tagName === "SOURCE" && el.parentElement && el.parentElement.load) {
+              el.parentElement.load();
+            }
+          })
+          .catch(() => {});
+      },
+      true,
+    );
   }
 
   window.thclaws = {

@@ -4904,7 +4904,7 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
     // Auth-less providers build directly.
     match kind {
         ProviderKind::AgentSdk => {
-            let bin = std::env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
+            let bin = crate::providers::agent_sdk::claude_bin();
             // SDK MCP bridge: Claude Code's built-in tools are
             // disabled (via --allowedTools) and thClaws's tool
             // registry is exposed over the in-process SDK MCP
@@ -5016,6 +5016,13 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
             let key = config
                 .api_key_from_env()
                 .unwrap_or_else(|| "local-no-auth".to_string());
+            // On an EE Pack box the gateway sits in front of LiteLLM and
+            // meters it; without this the overlay is computed and ignored.
+            let (key, url) =
+                match crate::providers::thclaws_gateway::gateway_overlay_for_model(config, kind) {
+                    Some(o) => (o.access_key, format!("{}/chat/completions", o.base_url)),
+                    None => (key, url),
+                };
             return Ok(Arc::new(
                 OpenAIProvider::new(key)
                     .with_base_url(url)
@@ -9920,6 +9927,14 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         println!(
                             "{COLOR_DIM}permissions: {label} (auto = never prompt, ask = prompt on mutating tools, plan = read-only exploration; mutating tools blocked, linegated = approval routed to LINE chat — auto-active while LINE is paired, see chapter 21){COLOR_RESET}"
                         );
+                    } else if let Some(msg) = (match mode.as_str() {
+                        "auto" | "yolo" => Some(PermissionMode::Auto),
+                        "ask" | "default" => Some(PermissionMode::Ask),
+                        _ => None,
+                    })
+                    .and_then(crate::policy::permission_mode_refusal)
+                    {
+                        println!("{COLOR_DIM}{msg}{COLOR_RESET}");
                     } else {
                         match mode.as_str() {
                             "auto" | "yolo" => {

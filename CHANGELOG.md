@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.147.0] — 2026-10-29
+
+**A security release.** An outside review before the thClaws Enterprise launch found ways for a cloned project, a web page or an agent-built UI tab to reach further than it should. This release closes them. Some defaults are stricter, so read *Changed* if you use project `.env` files, the local `/v1` API or `--serve` on a network.
+
+### Security
+
+- **Opening a project no longer runs anything from it.** Project hooks, loosened permission or sandbox settings, `remoteAgentUrl`, and endpoint or tool-path variables in a project `.env` (for example `XDG_*`, `*_BASE_URL`, `CLAUDE_BIN`) apply only in a folder you trust. Until a trust prompt ships, trust a folder by starting thClaws with `THCLAWS_TRUST_PROJECT=1`.
+- **Sandboxed shell commands stay sandboxed.** Bash can't write to `.thclaws/`, and whether confinement works is checked once at start-up instead of read from a command's own output. Multi-user workspaces never run commands unconfined, and the local server's tokens are no longer passed to commands, MCP servers or hooks.
+- **The local `/v1` API (port 18443) always needs its token** and checks the Host and Origin headers. The token is in `~/.config/thclaws/loopback.json`. Deploy and restart are no longer served there.
+- **Web pages can't drive a local `--serve`.** It checks Host and Origin, and a request without an origin (`Origin: null`) can only read: no WebSocket, no writes.
+- **Agent-built UI tabs are isolated.** On `--serve` and the cloud they run in a sandboxed frame without access to the app. A tab can't choose which message type it sends, speak for another tab, or approve its own tool calls.
+- **Web fetches check every redirect and every DNS answer.** WebFetch, image fetching and KMS web ingest refuse to be redirected or resolved into private and metadata addresses.
+- **KMS page names can't leave the knowledge base** (`../` is refused), and the KMS viewer sanitizes the HTML it shows.
+- **Enterprise policy:** `deny_tools` now also covers UI tabs, the Agent SDK tool bridge, MCP widgets and `!` shell commands, and a pinned permission mode can't be changed.
+
+### Changed
+
+- **A project `.env` in a folder you haven't trusted sets only API keys and tokens** (names ending in `_API_KEY`, `_KEY`, `_TOKEN` or `_SECRET`). Other values in it — model names, regions, endpoints — are ignored with a warning. Put them in settings, your user-level `.env`, or trust the folder.
+- **`--serve` refuses to listen on a network address without `THCLAWS_SERVE_TOKEN`.** Loopback is unaffected; hosted runners and setups behind an authenticating proxy (`THCLAWS_SERVE_BEHIND_PROXY=1`) are exempt.
+- **Clients of the local `/v1` API must send the bearer token** from `loopback.json`.
+- **KmsDelete points at `/kms drop`** for deleting a whole knowledge base, instead of the agent removing folders by hand.
+- **On an AI Server box, the agent uses the internet only when you ask**, never to work around a failing local tool.
+- **Web scraping errors say what happened.** A page that doesn't exist or a site the scraper can't reach is reported as such, so the agent stops retrying it.
+
+### Added
+
+- **Enterprise:** organization RAG is available to cloud workspaces through the gateway, and LiteLLM (the AI Server hub's model router) works as a provider behind the gateway. The engine image also builds on arm64.
+
 ## [0.146.0] — 2026-10-25
 
 **On an AI Server box, nothing goes to the thClaws cloud unless the box allows it.** 0.145 kept documents and recordings on the box; 0.146 closes the rest and gives the box's hub an on/off switch.

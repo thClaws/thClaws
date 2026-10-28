@@ -750,6 +750,8 @@ pub async fn dispatch(
                          see chapter 21)"
                     ),
                 );
+            } else if let Some(msg) = permissions_change_refusal(&mode) {
+                emit(events_tx, msg);
             } else {
                 // Three settable modes here:
                 // - auto / ask → persisted to settings.json; survive restart.
@@ -5099,6 +5101,28 @@ fn dispatch_workflow_inspect(prefix: String, events_tx: &broadcast::Sender<ViewE
         }
     }
     emit(events_tx, lines.join("\n"));
+}
+
+/// `/permissions <mode>` is refused when the org pins the mode, and in a
+/// multiuser pod, where the mode is one process-wide value for every member.
+fn permissions_change_refusal(arg: &str) -> Option<String> {
+    if crate::workdir::is_multiuser() {
+        return Some(
+            "Permission mode is fixed (auto) in shared workspaces — it applies to every member."
+                .into(),
+        );
+    }
+    permissions_arg_mode(arg).and_then(crate::policy::permission_mode_refusal)
+}
+
+fn permissions_arg_mode(arg: &str) -> Option<crate::permissions::PermissionMode> {
+    use crate::permissions::PermissionMode;
+    match arg.trim().to_lowercase().as_str() {
+        "auto" | "yolo" => Some(PermissionMode::Auto),
+        "ask" | "default" => Some(PermissionMode::Ask),
+        "linegated" | "line" => Some(PermissionMode::LineGated),
+        _ => None,
+    }
 }
 
 /// When LINE is currently bridged and the user just chose `auto` or

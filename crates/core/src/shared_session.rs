@@ -3464,7 +3464,10 @@ async fn run_worker(
                 // the agent loop uses so a trusted server's widget
                 // can't silently invoke `delete_*`-style tools when
                 // the user has set permission_mode = "ask".
-                let tool = state.tool_registry.get(&qualified_name);
+                let tool = state
+                    .tool_registry
+                    .get(&qualified_name)
+                    .filter(|_| crate::policy::tool_allowed(&qualified_name));
                 let (content, is_error) = match tool {
                     Some(t) => {
                         let mode = crate::permissions::current_mode();

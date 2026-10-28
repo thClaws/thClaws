@@ -624,6 +624,9 @@ fn resolve_folded(name: &str) -> Option<KmsRef> {
 /// The name exactly as given. For callers that must not be helped — the
 /// slash-command parser uses it to decide where a name ends.
 pub fn resolve_exact(name: &str) -> Option<KmsRef> {
+    // The name is often the model's: `../../skills` would land a "KMS"
+    // in `.thclaws/` or, from user scope, anywhere under `$HOME`.
+    validate_name(name).ok()?;
     for scope in [KmsScope::Project, KmsScope::User, KmsScope::Shared] {
         for root in scope_roots(scope) {
             let candidate = root.join(name);
@@ -2255,7 +2258,8 @@ pub async fn ingest_url(
         )));
     }
 
-    let client = reqwest::Client::builder()
+    crate::net_guard::guard(url).await.map_err(Error::Tool)?;
+    let client = crate::net_guard::guarded_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(crate::version::WEB_USER_AGENT)
         .build()
@@ -6170,6 +6174,7 @@ fn collect_okf_concepts(bundle: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
 /// pages rather than translated, so the result is always KMS-native.
 /// Errors if a KMS by that name already exists at the target scope.
 pub fn import_okf(bundle: &Path, name: &str, scope: KmsScope) -> Result<OkfImportReport> {
+    validate_name(name)?;
     if !bundle.is_dir() {
         return Err(Error::Tool(format!(
             "'{}' is not a directory",
@@ -7803,6 +7808,20 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod name_traversal_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_refuses_names_that_leave_the_kms_root() {
+        // Re-audit N11: KmsWrite passed the model's `kms` straight in.
+        for bad in ["../../skills", "..", "a/b", "/etc", ".thclaws", "x\\..\\y"] {
+            assert!(resolve_exact(bad).is_none(), "{bad}");
+            assert!(resolve(bad).is_none(), "{bad}");
+        }
+    }
 }
 
 #[cfg(test)]

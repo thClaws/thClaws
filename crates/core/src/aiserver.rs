@@ -131,6 +131,32 @@ fn hub_base() -> String {
         .unwrap_or_else(|| "http://127.0.0.1:9000".to_string())
 }
 
+/// The box owner treats any outbound call as needing the user's say-so; left
+/// alone, a model reaches for WebSearch to work around a failing local tool.
+pub const WEB_ONLY_WHEN_ASKED: &str = "This machine is an on-premise AI Server. Use the internet \
+     (WebSearch, WebFetch, browser) only when the user asks for information from the \
+     internet or gives you a URL. Never go online on your own initiative, e.g. to work \
+     around a local tool that failed or to look up how to do something: report what \
+     failed and ask the user instead.";
+
+/// Local AI: an AI Server box (discovery answered), or a workspace of the
+/// thClaws EE Pack on one (`THCLAWS_LOCAL_AI=1`, set by the Pack's
+/// provisioner — the pod can't see the Suite's discovery itself).
+pub fn local_ai() -> bool {
+    cached().is_some()
+        || std::env::var("THCLAWS_LOCAL_AI")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+}
+
+/// `base` off the box; `base` plus [`WEB_ONLY_WHEN_ASKED`] on it.
+pub fn web_tool_description(base: &'static str, cell: &'static OnceLock<String>) -> &'static str {
+    if !local_ai() {
+        return base;
+    }
+    cell.get_or_init(|| format!("{base}\n\n{WEB_ONLY_WHEN_ASKED}"))
+}
+
 /// Probe once and remember the answer for the rest of the process. Safe to
 /// call from anywhere; only the first call does I/O.
 ///
@@ -263,6 +289,26 @@ pub async fn bootstrap() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_tools_unchanged_off_the_box() {
+        let _g = crate::kms::test_env_lock();
+        static CELL: OnceLock<String> = OnceLock::new();
+        assert!(cached().is_none());
+        assert_eq!(web_tool_description("base", &CELL), "base");
+    }
+
+    #[test]
+    fn an_ee_pack_workspace_counts_as_local_ai() {
+        let _g = crate::kms::test_env_lock();
+        std::env::remove_var("THCLAWS_LOCAL_AI");
+        assert!(!local_ai());
+        std::env::set_var("THCLAWS_LOCAL_AI", "1");
+        assert!(local_ai());
+        static CELL: OnceLock<String> = OnceLock::new();
+        assert!(web_tool_description("base", &CELL).ends_with(WEB_ONLY_WHEN_ASKED));
+        std::env::remove_var("THCLAWS_LOCAL_AI");
+    }
 
     // `THCLAWS_AISERVER_HUB` is process-global, so the two probe tests must
     // not overlap or one clears the other's target mid-request.

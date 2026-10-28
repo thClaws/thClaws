@@ -273,21 +273,7 @@ async fn run_shell_command(
     is_server: bool,
     cancel: Option<&crate::cancel::CancelToken>,
 ) -> Result<String> {
-    let out = run_shell_command_inner(command, cwd, timeout_ms, is_server, true, cancel).await?;
-    // If the OS confiner couldn't enforce, it bailed BEFORE running the
-    // command (exiting with a no-enforce sentinel, NOT the command's output).
-    // Re-run unconfined so the command actually executes — the workspace /
-    // container remains the security boundary in environments where the
-    // kernel confiner is unavailable (e.g. a hosted runner whose container
-    // kernel returns EINVAL from the Landlock syscalls). Without this, every
-    // Bash call (and `!` shell escape) fails with "landlock setup failed,
-    // exit 78" and no output.
-    if crate::confine::output_shows_no_enforce(&out) {
-        // Remember so later commands skip the doomed confined attempt.
-        crate::confine::mark_no_enforce();
-        return run_shell_command_inner(command, cwd, timeout_ms, is_server, false, cancel).await;
-    }
-    Ok(out)
+    run_shell_command_inner(command, cwd, timeout_ms, is_server, cancel).await
 }
 
 /// Kills a spawned command's whole process group when dropped.
@@ -360,19 +346,13 @@ async fn run_shell_command_inner(
     cwd: &std::path::Path,
     timeout_ms: u64,
     is_server: bool,
-    confined: bool,
     cancel: Option<&crate::cancel::CancelToken>,
 ) -> Result<String> {
     // dev-plan/49: route through the OS confiner — returns a sandbox-exec /
     // bwrap-wrapped `sh -c` when bash.sandbox is on and a confiner is
     // available, else a plain `sh -c` (unchanged). One chokepoint, so
-    // subagent/workflow Bash is confined identically. `confined=false` is the
-    // unconfined re-run path when the confiner couldn't enforce.
-    let mut cmd = if confined {
-        crate::confine::shell_command_async(command)
-    } else {
-        crate::util::shell_command_async(command)
-    };
+    // subagent/workflow Bash is confined identically.
+    let mut cmd = crate::confine::shell_command_async(command).map_err(Error::Tool)?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1348,6 +1328,19 @@ fn looks_like_tty_required(stdout: &str, stderr: &str) -> bool {
     FRAGMENTS.iter().any(|f| combined.contains(f))
 }
 
+/// Never inherited by a child the agent can steer (Bash, hooks, MCP
+/// servers). The serve and loopback tokens open the engine's own socket,
+/// whose PTY and settings writes are not confined — a confined command
+/// holding them could step outside its sandbox.
+pub(crate) const ENGINE_SECRET_ENV: &[&str] = &[
+    "THCLAWS_CLOUD_HMAC_SECRET",
+    "THCLAWS_GATEWAY_API_KEY",
+    "THCLAWS_CLOUD_TOKEN",
+    "THCLAWS_SERVE_TOKEN",
+    "THCLAWS_SERVE_ADDR_FILE",
+    "THCLAWS_API_TOKEN",
+];
+
 /// Apply non-interactive environment variables to a child command.
 /// Most modern CLIs honour at least one of these to skip prompts and
 /// auto-accept defaults. M6.8 B1 — workaround for the lack of a real
@@ -1363,12 +1356,7 @@ fn looks_like_tty_required(stdout: &str, stderr: &str) -> bool {
 /// re-injected as `THCLAWS_GATEWAY_{API_KEY,BASE_URL}` so agent scripts can
 /// reach Gemini image/TTS through the metered gateway with zero .env setup.
 fn scrub_sensitive_env(cmd: &mut tokio::process::Command) {
-    const ALWAYS: &[&str] = &[
-        "THCLAWS_CLOUD_HMAC_SECRET",
-        "THCLAWS_GATEWAY_API_KEY",
-        "THCLAWS_CLOUD_TOKEN",
-    ];
-    for k in ALWAYS {
+    for k in ENGINE_SECRET_ENV {
         cmd.env_remove(k);
     }
     if crate::workdir::is_multiuser() {
@@ -1455,11 +1443,30 @@ fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {
 mod tests {
     use super::*;
 
+    /// Audit C2: a command that prints the confiner's no-enforce sentinel used
+    /// to be re-run unconfined. It must run exactly once, as written.
+    #[tokio::test]
+    async fn printing_the_no_enforce_sentinel_does_not_rerun_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = format!(
+            "echo run >> runs.txt; printf '%s\\n' '{}' >&2",
+            crate::confine::NO_ENFORCE_SENTINEL
+        );
+        let out = run_shell_command(&cmd, dir.path(), 30_000, false, None)
+            .await
+            .unwrap();
+        assert!(crate::confine::output_shows_no_enforce(&out), "{out:?}");
+        let runs = std::fs::read_to_string(dir.path().join("runs.txt")).unwrap();
+        assert_eq!(runs.lines().count(), 1, "command must not be re-run");
+    }
+
     #[test]
     fn scrub_removes_platform_secrets_keeps_others() {
         let mut cmd = crate::util::shell_command_async("true");
         cmd.env("THCLAWS_GATEWAY_API_KEY", "spend-me")
             .env("THCLAWS_CLOUD_HMAC_SECRET", "forge-me")
+            .env("THCLAWS_SERVE_TOKEN", "own-socket")
+            .env("THCLAWS_API_TOKEN", "own-v1")
             .env("KEEP_ME", "1");
         scrub_sensitive_env(&mut cmd);
         let std = cmd.as_std();
@@ -1475,6 +1482,11 @@ mod tests {
             removed("THCLAWS_CLOUD_HMAC_SECRET"),
             "hmac secret must be scrubbed"
         );
+        assert!(
+            removed("THCLAWS_SERVE_TOKEN"),
+            "serve token reopens the engine's socket"
+        );
+        assert!(removed("THCLAWS_API_TOKEN"), "loopback token reopens /v1");
         assert!(
             std.get_envs()
                 .any(|(k, v)| k == std::ffi::OsStr::new("KEEP_ME")
@@ -2357,8 +2369,7 @@ mod cancel_kills_the_tree {
         });
 
         let res =
-            super::run_shell_command_inner(&cmd, dir.path(), 30_000, false, false, Some(&cancel))
-                .await;
+            super::run_shell_command_inner(&cmd, dir.path(), 30_000, false, Some(&cancel)).await;
         assert!(res.is_err(), "cancel should surface as an error");
 
         // Give the signal a moment to be reaped, then look for survivors.

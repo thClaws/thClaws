@@ -2131,7 +2131,7 @@ impl Agent {
                     // mid-turn, and we want that to take effect on the
                     // very next dispatch. `permission_mode_default` only
                     // matters when nothing has set the global yet.
-                    let permission_mode = {
+                    let permission_mode = crate::policy::clamp_permission_mode({
                         let m = crate::permissions::current_mode();
                         if matches!(m, PermissionMode::Ask) && permission_mode_default == PermissionMode::Auto {
                             // Worker startup before init — fall back to
@@ -2142,7 +2142,7 @@ impl Agent {
                         } else {
                             m
                         }
-                    };
+                    });
 
                     // M6.20 BUG M1: TodoWrite block fires BEFORE the
                     // generic mutating-tool block below. Pre-fix the

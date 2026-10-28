@@ -22,12 +22,31 @@ pub struct WebFetchTool {
 }
 
 impl WebFetchTool {
+    const BASE_DESCRIPTION: &'static str =
+        "Fetch a URL and return text. When `HAL_API_KEY` is set, runs \
+         **both** a HAL headless-browser scrape **and** a plain HTTP \
+         GET in parallel, returning a single combined response with \
+         each section clearly labelled — the HAL section gives you \
+         clean Markdown from JS-rendered content, the plain GET \
+         section gives you the raw response body (preserves JSON, \
+         headers-style content, and anything browser-rendering would \
+         distort). This dual view lets you pick the right slice per \
+         URL: HAL for SPA / docs / news / blog content; plain GET for \
+         JSON APIs / xml / robots.txt / sitemap-style payloads. \
+         If only one of the two paths succeeds, the result still \
+         comes back with a `[note: ...]` line explaining which one \
+         dropped. When `HAL_API_KEY` is absent, this is just a plain \
+         HTTP GET. Set `prefer_raw: true` to skip HAL entirely and \
+         get only the plain GET section (faster, half the tokens) — \
+         useful when you know the URL is a JSON endpoint or similar. \
+         `max_bytes` (default 100 KB) caps each section independently.";
+
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::net_guard::guarded_client_builder()
             .timeout(WEB_FETCH_TIMEOUT)
             .user_agent(crate::version::WEB_USER_AGENT)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("http client");
         // Reuse hal's builder so the timeout / TLS settings stay in
         // lockstep with the dedicated WebScrape tool.
         let hal_client = crate::tools::hal::build_client();
@@ -48,23 +67,8 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Fetch a URL and return text. When `HAL_API_KEY` is set, runs \
-         **both** a HAL headless-browser scrape **and** a plain HTTP \
-         GET in parallel, returning a single combined response with \
-         each section clearly labelled — the HAL section gives you \
-         clean Markdown from JS-rendered content, the plain GET \
-         section gives you the raw response body (preserves JSON, \
-         headers-style content, and anything browser-rendering would \
-         distort). This dual view lets you pick the right slice per \
-         URL: HAL for SPA / docs / news / blog content; plain GET for \
-         JSON APIs / xml / robots.txt / sitemap-style payloads. \
-         If only one of the two paths succeeds, the result still \
-         comes back with a `[note: ...]` line explaining which one \
-         dropped. When `HAL_API_KEY` is absent, this is just a plain \
-         HTTP GET. Set `prefer_raw: true` to skip HAL entirely and \
-         get only the plain GET section (faster, half the tokens) — \
-         useful when you know the URL is a JSON endpoint or similar. \
-         `max_bytes` (default 100 KB) caps each section independently."
+        static ON_BOX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        crate::aiserver::web_tool_description(Self::BASE_DESCRIPTION, &ON_BOX)
     }
 
     fn input_schema(&self) -> Value {

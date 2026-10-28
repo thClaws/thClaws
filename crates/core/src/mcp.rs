@@ -690,6 +690,9 @@ impl McpClient {
             // ("npm error code ENOTEMPTY") lives only here.
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        for k in crate::tools::bash::ENGINE_SECRET_ENV {
+            cmd.env_remove(k);
+        }
         for (k, v) in &config.env {
             cmd.env(k, v);
         }

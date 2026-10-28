@@ -143,6 +143,31 @@ where
     WORKDIR.scope(root, fut).await
 }
 
+/// Synchronous twin of [`scope_workdir`]: a multiuser WS frame's IPC
+/// handler runs under the calling member's root.
+pub fn sync_scope_workdir<F, T>(root: PathBuf, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    WORKDIR.sync_scope(root, f)
+}
+
+/// The scoped root, if any — captured before a handler spawns a task so
+/// the task can re-enter it with [`rescope`].
+pub fn scoped_root() -> Option<PathBuf> {
+    WORKDIR.try_with(|p| p.clone()).ok()
+}
+
+pub async fn rescope<F, T>(root: Option<PathBuf>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    match root {
+        Some(r) => WORKDIR.scope(r, fut).await,
+        None => fut.await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

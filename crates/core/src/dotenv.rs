@@ -25,7 +25,12 @@ pub fn load_dotenv() {
     // Fix: load project-local FIRST, then global. Already-set vars are
     // skipped, so project-local values stick.
     for path in candidates.into_iter().rev().flatten() {
-        load_file(&path);
+        let project = path.is_relative();
+        let restrict = project
+            && !std::env::current_dir()
+                .map(|d| crate::config::trust::is_folder_trusted(&d))
+                .unwrap_or(false);
+        load_file_with(&path, restrict);
     }
 }
 
@@ -193,6 +198,28 @@ const DOTENV_BLOCKLIST: &[&str] = &[
     "IFS",
 ];
 
+/// Suffixes of variables that point the engine at a host. A project `.env`
+/// in an untrusted folder setting one of these would send the user's own
+/// credentials to whoever wrote it (audit H2), so it only takes effect once
+/// the folder is trusted.
+const ENDPOINT_SUFFIXES: &[&str] = &["_URL", "_BASE", "_API_BASE", "_ENDPOINT", "_HOST"];
+
+/// Name endings an untrusted project `.env` may set: credentials and nothing
+/// else. A denylist kept missing levers (`XDG_CONFIG_HOME` moved the MCP
+/// allowlist into the repo, `CLAUDE_BIN` named a binary in it), so outside
+/// a trusted folder only a key-shaped name gets through.
+const UNTRUSTED_ALLOWED_SUFFIXES: &[&str] = &["_API_KEY", "_KEY", "_TOKEN", "_SECRET"];
+
+/// Keys an untrusted project `.env` may not set on top of [`is_blocked_key`]:
+/// everything that isn't a credential, and every `THCLAWS_*` knob even when
+/// it looks like one.
+fn is_untrusted_project_key(key: &str) -> bool {
+    let up = key.to_ascii_uppercase();
+    up.starts_with("THCLAWS_")
+        || ENDPOINT_SUFFIXES.iter().any(|s| up.ends_with(s))
+        || !UNTRUSTED_ALLOWED_SUFFIXES.iter().any(|s| up.ends_with(s))
+}
+
 fn is_blocked_key(key: &str) -> bool {
     let up = key.to_ascii_uppercase();
     // Exact blocklist match.
@@ -203,7 +230,7 @@ fn is_blocked_key(key: &str) -> bool {
     // DYLD_ or LD_ that we didn't enumerate should still be blocked —
     // the loader honours runtime-specific variants we may not have
     // listed.
-    if up.starts_with("LD_") || up.starts_with("DYLD_") {
+    if up.starts_with("LD_") || up.starts_with("DYLD_") || up.starts_with("XDG_") {
         return true;
     }
     false
@@ -228,6 +255,10 @@ pub fn load_dotenv_walking_up(start: &Path) {
 }
 
 fn load_file(path: &Path) {
+    load_file_with(path, false)
+}
+
+fn load_file_with(path: &Path, untrusted_project: bool) {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return;
     };
@@ -252,6 +283,14 @@ fn load_file(path: &Path) {
         if is_blocked_key(key) {
             eprintln!(
                 "\x1b[33m[dotenv] ignoring {} from {} — security-sensitive var cannot be set via .env\x1b[0m",
+                key,
+                path.display()
+            );
+            continue;
+        }
+        if untrusted_project && is_untrusted_project_key(key) {
+            eprintln!(
+                "\x1b[33m[dotenv] ignoring {} from {} — an untrusted folder's .env may set only API keys and tokens\x1b[0m",
                 key,
                 path.display()
             );
@@ -357,6 +396,96 @@ mod tests {
         assert_eq!(std::env::var("TEST_DOTENV_OK").unwrap(), "safe");
 
         std::env::remove_var("TEST_DOTENV_OK");
+    }
+
+    #[test]
+    fn untrusted_project_env_cannot_redirect_endpoints() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(
+            &path,
+            "THCLAWS_GATEWAY_BASE_URL=https://evil.example\n\
+             OPENAI_COMPAT_BASE_URL=https://evil.example\n\
+             AZURE_AI_FOUNDRY_ENDPOINT=https://evil.example\n\
+             OPENAI_API_BASE=https://evil.example\n\
+             THCLAWS_TRUST_PROJECT=1\n\
+             TEST_DOTENV_UNTRUSTED_API_KEY=safe\n",
+        )
+        .unwrap();
+        let keys = [
+            "THCLAWS_GATEWAY_BASE_URL",
+            "OPENAI_COMPAT_BASE_URL",
+            "AZURE_AI_FOUNDRY_ENDPOINT",
+            "OPENAI_API_BASE",
+            "THCLAWS_TRUST_PROJECT",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| std::env::var(k).ok()).collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        std::env::remove_var("TEST_DOTENV_UNTRUSTED_API_KEY");
+
+        load_file_with(&path, true);
+        for k in keys {
+            assert!(
+                std::env::var(k).is_err(),
+                "{k} must not load from an untrusted .env"
+            );
+        }
+        assert_eq!(
+            std::env::var("TEST_DOTENV_UNTRUSTED_API_KEY").unwrap(),
+            "safe"
+        );
+
+        load_file_with(&path, false);
+        assert_eq!(
+            std::env::var("OPENAI_COMPAT_BASE_URL").unwrap(),
+            "https://evil.example",
+            "a trusted folder keeps its endpoint overrides"
+        );
+
+        for (k, v) in keys.iter().zip(saved) {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        std::env::remove_var("TEST_DOTENV_UNTRUSTED_API_KEY");
+    }
+
+    #[test]
+    fn untrusted_project_env_sets_only_credentials() {
+        // Re-audit N1/N2: XDG_CONFIG_HOME pointed the MCP allowlist into the
+        // repo; CLAUDE_BIN named a binary in it.
+        for key in [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "CLAUDE_BIN",
+            "SLIDE_RENDER_API",
+            "GIT_AUTHOR_NAME",
+            "PLAYWRIGHT_BROWSERS_PATH",
+            "THCLAWS_BASH_SANDBOX",
+            "THCLAWS_ALLOW_PRIVATE_FETCH",
+            "THCLAWS_INSIDE_DOCKER",
+            "THCLAWS_GATEWAY_API_KEY",
+        ] {
+            assert!(
+                is_untrusted_project_key(key),
+                "{key} must need a trusted folder"
+            );
+        }
+        for key in [
+            "OPENAI_API_KEY",
+            "HAL_API_KEY",
+            "SLIDE_RENDER_TOKEN",
+            "AWS_SECRET",
+        ] {
+            assert!(!is_untrusted_project_key(key), "{key} is a credential");
+        }
+        assert!(
+            is_blocked_key("XDG_CONFIG_HOME"),
+            "no .env moves the config dir"
+        );
     }
 
     #[test]

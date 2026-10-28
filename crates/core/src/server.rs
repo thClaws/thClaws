@@ -614,6 +614,17 @@ pub async fn run_with_engine(
             config.bind
         )));
     }
+    // H5: off loopback, a single-user serve with no bearer is the whole
+    // engine for anyone on the network. Multiuser (HMAC) and a gui-shell's
+    // own token authenticate every request themselves.
+    let own_auth = config.multi_tenant.is_some()
+        || config
+            .gui_shell
+            .as_ref()
+            .is_some_and(|m| !m.no_auth || m.no_auth_allow_public);
+    if let Some(msg) = crate::api_v1::guard::public_bind_refusal(&config.bind, own_auth) {
+        return Err(crate::error::Error::Tool(msg));
+    }
 
     // dev-plan/33 Tier 2 Mode B: when a shell is bound, swap the
     // React-frontend routes for the gui_shell::serve mount. The
@@ -646,6 +657,7 @@ pub async fn run_with_engine(
     // The address actually bound, not the one asked for: with `--port 0` the
     // two differ, and the banner used to print `:0`.
     let bound = listener.local_addr().unwrap_or(config.bind);
+    let app = loopback_guarded(app, &bound);
     if config.gui_shell.is_none() {
         eprintln!("\x1b[36m[serve] thClaws listening on http://{bound}\x1b[0m");
         eprintln!("\x1b[36m[serve] open the URL above in your browser (over an SSH tunnel for remote access)\x1b[0m");
@@ -1177,6 +1189,11 @@ pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::erro
             "--serve is disabled by org policy (policies.runtime.allow_serve = false)".into(),
         ));
     }
+    if let Ok(addr) = listener.local_addr() {
+        if let Some(msg) = crate::api_v1::guard::public_bind_refusal(&addr, false) {
+            return Err(crate::error::Error::Tool(msg));
+        }
+    }
     let workspace = std::env::current_dir()
         .map_err(|e| crate::error::Error::Tool(format!("workspace cwd unavailable: {e}")))?;
     // dev-plan/59 Step 4. Two ways to have no bot list, and they must not be
@@ -1293,7 +1310,7 @@ pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::erro
         .map_err(|e| crate::error::Error::Tool(format!("listener address: {e}")))?;
     eprintln!("\x1b[36m[serve] thClaws host listening on http://{bound}\x1b[0m");
     publish_bound_addr(bound);
-    axum::serve(listener, supervisor_router(sup))
+    axum::serve(listener, loopback_guarded(supervisor_router(sup), &bound))
         .await
         .map_err(|e| crate::error::Error::Tool(format!("serve: {e}")))?;
     Ok(())
@@ -2064,6 +2081,18 @@ fn is_loopback(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
 }
 
+/// A loopback listener still answers web pages: DNS rebinding and
+/// cross-site requests reach it with a foreign Host or Origin.
+fn loopback_guarded(app: Router, bound: &SocketAddr) -> Router {
+    if is_loopback(bound) {
+        app.layer(axum::middleware::from_fn(
+            crate::api_v1::guard::serve_loopback_guard,
+        ))
+    } else {
+        app
+    }
+}
+
 /// RAII guard that increments the WS-connection counter on
 /// construction and decrements on drop. Used inside `handle_socket`
 /// so the counter is panic-safe — any early return / unwind still
@@ -2515,10 +2544,15 @@ async fn serve_gui_shell_asset(
 /// crafted `../etc/passwd` can't escape. Single-tenant per --serve
 /// process; multi-tenant adds HMAC in `build_shell_router`.
 async fn serve_file_asset(
+    State(state): State<ServeState>,
     axum::extract::Path(rel): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let cwd = crate::workdir::workspace_root();
+    let cwd = match caller_member_root(&state, &headers) {
+        Ok(Some((_, root))) => root,
+        Ok(None) => crate::workdir::workspace_root(),
+        Err(status) => return status.into_response(),
+    };
     let range = headers
         .get(axum::http::header::RANGE)
         .and_then(|v| v.to_str().ok());
@@ -2549,14 +2583,35 @@ struct UploadQuery {
 async fn serve_upload(
     State(state): State<ServeState>,
     Query(q): Query<UploadQuery>,
+    headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    let workspace = state.workspace.as_ref();
+    // Multiuser: the upload lands in, and is announced to, the calling
+    // member's own workspace and session — never the shared pod root.
+    let member = match caller_member_root(&state, &headers) {
+        Ok(m) => m,
+        Err(status) => return status.into_response(),
+    };
+    let (session_input, workspace_buf) = match &member {
+        Some((handle, root)) => (handle.input_tx.clone(), root.clone()),
+        None => (
+            state.shared.input_tx.clone(),
+            state.workspace.as_ref().to_path_buf(),
+        ),
+    };
+    let workspace = workspace_buf.as_path();
     let target_dir = q.dir.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let uploads_dir = match target_dir {
         Some(rel) => ensure_target_dir(workspace, rel),
         None => ensure_uploads_dir(workspace),
-    };
+    }
+    .and_then(|dir| {
+        if member.is_none() {
+            return Ok(dir);
+        }
+        crate::multi_tenant::resolve_member_path(workspace, &dir.to_string_lossy())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))
+    });
     let uploads_dir = match uploads_dir {
         Ok(p) => p,
         Err(e) => {
@@ -2665,7 +2720,7 @@ async fn serve_upload(
     // would make the agent react to files it isn't meant to see yet.
     if target_dir.is_none() {
         let synth = render_upload_message("serve", &saved);
-        let _ = state.shared.input_tx.send(ShellInput::Line(synth));
+        let _ = session_input.send(ShellInput::Line(synth));
     }
 
     let files: Vec<serde_json::Value> = saved
@@ -2683,6 +2738,32 @@ async fn serve_upload(
         Json(serde_json::json!({ "ok": true, "files": files })),
     )
         .into_response()
+}
+
+/// Multiuser: the authenticated member's own `workspace-<id>/`. `None` off
+/// multiuser, or in the dev-plan/35 shared-cwd layout that has no per-member
+/// folder.
+fn member_workspace_root(shared: &SharedSessionHandle) -> Option<std::path::PathBuf> {
+    if !crate::workdir::is_multiuser() {
+        return None;
+    }
+    shared
+        .session_roots
+        .as_ref()
+        .and_then(|r| r.workspace_root.clone())
+}
+
+/// The calling member's session + root from the signed identity headers
+/// (never from a client-supplied path). `Ok(None)` = not multiuser.
+fn caller_member_root(
+    state: &ServeState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(Arc<SharedSessionHandle>, std::path::PathBuf)>, StatusCode> {
+    if state.multi_tenant.is_none() || !crate::workdir::is_multiuser() {
+        return Ok(None);
+    }
+    let handle = resolve_session_handle(state, headers)?;
+    Ok(member_workspace_root(&handle).map(|root| (handle, root)))
 }
 
 async fn ws_handler(
@@ -3125,6 +3206,7 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
         }
     });
 
+    let ipc_root = member_workspace_root(&shared);
     // Inbound reader loop.
     while let Some(frame) = stream.next().await {
         match frame {
@@ -3134,7 +3216,14 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
                 };
                 // Web has no fall-through transport — anything
                 // handle_ipc doesn't recognize is silently dropped.
-                let _handled = handle_ipc(msg, &ctx);
+                // Multiuser: every file op in the frame resolves inside the
+                // calling member's own `workspace-<id>/` (C2).
+                let _handled = match ipc_root.clone() {
+                    Some(root) => {
+                        crate::workdir::sync_scope_workdir(root, || handle_ipc(msg, &ctx))
+                    }
+                    None => handle_ipc(msg, &ctx),
+                };
             }
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {} // ignore Ping/Pong/Binary for now

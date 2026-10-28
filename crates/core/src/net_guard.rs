@@ -12,7 +12,8 @@
 //! Opt out with `THCLAWS_ALLOW_PRIVATE_FETCH=1` (e.g. local dev fetching your
 //! own `localhost` server).
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 
 /// Escape hatch for users who legitimately fetch localhost / LAN.
 pub fn allow_private() -> bool {
@@ -68,6 +69,75 @@ pub async fn guard(url_str: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A client builder whose every hop is checked, not just the URL the tool
+/// was given: each redirect target, and the address actually dialled (so a
+/// name that answers public to [`guard`] and private to the connect, or a
+/// public page that 302s to `169.254.169.254`, is refused too).
+pub fn guarded_client_builder() -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder();
+    if allow_private() {
+        return builder;
+    }
+    builder
+        .dns_resolver(Arc::new(PublicOnlyResolver))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            match check_literal_target(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            }
+        }))
+}
+
+/// The DNS-free half of [`guard`] for a redirect hop: scheme, literal IPs and
+/// loopback names. Names are left to [`PublicOnlyResolver`] at connect time.
+fn check_literal_target(url: &reqwest::Url) -> Result<(), String> {
+    match url.scheme() {
+        "http" | "https" => {}
+        s => return Err(format!("scheme '{s}' is not fetchable")),
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => check_ip(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => check_ip(IpAddr::V6(ip)),
+        Some(url::Host::Domain(d)) => {
+            let lower = d.to_ascii_lowercase();
+            if lower == "localhost" || lower.ends_with(".localhost") {
+                Err(blocked_msg("localhost"))
+            } else {
+                Ok(())
+            }
+        }
+        None => Err("url has no host".to_string()),
+    }
+}
+
+struct PublicOnlyResolver;
+
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let lookup = host.clone();
+            let addrs: Vec<SocketAddr> = tokio::task::spawn_blocking(move || {
+                (lookup.as_str(), 0)
+                    .to_socket_addrs()
+                    .map(|it| it.collect())
+            })
+            .await??;
+            let public: Vec<SocketAddr> = addrs
+                .into_iter()
+                .filter(|a| check_ip(a.ip()).is_ok())
+                .collect();
+            if public.is_empty() {
+                return Err(blocked_msg(&host).into());
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
 fn blocked_msg(what: &str) -> String {
     format!(
         "refuses to fetch {what} — non-public target \
@@ -119,6 +189,49 @@ fn is_blocked_v6(v6: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn guarded_client_refuses_a_redirect_into_metadata() {
+        // Re-audit N12: only the first URL used to be checked. The local
+        // server stands in for a public page (a literal IP never reaches the
+        // resolver); its 302 must not be followed.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+        let client = guarded_client_builder().build().unwrap();
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("redirect into metadata must fail");
+        assert!(err.is_redirect(), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn public_only_resolver_drops_private_answers() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+        let name = reqwest::dns::Name::from_str("localhost").unwrap();
+        assert!(PublicOnlyResolver.resolve(name).await.is_err());
+    }
+
+    #[test]
+    fn redirect_hops_check_literals_and_schemes() {
+        let bad = |u: &str| check_literal_target(&reqwest::Url::parse(u).unwrap()).is_err();
+        assert!(bad("http://10.43.0.1/"));
+        assert!(bad("http://[::1]/"));
+        assert!(bad("http://foo.localhost/"));
+        assert!(bad("file:///etc/passwd"));
+        assert!(!bad("https://example.com/a"));
+    }
 
     fn blocked(s: &str) -> bool {
         check_ip(s.parse().unwrap()).is_err()

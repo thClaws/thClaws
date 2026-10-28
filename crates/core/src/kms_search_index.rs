@@ -296,10 +296,22 @@ impl SearchIndex {
         std::fs::create_dir_all(&index_dir)?;
         let (schema, fields) = build_schema();
 
-        let index = if index_dir.join("meta.json").exists() {
-            Index::open_in_dir(&index_dir)?
-        } else {
-            Index::create_in_dir(&index_dir, schema)?
+        // A cache: one this tantivy can't open (written by another version,
+        // or torn) is dropped and rebuilt by `ensure_fresh`, not an error.
+        let opened = index_dir
+            .join("meta.json")
+            .exists()
+            .then(|| Index::open_in_dir(&index_dir).ok())
+            .flatten();
+        let index = match opened {
+            Some(index) => index,
+            None => {
+                if index_dir.join("meta.json").exists() {
+                    std::fs::remove_dir_all(&index_dir)?;
+                    std::fs::create_dir_all(&index_dir)?;
+                }
+                Index::create_in_dir(&index_dir, schema)?
+            }
         };
         index.tokenizers().register(
             WORD_TOKENIZER,
@@ -1165,6 +1177,20 @@ impl TokenStream for VecTokenStream {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_index_this_version_cannot_open_is_rebuilt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("v");
+        std::fs::create_dir_all(vault.join("pages")).unwrap();
+        let dir = index_dir(&vault);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), "{not an index").unwrap();
+        let idx = SearchIndex::open_or_create(&vault).unwrap();
+        drop(idx);
+        let meta = std::fs::read_to_string(dir.join("meta.json")).unwrap();
+        assert!(meta.contains("segments"), "{meta}");
+    }
+
     /// dev-plan/64 D7. In a real scope the index sits beside the vault, an
     /// index an older build left inside is adopted rather than rebuilt, and
     /// the vault folder ends up holding nothing a sync client would fight.

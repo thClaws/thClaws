@@ -468,7 +468,73 @@ pub fn denied_tools() -> Vec<String> {
 
 /// Whether a given tool may run at all under the active policy.
 pub fn tool_allowed(name: &str) -> bool {
-    !denied_tools().iter().any(|d| d.eq_ignore_ascii_case(name))
+    tool_allowed_in(&denied_tools(), name)
+}
+
+pub fn tool_allowed_in(denied: &[String], name: &str) -> bool {
+    !denied.iter().any(|d| d.eq_ignore_ascii_case(name))
+}
+
+/// Error text for a tool the org denies, shared by every dispatch path.
+pub fn tool_denied_message(name: &str) -> String {
+    format!("tool '{name}' is disabled by your organisation's policy")
+}
+
+use crate::permissions::PermissionMode;
+
+fn mode_rank(m: PermissionMode) -> u8 {
+    match m {
+        PermissionMode::Auto => 0,
+        PermissionMode::Plan => 2,
+        _ => 1,
+    }
+}
+
+fn mode_from_forced(f: &str) -> Option<PermissionMode> {
+    match f {
+        "auto" => Some(PermissionMode::Auto),
+        "ask" => Some(PermissionMode::Ask),
+        "plan" => Some(PermissionMode::Plan),
+        _ => None,
+    }
+}
+
+/// Never let the live mode be looser than the org-forced one. Stricter is
+/// kept (plan mode while `ask` is forced; channel-gated asks).
+pub fn clamp_mode_to(forced: Option<&str>, m: PermissionMode) -> PermissionMode {
+    match forced.and_then(mode_from_forced) {
+        Some(f) if mode_rank(m) < mode_rank(f) => f,
+        _ => m,
+    }
+}
+
+/// `clamp_mode_to` against the active policy. Multiuser keeps its own
+/// forced Auto: approvals can't be routed to one member there.
+pub fn clamp_permission_mode(m: PermissionMode) -> PermissionMode {
+    if crate::workdir::is_multiuser() {
+        return m;
+    }
+    clamp_mode_to(forced_permission_mode().as_deref(), m)
+}
+
+/// Refusal for a user-initiated mode switch (`/permissions`, a shell's
+/// mode selector) that would leave the org-forced mode.
+pub fn permission_mode_refusal_for(
+    forced: Option<&str>,
+    requested: PermissionMode,
+) -> Option<String> {
+    let f = forced?;
+    let fm = mode_from_forced(f)?;
+    if mode_rank(requested) == mode_rank(fm) {
+        return None;
+    }
+    Some(format!(
+        "Permission mode is set by your organisation ('{f}') and can't be changed."
+    ))
+}
+
+pub fn permission_mode_refusal(requested: PermissionMode) -> Option<String> {
+    permission_mode_refusal_for(forced_permission_mode().as_deref(), requested)
 }
 
 /// Whether thClaws Remote may connect.
@@ -952,6 +1018,53 @@ fn fingerprint_matches(expected: &str, actual: &str) -> bool {
     let exp_inner = expected.strip_prefix("sha256:").unwrap_or(expected);
     let act_inner = actual.strip_prefix("sha256:").unwrap_or(actual);
     !exp_inner.is_empty() && act_inner.starts_with(exp_inner)
+}
+
+#[cfg(test)]
+mod permission_pin_tests {
+    use super::*;
+
+    /// H4: an org-pinned mode can't be switched by a user setter, and the
+    /// live mode never ends up looser than the pin.
+    #[test]
+    fn pinned_permission_mode_not_changeable() {
+        let ask = Some("ask");
+        assert!(permission_mode_refusal_for(ask, PermissionMode::Auto).is_some());
+        assert!(permission_mode_refusal_for(ask, PermissionMode::Ask).is_none());
+        assert!(permission_mode_refusal_for(ask, PermissionMode::LineGated).is_none());
+        assert!(permission_mode_refusal_for(Some("auto"), PermissionMode::Ask).is_some());
+        assert!(permission_mode_refusal_for(None, PermissionMode::Auto).is_none());
+        let msg = permission_mode_refusal_for(ask, PermissionMode::Auto).unwrap();
+        assert!(msg.contains("organisation"), "{msg}");
+
+        assert_eq!(
+            clamp_mode_to(ask, PermissionMode::Auto),
+            PermissionMode::Ask
+        );
+        assert_eq!(
+            clamp_mode_to(ask, PermissionMode::Plan),
+            PermissionMode::Plan
+        );
+        assert_eq!(
+            clamp_mode_to(Some("plan"), PermissionMode::Ask),
+            PermissionMode::Plan
+        );
+        assert_eq!(
+            clamp_mode_to(None, PermissionMode::Auto),
+            PermissionMode::Auto
+        );
+        assert_eq!(
+            clamp_mode_to(Some("auto"), PermissionMode::Ask),
+            PermissionMode::Ask
+        );
+    }
+
+    #[test]
+    fn tool_allowed_in_is_case_insensitive() {
+        let denied = vec!["Bash".to_string()];
+        assert!(!tool_allowed_in(&denied, "bash"));
+        assert!(tool_allowed_in(&denied, "Read"));
+    }
 }
 
 #[cfg(test)]

@@ -612,12 +612,14 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search the web for information. Auto-selects the best available \
+        const BASE: &str = "Search the web for information. Auto-selects the best available \
          backend: Tavily (TAVILY_API_KEY), Brave (BRAVE_SEARCH_API_KEY), \
          SerpAPI/Google (SERPAPI_API_KEY), You.com (YDC_API_KEY), Serply/Google (SERPLY_API_KEY), or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
          The result begins with a `Source: <engine>` line — when summarizing \
          results to the user, mention which engine answered (e.g. \"via Tavily\" \
-         or \"ผ่าน Tavily\"); cite the source so they understand the result quality."
+         or \"ผ่าน Tavily\"); cite the source so they understand the result quality.";
+        static ON_BOX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        crate::aiserver::web_tool_description(BASE, &ON_BOX)
     }
 
     fn input_schema(&self) -> Value {

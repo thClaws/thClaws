@@ -15,8 +15,14 @@
 //!   where `bwrap` is AppArmor-blocked) — the engine re-execs itself as a hidden
 //!   `__confine` helper that installs a write-confinement ruleset then `exec`s
 //!   `sh -c`. Falls back to `bubblewrap`, then unconfined.
-//! - **Other / can't enforce:** passthrough (logged once) — never a hard fail.
-//!   A confiner is probed at runtime (binary/ABI present ≠ usable).
+//! - **Other / can't enforce:** passthrough (logged once) on a desktop; a
+//!   refused command in a multiuser worker. Whether the confiner enforces is
+//!   decided once by a probe run of `true` under the real policy, never from
+//!   a user command's output.
+//! - `<workspace>/.thclaws/` is write-denied like it is for the file tools
+//!   (Seatbelt, bwrap). Landlock has no deny rule, so on a Landlock host the
+//!   workspace-trust fingerprint in `config::trust` is what stops a Bash edit
+//!   of `settings.json` from taking effect.
 //!
 //! Modes (settings.json `bash.sandbox`): `workspace` (**default** — workspace +
 //! tmp + package-manager caches), `strict` (workspace + tmp only), or `off`.
@@ -70,6 +76,13 @@ pub struct ConfinePolicy {
     /// behaviour unchanged; the dotfile `deny_read` list above still applies
     /// via Seatbelt/bwrap).
     pub read_roots: Option<Vec<PathBuf>>,
+    /// Inside a write root but not writable: `<workspace>/.thclaws/`, which
+    /// file tools already refuse (`Sandbox::enforce_write_policy`) and whose
+    /// `settings.json` the watcher hot-reloads, hooks included (audit H1).
+    pub deny_write: Vec<PathBuf>,
+    /// Re-allowed inside `deny_write`: an agent's own folder under
+    /// `.thclaws/bots/<slug>/`, as the file tools allow it.
+    pub reallow_write: Vec<PathBuf>,
 }
 
 struct ConfineSettings {
@@ -118,8 +131,8 @@ pub fn mode() -> ConfineMode {
 pub fn enforcement_state() -> (ConfineMode, bool) {
     let m = mode();
     let platform_ok = cfg!(any(target_os = "macos", target_os = "linux"));
-    let failed = CONFINE_RUNTIME_FAILED.load(std::sync::atomic::Ordering::Relaxed);
-    (m, m != ConfineMode::Off && platform_ok && !failed)
+    let probed_ok = PROBE.get().copied().unwrap_or(true);
+    (m, m != ConfineMode::Off && platform_ok && probed_ok)
 }
 
 fn expand(s: &String) -> PathBuf {
@@ -170,6 +183,12 @@ pub fn build_policy(
     read_mask: bool,
 ) -> ConfinePolicy {
     let mut write_roots: Vec<PathBuf> = vec![canon(workspace)];
+    let deny_write = vec![canon(&canon(workspace).join(".thclaws"))];
+    let reallow_write: Vec<PathBuf> = crate::workdir::agent_dir()
+        .map(|a| canon(&a))
+        .filter(|a| deny_write.iter().any(|d| a.starts_with(d)))
+        .into_iter()
+        .collect();
     // tmp is always writable (build tools, $TMPDIR).
     if let Some(t) = std::env::var_os("TMPDIR") {
         write_roots.push(PathBuf::from(t));
@@ -296,6 +315,8 @@ pub fn build_policy(
         write_roots,
         deny_read,
         read_roots,
+        deny_write,
+        reallow_write,
     }
 }
 
@@ -344,29 +365,76 @@ pub fn maybe_handle_confine_subcommand() {
 
 /// Emitted to stderr by the `__confine` helper when it CANNOT install OS
 /// confinement and bails *before* running the command (it exits with
-/// `EXIT_NO_ENFORCE`). The Bash chokepoint detects this and re-runs the
-/// command unconfined — the workspace/container is still the boundary in
-/// environments where the kernel confiner is unavailable, e.g. some
-/// container kernels where the Landlock syscalls return `EINVAL`. Control
-/// chars make a collision with real command output effectively impossible.
+/// `EXIT_NO_ENFORCE`). Only meaningful in the output of a command the engine
+/// chose itself (the probe below, the office-apps probe): a user command can
+/// print it too, so its output never decides whether to run unconfined
+/// (audit C2).
 pub const NO_ENFORCE_SENTINEL: &str = "\u{1}thclaws-confine-unenforced\u{1}";
 
-/// True when `out` carries the no-enforce sentinel (the confiner bailed
-/// without running the command, so the caller should re-run unconfined).
+/// True when `out` carries the no-enforce sentinel. Trust it only on the
+/// output of a command the engine picked.
 pub fn output_shows_no_enforce(out: &str) -> bool {
     out.contains(NO_ENFORCE_SENTINEL)
 }
 
-/// Set once the confiner has bailed at runtime (no-enforce sentinel seen).
-/// Future commands then skip the doomed confined attempt rather than paying
-/// an extra process spawn per command.
+/// Set once the Landlock path failed the probe, so `linux::wrap` moves on to
+/// bwrap.
 static CONFINE_RUNTIME_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Called by the Bash chokepoint when it observes the no-enforce sentinel,
-/// so subsequent `shell_command_async` calls skip the failing confiner.
-pub fn mark_no_enforce() {
-    CONFINE_RUNTIME_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+/// Whether the confiner really enforces on this host, decided once by running
+/// `true` under the first real policy. A selftest or a present binary is not
+/// enough: SIS runners passed the Landlock selftest and then failed the real
+/// ruleset with EBADFD.
+static PROBE: OnceLock<bool> = OnceLock::new();
+
+fn enforces(policy: &ConfinePolicy) -> bool {
+    *PROBE.get_or_init(|| {
+        for _ in 0..2 {
+            if probe(policy) {
+                return true;
+            }
+            if CONFINE_RUNTIME_FAILED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+        }
+        false
+    })
+}
+
+fn probe(policy: &ConfinePolicy) -> bool {
+    let Some(cmd) = confined_command("true", policy) else {
+        return false;
+    };
+    let std = cmd.as_std();
+    let mut probe = std::process::Command::new(std.get_program());
+    probe
+        .args(std.get_args())
+        .stdin(std::process::Stdio::null());
+    match probe.output() {
+        Ok(out) => {
+            out.status.success() && !output_shows_no_enforce(&String::from_utf8_lossy(&out.stderr))
+        }
+        Err(_) => false,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Plan {
+    Unconfined,
+    Confined,
+    Refuse,
+}
+
+/// A shared (multiuser) worker never runs a member's command unconfined: the
+/// confiner is what keeps members out of each other's folders.
+fn plan(policy_active: bool, enforces: bool, multiuser: bool) -> Plan {
+    match (policy_active, enforces, multiuser) {
+        (false, _, _) => Plan::Unconfined,
+        (true, true, _) => Plan::Confined,
+        (true, false, true) => Plan::Refuse,
+        (true, false, false) => Plan::Unconfined,
+    }
 }
 
 // Only the Linux Landlock path consults this (macOS uses build-time
@@ -378,13 +446,27 @@ fn confine_runtime_failed() -> bool {
 }
 
 /// The chokepoint `bash.rs` calls instead of `util::shell_command_async`:
-/// returns a confined `sh -c <command>` when a policy is active and a confiner
-/// is available on this OS, else a plain `sh -c <command>` (unchanged).
-pub fn shell_command_async(command: &str) -> tokio::process::Command {
-    match current_policy() {
-        Some(policy) => confined_command(command, &policy)
-            .unwrap_or_else(|| crate::util::shell_command_async(command)),
-        None => crate::util::shell_command_async(command),
+/// a confined `sh -c <command>` when a policy is active and the probe showed
+/// the confiner enforces, a plain one when it doesn't (desktop, logged once),
+/// and an error in a multiuser worker, where unconfined is not an option.
+pub fn shell_command_async(command: &str) -> Result<tokio::process::Command, String> {
+    let policy = current_policy();
+    let works = policy.as_ref().is_some_and(enforces);
+    match plan(policy.is_some(), works, crate::workdir::is_multiuser()) {
+        Plan::Confined => policy
+            .and_then(|p| confined_command(command, &p))
+            .ok_or_else(|| "OS confinement stopped being available".to_string()),
+        Plan::Unconfined => {
+            if policy.is_some() {
+                fallback_to_screening_once("the confiner failed its probe on this host");
+            }
+            Ok(crate::util::shell_command_async(command))
+        }
+        Plan::Refuse => Err(format!(
+            "bash.sandbox={} is required in a shared workspace, but OS confinement \
+             (Seatbelt/Landlock/bwrap) cannot be enforced on this host — command not run",
+            mode().as_str()
+        )),
     }
 }
 
@@ -481,6 +563,17 @@ mod macos {
                 p.push_str(&format!("  (subpath \"{}\")\n", sb_escape(r)));
             }
             p.push_str(")\n");
+        }
+        for (rule, paths) in [
+            ("deny", &policy.deny_write),
+            ("allow", &policy.reallow_write),
+        ] {
+            for r in paths.iter() {
+                p.push_str(&format!(
+                    "({rule} file-write* (subpath \"{}\"))\n",
+                    sb_escape(r)
+                ));
+            }
         }
         if !policy.deny_read.is_empty() {
             p.push_str("(deny file-read*\n");
@@ -838,6 +931,16 @@ mod linux {
                 c.arg("--bind").arg(r).arg(r);
             }
         }
+        for d in &policy.deny_write {
+            if d.exists() {
+                c.arg("--ro-bind").arg(d).arg(d);
+            }
+        }
+        for r in &policy.reallow_write {
+            if r.exists() {
+                c.arg("--bind").arg(r).arg(r);
+            }
+        }
         for d in &policy.deny_read {
             if d.exists() {
                 c.arg("--tmpfs").arg(d);
@@ -886,6 +989,22 @@ mod tests {
         )));
         // Sentinel uses control chars, so it can't collide with normal text.
         assert!(NO_ENFORCE_SENTINEL.contains('\u{1}'));
+    }
+
+    #[test]
+    fn multiuser_never_falls_back_to_unconfined() {
+        assert_eq!(plan(false, false, true), Plan::Unconfined);
+        assert_eq!(plan(true, true, true), Plan::Confined);
+        assert_eq!(plan(true, true, false), Plan::Confined);
+        assert_eq!(plan(true, false, false), Plan::Unconfined);
+        assert_eq!(plan(true, false, true), Plan::Refuse);
+    }
+
+    #[test]
+    fn policy_denies_writes_to_dot_thclaws() {
+        let ws = tempfile::tempdir().unwrap();
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
+        assert_eq!(pol.deny_write, [canon(ws.path()).join(".thclaws")]);
     }
 
     #[test]
@@ -967,6 +1086,35 @@ mod tests {
         assert!(prof.contains("(deny file-write*)"));
         assert!(prof.contains("(allow file-write*"));
         assert!(prof.contains("(deny file-read*"));
+    }
+
+    /// Audit H1 (macOS): confined Bash can write the workspace but not its
+    /// `.thclaws/settings.json`, which the watcher would hot-reload.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_bash_cannot_write_dot_thclaws() {
+        if binary_on_path("sandbox-exec").is_none() {
+            return;
+        }
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join(".thclaws")).unwrap();
+        let settings = ws.path().join(".thclaws/settings.json");
+        std::fs::write(&settings, "{}").unwrap();
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
+        let run = |cmd: &str| {
+            let mut c = confined_command(cmd, &pol).unwrap();
+            c.current_dir(ws.path());
+            c
+        };
+        let _ = run(r#"echo '{"hooks":{"session_start":"x"}}' > .thclaws/settings.json"#)
+            .output()
+            .await
+            .unwrap();
+        let _ = run("echo x > .thclaws/new.json").output().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{}");
+        assert!(!ws.path().join(".thclaws/new.json").exists());
+        let out = run("echo x > ok.txt").output().await.unwrap();
+        assert!(out.status.success() && ws.path().join("ok.txt").exists());
     }
 
     /// 49.2 acceptance (macOS): a write INSIDE the workspace succeeds; writes

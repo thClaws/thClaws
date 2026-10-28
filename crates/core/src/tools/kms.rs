@@ -1521,10 +1521,17 @@ impl Tool for KmsDeleteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delete a single page from an attached knowledge base. \
+        "Delete ONE page from an attached knowledge base. \
          Removes the file, prunes the index.md bullet, and logs the \
-         removal. Use during consolidation to retire duplicates or \
-         stale entries — never as a casual cleanup."
+         removal. Use it to retire a duplicate or stale page, or when \
+         the user asks to remove a specific page. \
+         It cannot delete a whole knowledge base. When the user wants \
+         an entire KMS gone, do NOT remove its folder or edit \
+         settings with Bash/Edit: that skips the trash and leaves the \
+         KMS listed. Tell the user to run `/kms drop <name> --force` \
+         (or use Delete on the KMS in the Knowledge sidebar); it moves \
+         the KMS to the trash, detaches it, and `/kms restore <name>` \
+         brings it back."
     }
 
     fn input_schema(&self) -> Value {
