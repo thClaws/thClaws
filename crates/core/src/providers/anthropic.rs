@@ -160,6 +160,7 @@ impl AnthropicProvider {
                         body["output_config"] = json!({"effort": adaptive_effort(budget)});
                     }
                     ThinkingShape::Budget => {
+                        let budget = budget_below_max_tokens(budget, req.max_tokens);
                         body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
                     }
                 }
@@ -537,7 +538,8 @@ fn merge_usage(start: Option<Usage>, end: Option<Usage>) -> Option<Usage> {
 /// level to the current flagship models failed outright.
 ///
 /// Refreshed by re-running `scripts/probe/reasoning-effort-probe.py`;
-/// the measurements live in `docs/reasoning-effort-measured.json`.
+/// the measurements live in `docs/reasoning-effort-measured.json` and the
+/// result in `model_catalogue.json`.
 enum ThinkingShape {
     /// `thinking:{type:adaptive}` + `output_config:{effort}`.
     Adaptive,
@@ -546,20 +548,9 @@ enum ThinkingShape {
 }
 
 fn thinking_shape(model: &str) -> ThinkingShape {
-    let id = model
-        .rsplit('/')
-        .next()
-        .unwrap_or(model)
-        .to_ascii_lowercase();
-    // Dated aliases behave as their base (`claude-opus-4-7-20260101`).
-    let adaptive = [
-        "claude-opus-5",
-        "claude-sonnet-5",
-        "claude-opus-4-8",
-        "claude-opus-4-7",
-        "claude-fable-5",
-    ];
-    if adaptive.iter().any(|a| id.starts_with(a)) {
+    // The adaptive models are the ones whose catalogue row lists effort
+    // values (`reasoning_efforts`, #213); a dated alias finds its base row.
+    if crate::model_catalogue::reasoning_efforts(model).is_some_and(|v| !v.is_empty()) {
         ThinkingShape::Adaptive
     } else {
         ThinkingShape::Budget
@@ -569,19 +560,23 @@ fn thinking_shape(model: &str) -> ThinkingShape {
 /// Our token budget expressed on Anthropic's adaptive scale.
 ///
 /// The API names the set itself: `output_config.effort: Input should be
-/// 'low', 'medium', 'high', 'xhigh' or 'max'`. The thresholds mirror
-/// [`ThinkingLevel::from_budget`] so a user who sets the same level gets
-/// the same intent on either shape; `xhigh` and `max` are reachable only
-/// by asking for a budget past what the old scale topped out at, which
-/// is the honest way to expose a rung our own scale does not have.
+/// 'low', 'medium', 'high', 'xhigh' or 'max'` — one value per level.
 fn adaptive_effort(budget: u32) -> &'static str {
-    match budget {
-        0..=4_096 => "low",
-        4_097..=16_000 => "medium",
-        16_001..=64_000 => "high",
-        64_001..=200_000 => "xhigh",
-        _ => "max",
+    use crate::providers::ThinkingLevel as L;
+    match L::from_budget(Some(budget)) {
+        None | Some(L::Off) | Some(L::Low) => "low",
+        Some(L::Medium) => "medium",
+        Some(L::High) => "high",
+        Some(L::XHigh) => "xhigh",
+        Some(L::Max) => "max",
     }
+}
+
+/// `budget_tokens` must stay below `max_tokens` (a 400 otherwise) and at or
+/// above 1 024. `xhigh`/`max` ask for more than any request carries, so on
+/// a budget model they mean "as much as this request allows".
+pub(crate) fn budget_below_max_tokens(budget: u32, max_tokens: u32) -> u32 {
+    budget.min(max_tokens.saturating_sub(1)).max(1_024)
 }
 
 #[cfg(test)]
@@ -630,6 +625,10 @@ mod tests {
         assert_eq!(super::adaptive_effort(32_000), "high");
         assert_eq!(super::adaptive_effort(128_000), "xhigh");
         assert_eq!(super::adaptive_effort(500_000), "max");
+
+        assert_eq!(super::budget_below_max_tokens(256_000, 64_000), 63_999);
+        assert_eq!(super::budget_below_max_tokens(2_048, 64_000), 2_048);
+        assert_eq!(super::budget_below_max_tokens(256_000, 512), 1_024);
     }
     use super::*;
     use crate::types::{ContentBlock, Message};

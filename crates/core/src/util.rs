@@ -595,6 +595,40 @@ fn windows_python_shim_dir() -> Option<&'static std::path::Path> {
 /// Mostly equivalent to a `/v1/restart` on the pod side, but
 /// without involving Kubernetes — useful on a laptop where there's
 /// no supervisor to bring the process back.
+const REEXEC_PARENT: &str = "THCLAWS_REEXEC_PARENT";
+
+/// #226: on Windows a restart is a spawn, so the process that asked for it is
+/// still exiting — and still holding handles under `.thclaws/` — while the
+/// new one starts. Anything that moves the workspace waits for it first.
+/// Elsewhere `exec` keeps one process and this returns at once.
+pub fn wait_for_reexec_parent(timeout: std::time::Duration) {
+    let Some(pid) = std::env::var(REEXEC_PARENT)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    else {
+        return;
+    };
+    std::env::remove_var(REEXEC_PARENT);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        // SAFETY: plain Win32 calls on a handle we own and close; a pid that
+        // is already gone yields a null handle and nothing to wait for.
+        unsafe {
+            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if !h.is_null() {
+                WaitForSingleObject(h, timeout.as_millis().min(u32::MAX as u128) as u32);
+                CloseHandle(h);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (pid, timeout);
+}
+
 pub fn reexec_self() -> std::io::Error {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -626,6 +660,7 @@ pub fn reexec_self() -> std::io::Error {
         if let Some(dir) = &cwd {
             c.current_dir(dir);
         }
+        c.env(REEXEC_PARENT, std::process::id().to_string());
         let res = c.spawn();
         match res {
             Ok(_) => {

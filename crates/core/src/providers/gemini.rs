@@ -250,6 +250,9 @@ impl GeminiProvider {
                 if m.contains("flash") && budget > 24_576 {
                     budget = 24_576;
                 }
+                if m.contains("pro") && budget > 32_768 {
+                    budget = 32_768;
+                }
                 body["generationConfig"]["thinkingConfig"] = json!({"thinkingBudget": budget});
             }
         }
@@ -847,47 +850,36 @@ impl ThinkFilter {
 ///
 /// This replaces a `starts_with("gemini-3")` test that collapsed our
 /// four levels onto `low|high`, so a user asking for medium silently got
-/// high — the specific thing a reporter corrected us on in #213.
-fn gemini_thinking_levels(model_lower: &str) -> Option<&'static [&'static str]> {
-    const WITH_MINIMAL: &[&str] = &["minimal", "low", "medium", "high"];
-    const NO_MINIMAL: &[&str] = &["low", "medium", "high"];
+/// high — the specific thing a reporter corrected us on in #213. The sets
+/// live in `model_catalogue.json` (`reasoning_efforts`).
+fn gemini_thinking_levels(model_lower: &str) -> Option<&'static [String]> {
+    // An unmeasured 3.x still takes a level; the conservative set is the one
+    // every measured 3.x shares.
+    static NO_MINIMAL: std::sync::LazyLock<Vec<String>> =
+        std::sync::LazyLock::new(|| vec!["low".into(), "medium".into(), "high".into()]);
     let id = model_lower.rsplit('/').next().unwrap_or(model_lower);
-    Some(match id {
-        "gemini-3-flash-preview"
-        | "gemini-3.1-flash-lite"
-        | "gemini-3.1-flash-lite-preview"
-        | "gemini-3.5-flash"
-        | "gemini-3.5-flash-lite"
-        | "gemini-3.6-flash" => WITH_MINIMAL,
-        "gemini-3.1-pro-preview"
-        | "gemini-3.1-pro-preview-customtools"
-        | "gemini-3.7-flash"
-        | "gemini-3.8-flash"
-        | "gemini-flash-latest"
-        | "gemini-flash-lite-latest"
-        | "gemini-pro-latest" => NO_MINIMAL,
-        // An unmeasured 3.x still takes a level; the conservative set is
-        // the one every measured 3.x shares.
-        other if other.starts_with("gemini-3") => NO_MINIMAL,
-        _ => return None,
-    })
+    match crate::model_catalogue::reasoning_efforts(id) {
+        Some(v) if !v.is_empty() => Some(v),
+        _ if id.starts_with("gemini-3") => Some(NO_MINIMAL.as_slice()),
+        _ => None,
+    }
 }
 
 /// Our level on the set this model actually offers.
-fn gemini_nearest_level(level: super::ThinkingLevel, accepted: &[&'static str]) -> &'static str {
+fn gemini_nearest_level<S: AsRef<str>>(level: super::ThinkingLevel, accepted: &[S]) -> &str {
     use super::ThinkingLevel as L;
     let wanted: &[&str] = match level {
         L::Off => &["minimal", "low"],
         L::Low => &["low", "minimal"],
         L::Medium => &["medium", "high"],
-        L::High => &["high", "medium"],
+        L::High | L::XHigh | L::Max => &["high", "medium"],
     };
     for w in wanted {
-        if let Some(found) = accepted.iter().find(|a| *a == w) {
-            return found;
+        if let Some(found) = accepted.iter().find(|a| a.as_ref() == *w) {
+            return found.as_ref();
         }
     }
-    accepted.first().copied().unwrap_or("medium")
+    accepted.first().map_or("medium", |a| a.as_ref())
 }
 
 #[cfg(test)]

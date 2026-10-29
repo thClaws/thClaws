@@ -1337,6 +1337,11 @@ fn run_gui_inner(
                         for frame in crate::bots::migrate::workspace_notice_frames(root) {
                             let _ = proxy_for_bots.send_event(UserEvent::Dispatch(frame));
                         }
+                    } else if let Some(frame) = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| crate::bots::migrate::stuck_migration_notice(&cwd))
+                    {
+                        let _ = proxy_for_bots.send_event(UserEvent::Dispatch(frame));
                     }
                 }
                 if kind == "get_cwd" {

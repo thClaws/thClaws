@@ -165,7 +165,7 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
   // Inline model picker dropdown anchored to the Provider section.
   // null means closed; opens on click of the active model row. #49.
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  // Thinking level 0-3, null = auto (provider default). Mirrors
+  // Thinking level 0-5, null = auto (provider default). Mirrors
   // `/thinking`; the engine broadcasts `thinking_update` after either
   // path persists, so this never drifts from the shell.
   const [thinkingLevel, setThinkingLevel] = useState<number | null>(null);
@@ -1377,7 +1377,9 @@ const THINKING_LEVELS: { level: number | null; label: string; hint: string }[] =
   { level: 0, label: "0", hint: "off — fastest, no reasoning" },
   { level: 1, label: "1", hint: "low" },
   { level: 2, label: "2", hint: "medium" },
-  { level: 3, label: "3", hint: "high — deepest reasoning" },
+  { level: 3, label: "3", hint: "high" },
+  { level: 4, label: "4", hint: "xhigh — where the model offers it, else high" },
+  { level: 5, label: "5", hint: "max — the deepest this model offers" },
 ];
 
 /// Thinking level pills under the model chip. Same knob as `/thinking`,
@@ -1394,7 +1396,7 @@ function ThinkingSelector({
     <div
       className="ml-3 mt-1 flex items-center gap-1"
       style={{ fontSize: "10px", color: "var(--text-secondary)" }}
-      title="Thinking level — how much the model reasons before answering (also: /thinking 0-3)"
+      title="Thinking level — how much the model reasons before answering (also: /thinking 0-5)"
     >
       <span style={{ opacity: 0.7 }}>think</span>
       {THINKING_LEVELS.map((opt) => {

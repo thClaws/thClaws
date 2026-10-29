@@ -358,14 +358,21 @@ Gemini 2.5 รับ budget ส่วน Gemini 3 รับ `thinkingLevel`, Oll
 |---|---|---|---|---|---|---|---|---|
 | `0` off | เร็วสุด ไม่คิด | ไม่ส่ง thinking block | `minimal` / `low` | `disabled` | ปิด | budget 0 / 128 | `low` | `think: false` |
 | `1` low | คิดสั้น ๆ | 2,048 tokens | `low` | enabled | เปิด, 2,048 | 2,048 | `low` | `think: true` |
-| `2` medium | สมดุล | 10,000 | `medium` | enabled | เปิด, 10,000 | 10,000 | `high` | `think: true` |
-| `3` high | คิดลึกสุด | 32,000 | `high` | enabled | เปิด, 32,000 | 24,576 / 32,000 | `high` | `think: true` |
+| `2` medium | สมดุล | 10,000 | `medium` | enabled | เปิด, 10,000 | 10,000 | `medium` | `think: true` |
+| `3` high | คิดลึก | 32,000 | `high` | enabled | เปิด, 32,000 | 24,576 / 32,000 | `high` | `think: true` |
+| `4` xhigh | ลึกขึ้นอีก ถ้าโมเดลมีให้ | `xhigh` | `xhigh` ถ้าไม่มีใช้ `high` | enabled | เปิด, ไม่เกินเพดาน | 24,576 / 32,768 | `high` | `think: true` |
+| `5` max | ลึกสุดเท่าที่โมเดลนั้นมี | `max` | ค่าสูงสุดที่โมเดลรับ | enabled | เปิด, ไม่เกินเพดาน | 24,576 / 32,768 | `high` | `think: true` |
 | `auto` | ค่า default ของ provider — ไม่ส่ง field ใดเลย | | | | | | | |
+
+แต่ละโมเดลได้เฉพาะค่าที่ API ของมันรับ ถ้าโมเดลไม่มีระดับที่เลือก
+thClaws จะส่งค่าที่ใกล้ที่สุดที่รับได้แทน จึงตั้ง `4` หรือ `5` ทิ้งไว้ได้
+โดยไม่ error ส่วนโมเดล Anthropic ที่รับเป็น token budget จะได้ budget
+มากที่สุดเท่าที่ request นั้นอนุญาต
 
 ตั้งได้สองทาง:
 
-- **Sidebar** — pill `think auto 0 1 2 3` ใต้ชื่อโมเดล
-- **`/thinking 0`** … `/thinking 3`, `/thinking auto` หรือระบุ budget ตรง ๆ
+- **Sidebar** — pill `think auto 0 1 2 3 4 5` ใต้ชื่อโมเดล
+- **`/thinking 0`** … `/thinking 5` (หรือ `off`/`low`/`medium`/`high`/`xhigh`/`max`), `/thinking auto` หรือระบุ budget ตรง ๆ
   เช่น `/thinking 12000` สำหรับ provider แบบ Anthropic
 
 ทั้งสองทางบันทึกลง `thinkingBudget` ใน `.thclaws/settings.json`

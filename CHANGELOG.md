@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.148.0] — 2026-10-29
+
+**Deeper reasoning where models offer it, a new provider, and a fix for Windows workspaces stuck mid-upgrade.**
+
+### Added
+
+- **Thinking levels `xhigh` and `max`.** Set them with `/thinking 4` (`xhigh`) or `/thinking 5` (`max`), or with the two new pills in the sidebar. A model that offers a level gets it by name. A model that doesn't gets the nearest value it accepts: `xhigh` falls back to `high`, and `max` sends the highest value the model takes. Anthropic models that take a token budget get the largest budget the request allows.
+- **Requesty provider** (thanks @Thibaultjaigu, #224). Requesty is an OpenAI-compatible router with one key for many vendors. Use the `requesty/<model>` prefix and set `REQUESTY_API_KEY`. For EU routing, set `REQUESTY_BASE_URL=https://router.eu.requesty.ai/v1`.
+
+### Changed
+
+- **The reasoning-effort values each model accepts now live in `model_catalogue.json`** (`reasoning_efforts`), not in code. This covers OpenAI and xAI `reasoning_effort`, Gemini 3 `thinkingLevel` and Anthropic adaptive effort. They were measured against the live APIs.
+- **A raw `/thinking <tokens>` budget above 64 000 now counts as `xhigh`, and above 200 000 as `max`.** These match the thresholds Anthropic's adaptive models already used.
+
+### Fixed
+
+- **Windows: a workspace no longer restarts itself on every launch** (#226). The upgrade to the multi-agent layout tried to move `.thclaws` while the previous process was still exiting and holding it, and failed with error 5 each time. It now waits for that process to exit. After three failed attempts it stops retrying on launch and shows a notice that points at `thclaws bots migrate`.
+- **The Responses API (ChatGPT Codex) sends effort values the model accepts.** Before this, GPT-5.1 and later got `minimal`, which they reject.
+- **Large thinking budgets no longer exceed `max_tokens`** on Anthropic and opencode-go models that take a budget, and Gemini 2.5 Pro's budget is capped at 32 768.
+- **The KMS viewer's HTML sanitizer is updated** (DOMPurify 3.4.17).
+
 ## [0.147.0] — 2026-10-29
 
 **A security release.** An outside review before the thClaws Enterprise launch found ways for a cloned project, a web page or an agent-built UI tab to reach further than it should. This release closes them. Some defaults are stricter, so read *Changed* if you use project `.env` files, the local `/v1` API or `--serve` on a network.

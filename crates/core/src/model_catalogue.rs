@@ -148,6 +148,15 @@ pub struct ModelEntry {
     /// Desktop users with their own provider key are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_per_image_usd: Option<f64>,
+    /// The reasoning-effort values this model's API accepts, lowest first
+    /// (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). `[]`
+    /// means it refuses the parameter; absent means nobody has measured it.
+    /// Measured, never read off a docs page — `scripts/probe/reasoning-effort-probe.py`
+    /// asks each API with a value nothing accepts and records the set the
+    /// rejection names. OpenAI/xAI `reasoning_effort`, Gemini 3
+    /// `thinkingLevel`, Anthropic adaptive `output_config.effort` (#213).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 impl ModelEntry {
@@ -780,6 +789,10 @@ impl EffectiveCatalogue {
                             price_per_image_usd: e
                                 .price_per_image_usd
                                 .or(baseline.price_per_image_usd),
+                            reasoning_efforts: e
+                                .reasoning_efforts
+                                .clone()
+                                .or(baseline.reasoning_efforts),
                         },
                         None => e.clone(),
                     };
@@ -838,6 +851,68 @@ impl EffectiveCatalogue {
 /// from catalogue hits and from fallbacks — callers (e.g. `/models`
 /// rendering, the no-catalogue-entry warning) use it to decide when to
 /// nudge the user.
+/// The order every `reasoning_efforts` list is written in.
+pub const EFFORT_ORDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// [`ModelEntry::reasoning_efforts`] for `model`: `Some(&[])` = measured to
+/// refuse the parameter, `None` = not measured.
+///
+/// Keyed by the bare id, so a router's `openrouter/openai/gpt-5.4`, xAI's
+/// `xai/grok-4.6` and a dated `gpt-5.4-2026-03-17` all find their row. Read
+/// from the catalogue built into the binary: a cache from `/models refresh`
+/// can predate the field, and a set that silently vanished would send
+/// values the API refuses.
+pub fn reasoning_efforts(model: &str) -> Option<&'static [String]> {
+    static INDEX: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        let mut out = HashMap::new();
+        let Some(c) = Catalogue::from_json_str(BASELINE_JSON) else {
+            return out;
+        };
+        for pc in c.providers.values() {
+            for (id, e) in &pc.models {
+                if let Some(v) = &e.reasoning_efforts {
+                    let bare = id.rsplit('/').next().unwrap_or(id).to_ascii_lowercase();
+                    out.entry(bare).or_insert_with(|| v.clone());
+                }
+            }
+        }
+        out
+    });
+    let id = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    index
+        .get(&id)
+        .or_else(|| index.get(undated(&id)))
+        .map(Vec::as_slice)
+}
+
+/// `gpt-5.4-2026-03-17` / `claude-opus-5-20260101` -> the base id. A dated
+/// alias is the same model.
+pub fn undated(id: &str) -> &str {
+    let digits = |s: &str| s.bytes().all(|c| c.is_ascii_digit());
+    let dashed = |t: &str| {
+        t.len() == 11
+            && t.starts_with('-')
+            && digits(&t[1..5])
+            && &t[5..6] == "-"
+            && digits(&t[6..8])
+            && &t[8..9] == "-"
+            && digits(&t[9..11])
+    };
+    let compact = |t: &str| t.len() == 9 && t.starts_with('-') && digits(&t[1..]);
+    if id.len() > 11 && id.is_char_boundary(id.len() - 11) && dashed(&id[id.len() - 11..]) {
+        return &id[..id.len() - 11];
+    }
+    if id.len() > 9 && id.is_char_boundary(id.len() - 9) && compact(&id[id.len() - 9..]) {
+        return &id[..id.len() - 9];
+    }
+    id
+}
+
 pub fn effective_context_window(model: &str) -> u32 {
     effective_context_window_with(&EffectiveCatalogue::load(), model).0
 }
@@ -1339,6 +1414,56 @@ mod canonical_id_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #213: `max` takes the last value of a set, so every set must be in
+    /// [`EFFORT_ORDER`]; a typo would be sent to an API that refuses it.
+    #[test]
+    fn every_reasoning_effort_set_is_known_and_lowest_first() {
+        let c = Catalogue::from_json_str(BASELINE_JSON).unwrap();
+        let mut seen = 0;
+        for (prov, pc) in &c.providers {
+            for (id, e) in &pc.models {
+                let Some(v) = &e.reasoning_efforts else {
+                    continue;
+                };
+                seen += 1;
+                let pos: Vec<usize> = v
+                    .iter()
+                    .map(|x| {
+                        EFFORT_ORDER
+                            .iter()
+                            .position(|o| o == x)
+                            .unwrap_or_else(|| panic!("{prov}/{id}: unknown effort {x:?}"))
+                    })
+                    .collect();
+                assert!(
+                    pos.windows(2).all(|w| w[0] < w[1]),
+                    "{prov}/{id}: {v:?} out of order"
+                );
+            }
+        }
+        assert!(seen >= 40, "the measured sets went missing ({seen})");
+        assert_eq!(
+            reasoning_efforts("gpt-5.4-2026-03-17")
+                .unwrap()
+                .last()
+                .unwrap(),
+            "xhigh"
+        );
+        assert_eq!(
+            reasoning_efforts("openrouter/openai/gpt-5.1").unwrap()[0],
+            "none"
+        );
+        assert_eq!(
+            reasoning_efforts("claude-opus-5-20260101")
+                .unwrap()
+                .last()
+                .unwrap(),
+            "max"
+        );
+        assert_eq!(reasoning_efforts("xai/grok-build-0.1"), Some(&[][..]));
+        assert_eq!(reasoning_efforts("gpt-4o"), None);
+    }
 
     /// The marker is the only signal that separates a guessed window from a
     /// sourced one — the number can't, since a guess can coincide with a real
@@ -2179,6 +2304,7 @@ mod tests {
 
 #[cfg(test)]
 mod known_model_tests {
+
     /// A provider's `input_tokens` is the uncached part; the cost formula
     /// wants the total and subtracts the cached part itself. Handing the
     /// one to the other subtracted it twice.

@@ -1348,21 +1348,33 @@ impl Drop for RawDump {
 /// | 1 low    | 2 048  | low         | enabled  | on, 2 048     | 2 048      | low  | think:true  |
 /// | 2 medium | 10 000 | medium      | enabled  | on, 10 000    | 10 000     | high | think:true  |
 /// | 3 high   | 32 000 | high        | enabled  | on, 32 000    | 24 576/32 000 | high | think:true |
+/// | 4 xhigh  | 128 000¹ | xhigh, else high | enabled | on, capped² | 24 576/32 768 | high | think:true |
+/// | 5 max    | 256 000¹ | the highest it takes | enabled | on, capped² | 24 576/32 768 | high | think:true |
 /// | auto     | provider default (no field sent) |||||||
+///
+/// ¹ Adaptive Anthropic models take `xhigh`/`max` by name; budget models get
+///   the budget capped below `max_tokens`. ² Below the output cap.
+///
+/// `xhigh` and `max` are #213: models that offer them could not be asked
+/// for them. A model without them gets the nearest value it does accept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingLevel {
     Off,
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
 }
 
 impl ThinkingLevel {
     pub const LOW_BUDGET: u32 = 2_048;
     pub const MEDIUM_BUDGET: u32 = 10_000;
     pub const HIGH_BUDGET: u32 = 32_000;
+    pub const XHIGH_BUDGET: u32 = 128_000;
+    pub const MAX_BUDGET: u32 = 256_000;
 
-    /// `0`–`3`, `off|low|medium|high`, or `auto` (→ `None`). A bare
+    /// `0`–`5`, `off|low|medium|high|xhigh|max`, or `auto` (→ `None`). A bare
     /// number ≥ 100 is taken as a raw token budget (legacy `/thinking N`).
     pub fn parse(s: &str) -> Option<Option<u32>> {
         let t = s.trim().to_ascii_lowercase();
@@ -1371,14 +1383,11 @@ impl ThinkingLevel {
             "0" | "off" | "none" => Some(Some(0)),
             "1" | "low" | "min" | "minimal" => Some(Some(Self::LOW_BUDGET)),
             "2" | "medium" | "med" | "mid" => Some(Some(Self::MEDIUM_BUDGET)),
-            // No `"max"` alias. It used to land here, on HIGH_BUDGET, which is
-            // not a maximum of anything: the arm below accepts any budget from
-            // 100 up, so `/thinking 200000` is both legal and larger, and
-            // anything over 16_000 already reports itself as "high". A word
-            // that promises a ceiling while quietly picking 32_000 is worse
-            // than no word — the usage line offers `<tokens>` for people who
-            // want more, and never advertised `max` in the first place.
             "3" | "high" => Some(Some(Self::HIGH_BUDGET)),
+            "4" | "xhigh" | "x-high" => Some(Some(Self::XHIGH_BUDGET)),
+            // A real ceiling now: the highest value the model accepts, and
+            // a budget every provider caps at what the request allows.
+            "5" | "max" => Some(Some(Self::MAX_BUDGET)),
             _ => t.parse::<u32>().ok().filter(|n| *n >= 100).map(|n| Some(n)),
         }
     }
@@ -1389,17 +1398,23 @@ impl ThinkingLevel {
             Self::Low => Self::LOW_BUDGET,
             Self::Medium => Self::MEDIUM_BUDGET,
             Self::High => Self::HIGH_BUDGET,
+            Self::XHigh => Self::XHIGH_BUDGET,
+            Self::Max => Self::MAX_BUDGET,
         }
     }
 
-    /// Bucket any budget back into a level; `None` = auto.
+    /// Bucket any budget back into a level; `None` = auto. The upper two
+    /// thresholds are the ones Anthropic's adaptive models already used,
+    /// so a raw `/thinking 100000` means the same thing everywhere.
     pub fn from_budget(b: Option<u32>) -> Option<Self> {
         match b {
             None => None,
             Some(0) => Some(Self::Off),
             Some(n) if n <= 4_096 => Some(Self::Low),
             Some(n) if n <= 16_000 => Some(Self::Medium),
-            Some(_) => Some(Self::High),
+            Some(n) if n <= 64_000 => Some(Self::High),
+            Some(n) if n <= 200_000 => Some(Self::XHigh),
+            Some(_) => Some(Self::Max),
         }
     }
 
@@ -1409,6 +1424,8 @@ impl ThinkingLevel {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -1418,6 +1435,8 @@ impl ThinkingLevel {
             Self::Low => 1,
             Self::Medium => 2,
             Self::High => 3,
+            Self::XHigh => 4,
+            Self::Max => 5,
         }
     }
 
@@ -3657,17 +3676,16 @@ mod tests {
 mod thinking_level_tests {
     use super::ThinkingLevel as L;
 
-    /// `max` used to be an alias for `high`, i.e. 32_000 — while the raw-token
-    /// arm accepts anything from 100 up, so a plain `/thinking 200000` was both
-    /// accepted and larger. A word that promises a ceiling and silently picks a
-    /// middling number is worse than no word; the usage line never offered it.
+    /// `max` used to be an alias for `high`, i.e. 32_000 — a word promising a
+    /// ceiling that picked a middling number, so it was removed. #213 brings
+    /// it back as a real level: the highest value the model accepts, and a
+    /// budget no raw number can outrank (anything past 200_000 is `max` too).
     #[test]
-    fn max_is_not_an_alias_for_high_because_it_is_not_a_maximum() {
-        assert_eq!(L::parse("max"), None, "`max` must be rejected, not aliased");
-        // The honest route to more is still open, and really is larger.
-        assert_eq!(L::parse("200000"), Some(Some(200_000)));
-        assert!(200_000 > L::HIGH_BUDGET);
-        // The documented words are untouched.
+    fn max_is_a_ceiling_not_an_alias_for_high() {
+        assert_eq!(L::parse("max"), Some(Some(L::MAX_BUDGET)));
+        assert!(L::MAX_BUDGET > L::XHIGH_BUDGET && L::XHIGH_BUDGET > L::HIGH_BUDGET);
+        assert_eq!(L::from_budget(L::parse("200000").unwrap()), Some(L::XHigh));
+        assert_eq!(L::from_budget(Some(1_000_000)), Some(L::Max));
         assert_eq!(L::parse("high"), Some(Some(L::HIGH_BUDGET)));
         assert_eq!(L::parse("3"), Some(Some(L::HIGH_BUDGET)));
     }
@@ -3687,9 +3705,14 @@ mod thinking_level_tests {
 
     #[test]
     fn budget_round_trips_through_buckets() {
-        for l in [L::Off, L::Low, L::Medium, L::High] {
+        for l in [L::Off, L::Low, L::Medium, L::High, L::XHigh, L::Max] {
             assert_eq!(L::from_budget(Some(l.to_budget())), Some(l));
         }
+        assert_eq!(L::parse("xhigh"), Some(Some(L::XHIGH_BUDGET)));
+        assert_eq!(L::parse("5"), Some(Some(L::MAX_BUDGET)));
+        assert_eq!(L::parse("max"), Some(Some(L::MAX_BUDGET)));
+        assert_eq!(L::from_budget(Some(50_000)), Some(L::High));
+        assert_eq!(L::from_budget(Some(500_000)), Some(L::Max));
         assert_eq!(L::from_budget(None), None);
         assert_eq!(L::from_budget(Some(12000)), Some(L::Medium));
         assert_eq!(L::json(Some(0))["level"], 0);

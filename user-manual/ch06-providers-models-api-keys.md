@@ -116,14 +116,21 @@ of that into one level you set once:
 |---|---|---|---|---|---|---|---|---|
 | `0` off | fastest, no reasoning | no thinking block | `minimal` / `low` | `disabled` | off | budget 0 / 128 | `low` | `think: false` |
 | `1` low | short reasoning | 2 048 tokens | `low` | enabled | on, 2 048 | 2 048 | `low` | `think: true` |
-| `2` medium | balanced | 10 000 | `medium` | enabled | on, 10 000 | 10 000 | `high` | `think: true` |
-| `3` high | deepest | 32 000 | `high` | enabled | on, 32 000 | 24 576 / 32 000 | `high` | `think: true` |
+| `2` medium | balanced | 10 000 | `medium` | enabled | on, 10 000 | 10 000 | `medium` | `think: true` |
+| `3` high | deep | 32 000 | `high` | enabled | on, 32 000 | 24 576 / 32 000 | `high` | `think: true` |
+| `4` xhigh | deeper, where offered | `xhigh` | `xhigh`, else `high` | enabled | on, capped | 24 576 / 32 768 | `high` | `think: true` |
+| `5` max | the deepest this model offers | `max` | its highest value | enabled | on, capped | 24 576 / 32 768 | `high` | `think: true` |
 | `auto` | provider default — nothing is sent | | | | | | | |
+
+Each model gets only values its API accepts. Where a level does not exist
+for a model, the nearest one it does take is sent instead, so `4` and `5`
+are safe to leave on. Anthropic models that take a token budget rather than
+an effort get as large a budget as the request allows.
 
 Set it either way:
 
-- **Sidebar** — the `think auto 0 1 2 3` pills under the model chip.
-- **`/thinking 0`** … `/thinking 3`, `/thinking auto`, or a raw
+- **Sidebar** — the `think auto 0 1 2 3 4 5` pills under the model chip.
+- **`/thinking 0`** … `/thinking 5` (or `off`/`low`/`medium`/`high`/`xhigh`/`max`), `/thinking auto`, or a raw
   `/thinking 12000` budget for Anthropic-style providers.
 
 Both paths persist to `thinkingBudget` in `.thclaws/settings.json`, so

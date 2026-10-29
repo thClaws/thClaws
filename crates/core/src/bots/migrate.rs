@@ -159,15 +159,101 @@ fn read_phase(workspace: &Path) -> Option<Phase> {
     Phase::parse(v.get("phase")?.as_str()?)
 }
 
+fn read_marker(workspace: &Path) -> Option<serde_json::Value> {
+    let raw = std::fs::read_to_string(marker_path(workspace)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
 fn write_phase(workspace: &Path, phase: Phase) -> Result<()> {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "marker": "thclaws-workspace-v3-migration",
         "phase": phase.as_str(),
         "workspace": workspace.display().to_string(),
         "note": "A workspace migration is in progress. Re-run `thclaws bots migrate` to finish it. Do not delete this file or the .thclaws-v3-migration/ folder by hand.",
     });
+    // #226: rewriting the marker on every attempt must not reset the count,
+    // or a step that can never succeed looks like a first try forever.
+    if let Some(old) = read_marker(workspace) {
+        for key in ["attempts", "last_error"] {
+            if let Some(v) = old.get(key) {
+                body[key] = v.clone();
+            }
+        }
+    }
     std::fs::write(marker_path(workspace), serde_json::to_string_pretty(&body)?)?;
     Ok(())
+}
+
+/// Opening a workspace gives up upgrading it on its own after this many
+/// failures; `thclaws bots migrate` still runs.
+pub const AUTO_ATTEMPTS: u64 = 3;
+
+fn record_failure(workspace: &Path, error: &str) {
+    let Some(mut body) = read_marker(workspace) else {
+        return;
+    };
+    let n = body.get("attempts").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+    body["attempts"] = n.into();
+    body["last_error"] = error.into();
+    if let Ok(s) = serde_json::to_string_pretty(&body) {
+        let _ = std::fs::write(marker_path(workspace), s);
+    }
+}
+
+/// An interrupted migration that has failed at least [`AUTO_ATTEMPTS`]
+/// times: `(attempts, last error)`.
+pub fn stuck_migration(workspace: &Path) -> Option<(u64, String)> {
+    let body = read_marker(workspace)?;
+    let n = body.get("attempts")?.as_u64()?;
+    (n >= AUTO_ATTEMPTS).then(|| {
+        let e = body
+            .get("last_error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        (n, e.to_string())
+    })
+}
+
+/// The GUI notice for a [`stuck_migration`].
+pub fn stuck_migration_notice(workspace: &Path) -> Option<String> {
+    let (n, err) = stuck_migration(workspace)?;
+    Some(
+        serde_json::json!({
+            "type": "workspace_notice",
+            "id": "stuck-migration",
+            "title": "This workspace's upgrade keeps failing",
+            "detail": format!(
+                "The upgrade failed {n} times ({err}), so thClaws stopped retrying it and opens \
+                 the workspace as it is. Close every thClaws window on this folder, then run \
+                 the command below in a terminal there."
+            ),
+            "command": "thclaws bots migrate",
+        })
+        .to_string(),
+    )
+}
+
+/// Windows refuses to rename a directory while any process holds a handle
+/// inside it, and a restart there spawns the new process before the old one
+/// has finished exiting (#226). Wait that out; anywhere else, fail at once.
+fn rename_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now()
+        + if cfg!(windows) {
+            std::time::Duration::from_secs(10)
+        } else {
+            std::time::Duration::ZERO
+        };
+    loop {
+        match std::fs::rename(src, dst) {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            r => return r,
+        }
+    }
 }
 
 /// Root entries this migration would move, in a stable order.
@@ -389,6 +475,8 @@ pub enum AutoOutcome {
     /// Someone else holds the workspace and did not finish within the wait.
     Busy,
     Failed(String),
+    /// Failed [`AUTO_ATTEMPTS`] times already; not tried again (#226).
+    GaveUp(u64, String),
 }
 
 /// Migrate a v2 workspace the moment it is opened.
@@ -415,6 +503,9 @@ pub fn auto_migrate_with_wait(ws: &Path, wait: std::time::Duration) -> AutoOutco
     if is_inside_shelf(ws) || is_never_a_workspace(ws) || !looks_like_v2_agent(ws) {
         return AutoOutcome::NotV2;
     }
+    if let Some((n, e)) = stuck_migration(ws) {
+        return AutoOutcome::GaveUp(n, e);
+    }
     let deadline = std::time::Instant::now() + wait;
     let _lock = loop {
         match super::lock_workspace(ws, "the upgrade") {
@@ -434,7 +525,10 @@ pub fn auto_migrate_with_wait(ws: &Path, wait: std::time::Duration) -> AutoOutco
     }
     match apply_locked(&p) {
         Ok(r) => AutoOutcome::Migrated(r, p.moves_git),
-        Err(e) => AutoOutcome::Failed(e.to_string()),
+        Err(e) => {
+            record_failure(ws, &e.to_string());
+            AutoOutcome::Failed(e.to_string())
+        }
     }
 }
 
@@ -467,7 +561,7 @@ fn apply_locked(plan: &Plan) -> Result<Report> {
                 // if the user put it back, which is not a case to guess at.
                 continue;
             }
-            std::fs::rename(&src, &dst).map_err(|e| {
+            rename_dir(&src, &dst).map_err(|e| {
                 Error::Config(format!(
                     "cannot move {} into the migration staging folder: {e}",
                     src.display()
@@ -1761,6 +1855,39 @@ mod tests {
         assert_eq!(report.moved, 0);
         assert_eq!(read(&ws.join("output/report.md")), before);
         assert!(!ws.join(".thclaws/bots/main/.thclaws/bots").exists());
+    }
+
+    /// #226: a step that can never succeed must not be retried on every
+    /// launch with a marker that looks like a first attempt each time.
+    #[test]
+    fn opening_gives_up_on_an_upgrade_that_keeps_failing() {
+        let (_r, ws) = v2_workspace("proj");
+        write_phase(&ws, Phase::Collect).unwrap();
+        for _ in 0..AUTO_ATTEMPTS - 1 {
+            record_failure(&ws, "Access is denied. (os error 5)");
+            write_phase(&ws, Phase::Collect).unwrap();
+        }
+        assert!(stuck_migration(&ws).is_none());
+        record_failure(&ws, "Access is denied. (os error 5)");
+        write_phase(&ws, Phase::Collect).unwrap();
+        let (n, e) = stuck_migration(&ws).unwrap();
+        assert_eq!(n, AUTO_ATTEMPTS);
+        assert!(e.contains("os error 5"));
+        assert!(stuck_migration_notice(&ws)
+            .unwrap()
+            .contains("thclaws bots migrate"));
+        match auto_migrate_with_wait(&ws, std::time::Duration::ZERO) {
+            AutoOutcome::GaveUp(n, _) => assert_eq!(n, AUTO_ATTEMPTS),
+            other => panic!("expected GaveUp, got {other:?}"),
+        }
+        assert!(ws.join(".thclaws/settings.json").exists());
+
+        // The manual command still finishes it.
+        apply(&plan(&ws).unwrap()).unwrap();
+        assert!(ws
+            .join(".thclaws/bots/main/.thclaws/settings.json")
+            .exists());
+        assert!(!marker_path(&ws).exists());
     }
 
     /// A half-migrated workspace holds the user's entire tree, so being

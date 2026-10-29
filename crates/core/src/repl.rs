@@ -9083,7 +9083,7 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             }
                             None => {
                                 println!(
-                                    "{COLOR_YELLOW}usage: /thinking 0|1|2|3 | off|low|medium|high | auto | <tokens>{COLOR_RESET}"
+                                    "{COLOR_YELLOW}usage: /thinking 0-5 | off|low|medium|high|xhigh|max | auto | <tokens>{COLOR_RESET}"
                                 );
                             }
                         }

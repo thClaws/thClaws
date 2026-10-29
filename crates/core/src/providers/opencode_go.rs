@@ -519,6 +519,7 @@ impl OpencodeGoProvider {
 
         if let Some(budget) = req.thinking_budget {
             if budget > 0 {
+                let budget = super::anthropic::budget_below_max_tokens(budget, req.max_tokens);
                 body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
             }
         }

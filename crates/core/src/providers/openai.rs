@@ -1556,44 +1556,16 @@ pub(crate) fn apply_thinking(body: &mut Value, model: &str, base_url: &str, budg
     }
 }
 
-/// The `reasoning_effort` values a model accepts, or `None` when the
-/// answer is "we have not measured this one".
+/// The `reasoning_effort` values a model accepts, lowest first, or `None`
+/// when the answer is "we have not measured this one" — or "it refuses the
+/// parameter", which [`takes_no_reasoning_effort`] tells apart.
 ///
-/// Measured against the live APIs on 2026-09-21, not read off a docs
-/// page, because the names are no guide in either direction:
-/// `grok-4.20-0309-reasoning` refuses the parameter outright, and
-/// `gpt-5-search-api` does not know it at all. Per model rather than per
-/// family for the same reason — `gpt-5` takes `minimal` and not `none`,
-/// `gpt-5.1` takes `none` and not `minimal`, and they are one prefix
-/// apart. Prefix matching is what sent `minimal` to every `gpt-5*`,
-/// which the 5.1-and-later models answer with a 400.
-///
-/// The probe and its output are kept: `scripts/probe/reasoning-effort-probe.py`
-/// and `docs/reasoning-effort-measured.json`. One request per model,
-/// carrying a value nothing accepts, so the rejection names the set and
-/// nothing is generated — re-running it costs nothing and is how this
-/// table should be refreshed rather than edited by hand.
-fn accepted_efforts(model_lower: &str) -> Option<&'static [&'static str]> {
-    const MINIMAL_4: &[&str] = &["minimal", "low", "medium", "high"];
-    const NONE_4: &[&str] = &["none", "low", "medium", "high"];
-    const NONE_5: &[&str] = &["none", "low", "medium", "high", "xhigh"];
-    const O_SERIES: &[&str] = &["low", "medium", "high", "xhigh"];
-    const GROK_MINIMAL: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
-    const GROK_43: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
-
-    let base = model_lower.rsplit('/').next().unwrap_or(model_lower);
-    // A dated alias behaves as its base (`gpt-5.4-2026-03-17`).
-    let stem = undated(base);
-    Some(match stem {
-        "gpt-5" | "gpt-5-mini" | "gpt-5-nano" => MINIMAL_4,
-        "gpt-5.1" => NONE_4,
-        "gpt-5.2" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.4-nano" | "gpt-5.5" | "gpt-5.6-luna"
-        | "gpt-5.6-sol" | "gpt-5.6-terra" => NONE_5,
-        "o1" | "o3" | "o3-mini" | "o4-mini" => O_SERIES,
-        "grok-4.3" => GROK_43,
-        "grok-4.5" | "grok-4.6" => GROK_MINIMAL,
-        _ => return None,
-    })
+/// Per model rather than per family, because the names are no guide:
+/// `gpt-5` takes `minimal` and not `none`, `gpt-5.1` takes `none` and not
+/// `minimal`, and they are one prefix apart. The sets live in
+/// `model_catalogue.json` (`reasoning_efforts`, #213).
+pub(crate) fn accepted_efforts(model_lower: &str) -> Option<&'static [String]> {
+    crate::model_catalogue::reasoning_efforts(model_lower).filter(|v| !v.is_empty())
 }
 
 /// Models measured to refuse `reasoning_effort` outright.
@@ -1601,34 +1573,7 @@ fn accepted_efforts(model_lower: &str) -> Option<&'static [&'static str]> {
 /// Separate from "not measured": these answer 400 when it is sent, so
 /// the preference has to be dropped and said out loud, not guessed at.
 fn takes_no_reasoning_effort(model_lower: &str) -> bool {
-    let base = model_lower.rsplit('/').next().unwrap_or(model_lower);
-    let stem = undated(base);
-    matches!(
-        stem,
-        "gpt-5-search-api"
-            | "grok-4.20-0309-non-reasoning"
-            | "grok-4.20-0309-reasoning"
-            | "grok-4.20-multi-agent-0309"
-            | "grok-build-0.1"
-    )
-}
-
-/// `gpt-5.4-2026-03-17` -> `gpt-5.4`. A dated alias is the same model.
-fn undated(id: &str) -> &str {
-    let b = id.as_bytes();
-    if b.len() > 11 {
-        let tail = &id[id.len() - 11..];
-        if tail.starts_with('-')
-            && tail[1..5].bytes().all(|c| c.is_ascii_digit())
-            && tail.as_bytes()[5] == b'-'
-            && tail[6..8].bytes().all(|c| c.is_ascii_digit())
-            && tail.as_bytes()[8] == b'-'
-            && tail[9..11].bytes().all(|c| c.is_ascii_digit())
-        {
-            return &id[..id.len() - 11];
-        }
-    }
-    id
+    crate::model_catalogue::reasoning_efforts(model_lower).is_some_and(|v| v.is_empty())
 }
 
 /// The value closest to what the user asked for that this model takes.
@@ -1637,22 +1582,25 @@ fn undated(id: &str) -> &str {
 /// not inventing one that does — `xhigh` on one backend and `high` on
 /// another are not comparable. Each level names the values it would
 /// accept in order of preference and takes the first the model offers.
-fn nearest_effort(level: super::ThinkingLevel, accepted: &[&'static str]) -> &'static str {
+pub(crate) fn nearest_effort<S: AsRef<str>>(level: super::ThinkingLevel, accepted: &[S]) -> &str {
     use super::ThinkingLevel as L;
     let wanted: &[&str] = match level {
         L::Off => &["none", "minimal", "low"],
         L::Low => &["low", "minimal", "medium"],
         L::Medium => &["medium", "high", "low"],
         L::High => &["high", "xhigh", "medium"],
+        L::XHigh => &["xhigh", "high", "max"],
+        // The sets are ordered low to high, so the ceiling is the last one.
+        L::Max => return accepted.last().map_or("high", |a| a.as_ref()),
     };
     for w in wanted {
-        if let Some(found) = accepted.iter().find(|a| *a == w) {
-            return found;
+        if let Some(found) = accepted.iter().find(|a| a.as_ref() == *w) {
+            return found.as_ref();
         }
     }
     // Every set measured contains at least one of the above; this is
     // here so a future set cannot make the function panic.
-    accepted.first().copied().unwrap_or("medium")
+    accepted.first().map_or("medium", |a| a.as_ref())
 }
 
 /// Tell the user once that their thinking preference does not reach `model`.
@@ -1718,6 +1666,7 @@ mod tests {
     /// was dropped in silence.
     #[test]
     fn the_effort_sent_is_one_the_model_measured_as_accepting() {
+        use crate::providers::ThinkingLevel as L;
         // Measured 2026-09-21 against the live APIs; see
         // docs/reasoning-effort-measured.json. Two of these were live
         // 400s before the table replaced prefix matching.
@@ -1767,6 +1716,17 @@ mod tests {
 
         // A model we have never measured gets nothing, and says so.
         assert_eq!(effort("some-new-model-9", Some(32_000)), None);
+
+        // #213: `xhigh` and `max` reach the models that offer them, and fall
+        // back to the nearest value on the ones that do not.
+        let (xhigh, max) = (Some(L::XHIGH_BUDGET), Some(L::MAX_BUDGET));
+        assert_eq!(effort("gpt-5.4", xhigh).as_deref(), Some("xhigh"));
+        assert_eq!(effort("gpt-5.4", max).as_deref(), Some("xhigh"));
+        assert_eq!(effort("o3", max).as_deref(), Some("xhigh"));
+        assert_eq!(effort("gpt-5", xhigh).as_deref(), Some("high"));
+        assert_eq!(effort("gpt-5", max).as_deref(), Some("high"));
+        assert_eq!(effort("gpt-5.1", max).as_deref(), Some("high"));
+        assert_eq!(effort("xai/grok-4.6", max).as_deref(), Some("xhigh"));
     }
 
     #[test]

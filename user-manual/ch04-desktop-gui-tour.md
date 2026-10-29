@@ -34,7 +34,7 @@ The **Provider** section has a visual health indicator:
 
 When a key is saved via Settings, the dot flips to green and the active model may auto-switch to the first provider with credentials — see [chapter 6](ch06-providers-models-api-keys.md#auto-switch-on-key-save).
 
-**Thinking budget** — under the model line sits a `think` row: `auto · 0 · 1 · 2 · 3`. It sets how much reasoning the model is asked to spend on the next turn, without a slash command. `auto` lets the engine decide from the prompt; `0` turns extended thinking off; `1`–`3` ask for progressively larger budgets. Models that have no reasoning mode ignore it. The same control is `/thinking` in the REPL — see [chapter 10](ch10-slash-commands.md).
+**Thinking budget** — under the model line sits a `think` row: `auto · 0 · 1 · 2 · 3 · 4 · 5`. It sets how much reasoning the model is asked to spend on the next turn, without a slash command. `auto` lets the engine decide from the prompt; `0` turns extended thinking off; `1`–`5` ask for progressively deeper reasoning (`4` xhigh and `5` max fall back to the nearest level a model offers). Models that have no reasoning mode ignore it. The same control is `/thinking` in the REPL — see [chapter 10](ch10-slash-commands.md).
 
 ![The inline model picker — search-as-you-type over every model in the catalogue, grouped by provider](../user-manual-img/ch-04/model-picker.png)
 

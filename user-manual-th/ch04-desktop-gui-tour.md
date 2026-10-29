@@ -34,7 +34,7 @@ Sidebar แสดงอยู่ตลอดเวลา และประก�
 
 เมื่อบันทึก key ผ่าน Settings จุดจะเปลี่ยนเป็นสีเขียว และ model ที่ใช้งานอยู่อาจสลับไปยัง provider ตัวแรกที่มี credential ให้โดยอัตโนมัติ — ดู[บทที่ 6](ch06-providers-models-api-keys.md#auto-switch-on-key-save)
 
-**งบการคิด (thinking budget)** — ใต้บรรทัด model มีแถว `think`: `auto · 0 · 1 · 2 · 3` ใช้กำหนดว่าจะให้โมเดลใช้การให้เหตุผลมากแค่ไหนในเทิร์นถัดไป โดยไม่ต้องพิมพ์ slash command `auto` ปล่อยให้ engine ตัดสินจากตัว prompt เอง `0` ปิด extended thinking ส่วน `1`–`3` ขอ budget ที่ใหญ่ขึ้นตามลำดับ โมเดลที่ไม่มีโหมดให้เหตุผลจะไม่สนใจค่านี้ ตัวคุมเดียวกันนี้คือ `/thinking` เมื่ออยู่ใน REPL — ดู[บทที่ 10](ch10-slash-commands.md)
+**งบการคิด (thinking budget)** — ใต้บรรทัด model มีแถว `think`: `auto · 0 · 1 · 2 · 3 · 4 · 5` ใช้กำหนดว่าจะให้โมเดลใช้การให้เหตุผลมากแค่ไหนในเทิร์นถัดไป โดยไม่ต้องพิมพ์ slash command `auto` ปล่อยให้ engine ตัดสินจากตัว prompt เอง `0` ปิด extended thinking ส่วน `1`–`5` ขอให้คิดลึกขึ้นตามลำดับ (`4` xhigh กับ `5` max จะใช้ระดับที่ใกล้ที่สุดที่โมเดลมีให้) โมเดลที่ไม่มีโหมดให้เหตุผลจะไม่สนใจค่านี้ ตัวคุมเดียวกันนี้คือ `/thinking` เมื่ออยู่ใน REPL — ดู[บทที่ 10](ch10-slash-commands.md)
 
 ![inline model picker — ค้นหาแบบพิมพ์ไปเจอไป ครอบคลุมทุก model ใน catalogue จัดกลุ่มตาม provider](../user-manual-img/ch-04/model-picker.png)
 

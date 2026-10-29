@@ -136,7 +136,7 @@ Slash commands คือ control plane ของ thClaws พิมพ์ `/` ต
 | Command | ทำอะไร |
 |---|---|
 | `/permissions MODE` | สลับระหว่าง `auto` และ `ask` ระหว่าง session |
-| `/thinking 0-3` | ระดับ thinking ใช้ได้ทุก provider: `0` ปิด · `1` low · `2` medium · `3` high · `auto` (ค่า default ของ provider) หรือ `/thinking <tokens>` ระบุ budget ตรง ๆ ปุ่มเดียวกับ pill **think** ใต้ชื่อโมเดลใน sidebar บันทึกลง `thinkingBudget` |
+| `/thinking 0-5` | ระดับ thinking ใช้ได้ทุก provider: `0` ปิด · `1` low · `2` medium · `3` high · `4` xhigh · `5` max · `auto` (ค่า default ของ provider) โมเดลที่ไม่มีระดับนั้นจะได้ค่าที่ใกล้ที่สุดที่รับได้ หรือ `/thinking <tokens>` ระบุ budget ตรง ๆ ปุ่มเดียวกับ pill **think** ใต้ชื่อโมเดลใน sidebar บันทึกลง `thinkingBudget` |
 | `/tasks` | แสดง task / todo ที่ agent สร้างไว้ |
 | `/plan [enter\|exit\|status]` | สลับโหมดวางแผน — สำรวจแบบอ่านอย่างเดียวก่อน แล้วค่อยลงมือทีละขั้นโดยมีการอนุมัติ `status` บอกสถานะแผนปัจจุบันโดยไม่เปลี่ยนโหมด ([บทที่ 18](ch18-plan-mode.md)) |
 | `/config key=val` | เขียนทับค่า config เฉพาะ session นี้ |

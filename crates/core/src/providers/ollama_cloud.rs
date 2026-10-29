@@ -159,7 +159,7 @@ impl OllamaCloudProvider {
                 match level {
                     L::Off | L::Low => json!("low"),
                     L::Medium => json!("medium"),
-                    L::High => json!("high"),
+                    L::High | L::XHigh | L::Max => json!("high"),
                 }
             } else {
                 json!(level != L::Off)

@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.147.0"
+version = "0.148.0"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -278,7 +278,7 @@ winresource = "0.1"
 # File Explorer double-click) otherwise detaches stdout entirely.
 # Issue #48.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 
 # kill(pid, 0) probe used by the scheduler daemon's PID-file
 # liveness check. Already a transitive dep via tokio + reqwest;

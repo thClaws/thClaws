@@ -878,7 +878,7 @@ pub async fn dispatch(
                 emit(
                     events_tx,
                     format!(
-                        "thinking: {}\n  levels: 0 off · 1 low · 2 medium · 3 high · auto",
+                        "thinking: {}\n  levels: 0 off · 1 low · 2 medium · 3 high · 4 xhigh · 5 max · auto",
                         ThinkingLevel::describe(state.agent.thinking_budget)
                     ),
                 );
@@ -898,7 +898,8 @@ pub async fn dispatch(
                     }
                     None => emit(
                         events_tx,
-                        "usage: /thinking 0|1|2|3 | off|low|medium|high | auto | <tokens>".into(),
+                        "usage: /thinking 0-5 | off|low|medium|high|xhigh|max | auto | <tokens>"
+                            .into(),
                     ),
                 }
             }

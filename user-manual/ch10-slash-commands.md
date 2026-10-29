@@ -138,7 +138,7 @@ See [Chapter 20](ch20-research.md) for the full pipeline + KMS layout + flag ref
 | Command | What it does |
 |---|---|
 | `/permissions MODE` | Switch between `auto` and `ask` mid-session |
-| `/thinking 0-3` | Thinking level for every provider: `0` off · `1` low · `2` medium · `3` high · `auto` (provider default). Also `/thinking <tokens>` for a raw budget. Same knob as the **think** pills under the model chip; persists to `thinkingBudget` |
+| `/thinking 0-5` | Thinking level for every provider: `0` off · `1` low · `2` medium · `3` high · `4` xhigh · `5` max · `auto` (provider default). A model without a level gets the nearest one it accepts. Also `/thinking <tokens>` for a raw budget. Same knob as the **think** pills under the model chip; persists to `thinkingBudget` |
 | `/tasks` | List tasks / todos the agent has created |
 | `/plan [enter\|exit\|status]` | Toggle plan mode — read-only exploration, then step-gated execution. `status` reports the current plan without changing mode ([Chapter 18](ch18-plan-mode.md)) |
 | `/config key=val` | Override a config value for this session only |

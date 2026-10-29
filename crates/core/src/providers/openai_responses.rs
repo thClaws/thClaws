@@ -164,17 +164,17 @@ impl OpenAIResponsesProvider {
             let m = model.to_ascii_lowercase();
             if m.starts_with('o') || m.starts_with("gpt-5") {
                 use super::ThinkingLevel as L;
-                let effort = match level {
-                    L::Off => {
-                        if m.starts_with("gpt-5") {
-                            "minimal"
-                        } else {
-                            "low"
-                        }
-                    }
-                    L::Low => "low",
-                    L::Medium => "medium",
-                    L::High => "high",
+                // A measured model gets a value it accepts (`gpt-5.1`+ take
+                // `none`, not `minimal`; `xhigh` where offered). An
+                // unmeasured one keeps the four values every o*/gpt-5 takes.
+                let effort = match super::openai::accepted_efforts(&m) {
+                    Some(accepted) => super::openai::nearest_effort(level, accepted),
+                    None => match level {
+                        L::Off if m.starts_with("gpt-5") => "minimal",
+                        L::Off | L::Low => "low",
+                        L::Medium => "medium",
+                        L::High | L::XHigh | L::Max => "high",
+                    },
                 };
                 body["reasoning"] = json!({"effort": effort});
             }

@@ -1041,6 +1041,7 @@ async fn main() {
         {
             if let Ok(cwd) = std::env::current_dir() {
                 use thclaws_core::bots::migrate::AutoOutcome;
+                thclaws_core::util::wait_for_reexec_parent(std::time::Duration::from_secs(15));
                 match thclaws_core::bots::migrate::auto_migrate_if_v2(&cwd) {
                     AutoOutcome::Migrated(report, moves_git) => {
                         eprintln!("\x1b[36m[thclaws] This workspace can now hold more than one agent.\x1b[0m");
@@ -1059,6 +1060,9 @@ async fn main() {
                     ),
                     AutoOutcome::Failed(e) => eprintln!(
                         "\x1b[33m[thclaws] could not upgrade this workspace ({e}) — opening it as it is\x1b[0m"
+                    ),
+                    AutoOutcome::GaveUp(n, e) => eprintln!(
+                        "\x1b[33m[thclaws] this workspace's upgrade failed {n} times ({e}) — not retrying; close thClaws and run `thclaws bots migrate` here\x1b[0m"
                     ),
                     AutoOutcome::AlreadyV3 => {}
                     AutoOutcome::NotV2 => match thclaws_core::bots::migrate::mint_if_fresh(&cwd) {
@@ -1666,9 +1670,16 @@ async fn run_bots_subcommand(cmd: BotsCmd) -> i32 {
                         migrate::Status::Migrate => println!(
                             "layout     v2 (single agent) — `thclaws bots migrate` moves it to v3"
                         ),
-                        migrate::Status::Resume(phase) => println!(
-                            "layout     MIGRATION INTERRUPTED at '{phase:?}' — re-run `thclaws bots migrate` to finish it"
-                        ),
+                        migrate::Status::Resume(phase) => {
+                            println!(
+                                "layout     MIGRATION INTERRUPTED at '{phase:?}' — re-run `thclaws bots migrate` to finish it"
+                            );
+                            if let Some((n, e)) = migrate::stuck_migration(&ws) {
+                                println!(
+                                    "attempts   {n} failed, last: {e} — opening the workspace no longer retries it"
+                                );
+                            }
+                        }
                     }
                     match thclaws_core::bots::BotsConfig::load(&ws) {
                         Ok(cfg) => {
