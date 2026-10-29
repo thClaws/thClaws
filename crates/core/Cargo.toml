@@ -99,7 +99,7 @@ icu_segmenter = { version = "1.5", features = ["auto"] }
 # Post-process PdfCreate output: printpdf writes outline /Title as
 # Literal UTF-8 (viewers read PDFDocEncoding → Thai mojibake); we
 # re-encode titles as UTF-16BE+BOM. Same version printpdf uses.
-lopdf = "0.31"
+lopdf = "0.42"
 # DOCX generation backing DocxCreate. Markdown → Word XML via docx-rs's
 # document builder; renders runs/paragraphs/tables/headings/lists with
 # explicit fontTable references (Calibri for Latin, Noto Sans Thai for
