@@ -52,11 +52,24 @@ pub struct AgentSdkProvider {
     tools: Option<Arc<ToolRegistry>>,
 }
 
+/// `CLAUDE_BIN`, unless it is a relative path: that resolves against the
+/// project folder, so a cloned repo could name its own binary.
+pub fn claude_bin() -> String {
+    match std::env::var("CLAUDE_BIN") {
+        Ok(b)
+            if !b.is_empty()
+                && (std::path::Path::new(&b).is_absolute() || !b.contains(['/', '\\'])) =>
+        {
+            b
+        }
+        _ => "claude".to_string(),
+    }
+}
+
 impl AgentSdkProvider {
     pub fn new() -> Self {
-        let bin = std::env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
         Self {
-            claude_bin: bin,
+            claude_bin: claude_bin(),
             session_id: Arc::new(Mutex::new(None)),
             next_req: Arc::new(Mutex::new(0)),
             tools: None,
@@ -764,6 +777,21 @@ impl Provider for AgentSdkProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_claude_bin_falls_back_to_path_lookup() {
+        let saved = std::env::var("CLAUDE_BIN").ok();
+        std::env::set_var("CLAUDE_BIN", "./tools/claude");
+        assert_eq!(claude_bin(), "claude");
+        std::env::set_var("CLAUDE_BIN", "/opt/claude/bin/claude");
+        assert_eq!(claude_bin(), "/opt/claude/bin/claude");
+        std::env::set_var("CLAUDE_BIN", "claude-dev");
+        assert_eq!(claude_bin(), "claude-dev");
+        match saved {
+            Some(v) => std::env::set_var("CLAUDE_BIN", v),
+            None => std::env::remove_var("CLAUDE_BIN"),
+        }
+    }
 
     #[test]
     fn user_turn_carries_images_alongside_text() {

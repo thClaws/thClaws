@@ -107,7 +107,8 @@ thClaws redistribute ได้ภายใต้ MIT/Apache ฟอนต์ Noto
 | Tool | การอนุมัติ | สรุป |
 |---|---|---|
 | `PdfCreate` | prompt | Markdown → PDF (printpdf + ฟอนต์ไทยฝังใน, A4/Letter/Legal) |
-| `PdfRead` | auto¹ | สกัดข้อความผ่าน `pdftotext` (poppler-utils — `brew install poppler` / `apt install poppler-utils`) |
+| `PdfRead` | auto¹ | สกัดข้อความผ่าน `pdftotext` (poppler-utils) หรือบริการเอกสารถ้าไม่มี poppler; หน้าที่เป็นภาพสแกนจะถูก OCR (`ocr`: `auto` / `vision` / `tesseract`) |
+| `DocConvert` | prompt | แปลงไฟล์บนบริการเอกสาร: Word/Excel/PowerPoint/OpenDocument/.doc/.xls/.ppt แปลงไปมาระหว่างกัน หรือเป็น PDF; `.html` → PDF จัดหน้าสวย บันทึกไว้ข้างไฟล์ต้นฉบับ ไม่เขียนทับไฟล์เดิม |
 | `DocxCreate` | prompt | Markdown → Word (.docx) ผ่าน `docx-rs` — heading, list, code block |
 | `DocxRead` | auto | สกัดข้อความจากไฟล์ Word (XML walk แบบ pure Rust) |
 | `DocxEdit` | prompt | `find_replace` / `append_paragraph` ในไฟล์เดิม |
@@ -121,9 +122,11 @@ thClaws redistribute ได้ภายใต้ MIT/Apache ฟอนต์ Noto
 **¹ อ่าน PDF โดยไม่ต้องติดตั้ง poppler** — `PdfRead` จะเลือกใช้ `pdftotext`
 ในเครื่องก่อนเสมอ เพราะเป็นตัวสกัดข้อความที่ดีที่สุดสำหรับภาษาไทย และไฟล์
 ไม่ต้องออกจากเครื่องคุณเลย ถ้าไม่ได้ติดตั้ง poppler ไว้ thClaws จะไม่ล้มเหลว
-แต่จะเสนอให้สกัดข้อความผ่านบริการสาธารณะของ thClaws แทน — **ไม่ต้องมีบัญชี
+แต่จะเสนอให้สกัดข้อความบนบริการเอกสารที่อยู่หลัง thClaws Gateway ของคุณ
+หรือถ้ายังไม่ได้ลงชื่อเข้าใช้ ก็ผ่านบริการสาธารณะของ thClaws — **ไม่ต้องมีบัญชี
 ไม่ต้องมี key** — และจะถามคุณก่อน โดยบอกชื่อไฟล์และปลายทางที่จะส่งไป
-ข้อความที่ได้กลับมาจะมีเครื่องหมายกำกับว่ามาจากเส้นทางไหน
+ข้อความที่ได้กลับมาจะมีเครื่องหมายกำกับว่ามาจากเส้นทางไหน ในรุ่น Enterprise
+บริการเอกสารคือ gateway ขององค์กรคุณเอง จึงใช้ได้ทันทีโดยไม่ต้องถาม
 
 สามเรื่องที่ควรรู้:
 
@@ -133,19 +136,23 @@ thClaws redistribute ได้ภายใต้ MIT/Apache ฟอนต์ Noto
 - ตั้ง `"pdfCloudFallback": false` ใน `.thclaws/settings.json` แล้วจะไม่มีการ
   อัปโหลดอะไรทั้งสิ้น คุณจะได้วิธีติดตั้งแทน — ตั้งแบบนี้ถ้า PDF ของคุณเป็น
   ความลับโดยค่าเริ่มต้น
-- **PDF ที่เป็นภาพสแกนยังต้องใช้ poppler อยู่ดี** เพราะเมื่อ PDF ไม่มีชั้น
-  ข้อความ thClaws จะอ่านด้วยการ render หน้าเป็นภาพให้โมเดลดู และตัว render
-  นั้นคือ `pdftoppm` ซึ่งมาจากแพ็กเกจเดียวกัน ส่วนบริการสาธารณะคืนให้เฉพาะ
-  ข้อความเท่านั้น
+- **PDF ที่เป็นภาพสแกน** เมื่อ PDF ไม่มีชั้นข้อความ `ocr: "auto"` (ค่าเริ่มต้น)
+  จะ OCR บนบริการเอกสาร (ไทย + อังกฤษ) และส่งหน้าที่ OCR ไม่มั่นใจ (ความมั่นใจ
+  ต่ำกว่า 70) ให้โมเดลอ่านเป็นภาพ ถ้าไม่มีบริการเอกสาร — หรือบนเดสก์ท็อป
+  open-core ที่ติดตั้ง poppler ไว้ ซึ่งไม่มีอะไรออกจากเครื่องโดยไม่ถาม — จะ
+  render หน้าเป็นภาพในเครื่องด้วย `pdftoppm` ให้โมเดลอ่านเหมือนเดิม
+  `ocr: "vision"` ใช้ภาพเสมอ ส่วน `ocr: "tesseract"` คืนเฉพาะข้อความ OCR
+  บริการสาธารณะคืนให้เฉพาะข้อความเท่านั้น
 
 **การ render ภาษาไทยในแต่ละ format:**
 
 - `PdfCreate` ฝังฟอนต์ Noto Sans Thai TTF ลงในไฟล์ PDF โดยตรง — ภาษาไทย
   render เหมือนกันทุกผู้ดู ไม่ขึ้นกับฟอนต์ที่ติดตั้ง
-- `DocxCreate` / `PptxCreate` ตั้ง `<w:rFonts w:cs="Noto Sans Thai"/>`
-  / `<a:cs typeface="Noto Sans Thai"/>` ต่อ run ทำให้ Word และ PowerPoint
-  เลือกฟอนต์ไทยจากระบบของผู้ใช้ Win/Mac/Linux รุ่นใหม่ติดตั้ง Noto Sans
-  Thai มาให้แล้ว Office จะ fallback ไป Tahoma / Cordia New หากไม่พบ
+- `DocxCreate` / `PptxCreate` ตั้ง `<w:rFonts w:cs="Sarabun"/>` /
+  `<a:cs typeface="Sarabun"/>` ต่อ run โดยข้อความไทยมีขนาดเท่ากับอักษรละติน
+  Sarabun เป็นฟอนต์ฟรีของ Google Fonts บริการแปลงและพรีวิวเอกสารติดตั้งไว้แล้ว
+  ถ้าเครื่องผู้ใช้ไม่มีฟอนต์นี้ Word และ PowerPoint จะใช้ฟอนต์ไทยของระบบแทน
+  ติดตั้ง Sarabun เพื่อให้เอกสารแสดงตามที่ออกแบบไว้
 - `XlsxCreate` ใช้ Calibri (default ของ Excel) — text engine ของ Excel
   จัดการสคริปต์ไทยผ่าน OS Thai font stack โดยไม่ต้องตั้งค่าต่อเซลล์
 

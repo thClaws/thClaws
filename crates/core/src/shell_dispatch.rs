@@ -218,8 +218,16 @@ pub async fn dispatch(
             emit(events_tx, text);
         }
         SlashCommand::Usage => {
-            let tracker =
-                crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path());
+            // A multiuser pod books each member's turns under their own
+            // usage dir; the default path is the pod's, which they never
+            // write.
+            let tracker = crate::usage::UsageTracker::new(
+                state
+                    .session_roots
+                    .as_ref()
+                    .map(|r| r.usage_dir.clone())
+                    .unwrap_or_else(crate::usage::UsageTracker::default_path),
+            );
             emit(events_tx, tracker.summary());
         }
         SlashCommand::Doctor { fix } => {
@@ -742,6 +750,8 @@ pub async fn dispatch(
                          see chapter 21)"
                     ),
                 );
+            } else if let Some(msg) = permissions_change_refusal(&mode) {
+                emit(events_tx, msg);
             } else {
                 // Three settable modes here:
                 // - auto / ask → persisted to settings.json; survive restart.
@@ -900,6 +910,7 @@ pub async fn dispatch(
             );
         }
         SlashCommand::Cost { reset } => {
+            crate::shared_session::sync_session_cost(state);
             if reset {
                 state.session_cost_usd = 0.0;
                 #[cfg(feature = "cost_bridge")]
@@ -1705,6 +1716,7 @@ pub async fn dispatch(
             // Resolve marketplace name → install_url (or fall through
             // for a URL). See `repl::resolve_skill_install_target` for
             // the same logic in the CLI surface.
+            crate::marketplace::refresh_private().await;
             let (effective_url, effective_name, abort_msg) =
                 resolve_skill_install_target_gui(&git_url, name.as_deref());
             if let Some(msg) = abort_msg {
@@ -1738,6 +1750,31 @@ pub async fn dispatch(
                 Err(e) => emit(events_tx, format!("skill install failed: {e}")),
             }
         }
+        SlashCommand::SkillUpdate { name, project } => {
+            crate::marketplace::refresh_private().await;
+            let (url, _, abort_msg) = resolve_skill_install_target_gui(&name, None);
+            if let Some(msg) = abort_msg {
+                emit(events_tx, msg);
+                return;
+            }
+            match crate::skills::update_from_url(&url, &name, project).await {
+                Ok(report) => {
+                    let refreshed = crate::skills::SkillStore::discover();
+                    if let Ok(mut store) = state.skill_store.lock() {
+                        *store = refreshed;
+                    }
+                    state.rebuild_system_prompt();
+                    if let Err(e) = state.rebuild_agent(true) {
+                        emit(events_tx, format!("rebuild failed: {e}"));
+                        return;
+                    }
+                    let mut out = report.join("\n");
+                    out.push_str("\n(the new version is live in this session — no restart needed)");
+                    emit(events_tx, out);
+                }
+                Err(e) => emit(events_tx, format!("skill update failed: {e}")),
+            }
+        }
         SlashCommand::SkillMarketplace { refresh } => {
             if refresh {
                 match crate::marketplace::refresh_from_remote().await {
@@ -1755,6 +1792,7 @@ pub async fn dispatch(
                     ),
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             // M6.11 (H2): include cache freshness in the header so
             // users see how old their snapshot is at a glance.
@@ -1850,6 +1888,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -1923,6 +1962,7 @@ pub async fn dispatch(
             }
         }
         SlashCommand::SubagentInstall { arg, name, project } => {
+            crate::marketplace::refresh_private().await;
             let (effective_url, abort_msg) =
                 crate::agent_defs::resolve_subagent_install_target(&arg);
             if let Some(msg) = abort_msg {
@@ -1961,6 +2001,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             // Installed-name sets for the [installed ✓] badges. Skills
             // from the live SkillStore; subagents from the loaded defs
@@ -1994,6 +2035,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -2109,6 +2151,7 @@ pub async fn dispatch(
                     emit(events_tx, format!("refresh failed: {e}"));
                 }
             }
+            crate::marketplace::refresh_private().await;
             let mp = crate::marketplace::load();
             let age_suffix = match crate::marketplace::cache_age_label() {
                 Some(label) => format!(", {label}"),
@@ -3354,6 +3397,7 @@ pub async fn dispatch(
         }
         SlashCommand::PluginInstall { url, user, force } => {
             // Resolve marketplace slug → install_url (no-op for URLs).
+            crate::marketplace::refresh_private().await;
             let (effective_url, abort_msg) = crate::repl::resolve_plugin_install_target(&url);
             if let Some(msg) = abort_msg {
                 emit(events_tx, msg);
@@ -5059,6 +5103,28 @@ fn dispatch_workflow_inspect(prefix: String, events_tx: &broadcast::Sender<ViewE
     emit(events_tx, lines.join("\n"));
 }
 
+/// `/permissions <mode>` is refused when the org pins the mode, and in a
+/// multiuser pod, where the mode is one process-wide value for every member.
+fn permissions_change_refusal(arg: &str) -> Option<String> {
+    if crate::workdir::is_multiuser() {
+        return Some(
+            "Permission mode is fixed (auto) in shared workspaces — it applies to every member."
+                .into(),
+        );
+    }
+    permissions_arg_mode(arg).and_then(crate::policy::permission_mode_refusal)
+}
+
+fn permissions_arg_mode(arg: &str) -> Option<crate::permissions::PermissionMode> {
+    use crate::permissions::PermissionMode;
+    match arg.trim().to_lowercase().as_str() {
+        "auto" | "yolo" => Some(PermissionMode::Auto),
+        "ask" | "default" => Some(PermissionMode::Ask),
+        "linegated" | "line" => Some(PermissionMode::LineGated),
+        _ => None,
+    }
+}
+
 /// When LINE is currently bridged and the user just chose `auto` or
 /// `ask`, swap `state.approver` back to the pre-LINE (desktop) approver
 /// so future approval prompts surface locally rather than getting
@@ -5166,7 +5232,8 @@ fn resolve_skill_install_target_gui(
             String::new(),
             None,
             Some(format!(
-                "no skill named '{arg}' in marketplace and not a URL — try /skill search <query> or pass a git URL"
+                "no skill named '{arg}' in marketplace and not a URL — {}",
+                crate::marketplace::not_found_hint("try /skill search <query> or pass a git URL")
             )),
         ),
     }

@@ -16,7 +16,7 @@
 //! - Bullets under the heading become bullet body text.
 //! - Empty body = title-only slide.
 //!
-//! Thai support: each text run carries `<a:cs typeface="Noto Sans Thai"/>`
+//! Thai support: each text run carries `<a:cs typeface="Sarabun"/>`
 //! so PowerPoint picks the Thai-script font for U+0E00–U+0E7F codepoints
 //! and the layout default (Calibri) for everything else — same per-run
 //! split-by-script trick we use in DocxCreate.
@@ -29,6 +29,8 @@ use serde_json::{json, Value};
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
+
+use super::docx_create::THAI_FONT;
 
 const TEMPLATE_LIGHT: &[u8] = include_bytes!("../../resources/pptx/template-light.pptx");
 
@@ -43,9 +45,8 @@ impl Tool for PptxCreateTool {
     fn description(&self) -> &'static str {
         "Render a markdown outline to a PowerPoint deck (.pptx). Each \
          `# Heading` starts a new slide (heading is the title); bullet \
-         items become bullet body text. Per-run cs typeface set to Noto \
-         Sans Thai so Thai content renders without a system-font \
-         dependency on the user's machine.\n\n\
+         items become bullet body text. Per-run cs typeface set to \
+         Sarabun so Thai content uses the Thai document font.\n\n\
          \
          Native image embedding (`![alt](path)` → `<p:pic>`) is a v2 \
          enhancement — for now the image source surfaces as a bullet \
@@ -268,7 +269,7 @@ fn render_pptx(path: &Path, slides: &[Slide]) -> Result<usize> {
 }
 
 /// Slide XML using Title-and-Content layout. Each bullet is its own
-/// `<a:p>`. Per-run rPr sets `cs typeface="Noto Sans Thai"` so PowerPoint
+/// `<a:p>`. Per-run rPr sets the `cs` typeface (`THAI_FONT`) so PowerPoint
 /// uses the Thai font for complex-script codepoints.
 fn slide_xml(slide: &Slide) -> String {
     let title_xml = run_xml(&slide.title);
@@ -282,12 +283,12 @@ fn slide_xml(slide: &Slide) -> String {
     };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p>{title_xml}</a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Content Placeholder 2"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>{body_xml}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#,
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>{title_xml}</p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Content Placeholder 2"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>{body_xml}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#,
     )
 }
 
-/// One drawingML run wrapped in an `<a:p>` paragraph (when used for
-/// bullets). For title text we wrap differently — caller controls.
+/// One drawingML run wrapped in its `<a:p>` paragraph — a whole title or
+/// one bullet.
 fn run_xml(text: &str) -> String {
     if text.is_empty() {
         return "<a:p></a:p>".into();
@@ -297,7 +298,7 @@ fn run_xml(text: &str) -> String {
     // (Thai range U+0E00–U+0E7F) pick up the cs font, while everything
     // else falls through to the slide layout's default typeface.
     format!(
-        r#"<a:p><a:r><a:rPr lang="th-TH"><a:cs typeface="Noto Sans Thai"/></a:rPr><a:t>{escaped}</a:t></a:r></a:p>"#
+        r#"<a:p><a:r><a:rPr lang="th-TH"><a:cs typeface="{THAI_FONT}"/></a:rPr><a:t>{escaped}</a:t></a:r></a:p>"#
     )
 }
 
@@ -426,6 +427,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("at least one"));
+    }
+
+    #[test]
+    fn slide_runs_carry_the_thai_cs_typeface() {
+        let xml = slide_xml(&Slide {
+            title: "งบประมาณ".into(),
+            bullets: vec!["ค่าใบอนุญาต 6,000,000 บาท".into()],
+        });
+        assert!(xml.contains(r#"<a:cs typeface="Sarabun"/>"#), "{xml}");
+        assert!(xml.contains(r#"lang="th-TH""#), "{xml}");
+    }
+
+    /// The title used to be wrapped in a second `<a:p>` around run_xml's own.
+    #[test]
+    fn title_is_a_single_paragraph() {
+        let xml = slide_xml(&Slide {
+            title: "งบประมาณ".into(),
+            bullets: vec![],
+        });
+        let start = xml.find(r#"<p:ph type="title"/>"#).unwrap();
+        let body = &xml[start..];
+        let title_body = &body[body.find("<p:txBody>").unwrap()..body.find("</p:txBody>").unwrap()];
+        assert_eq!(title_body.matches("<a:p>").count(), 1, "{title_body}");
+        assert!(!xml.contains("<a:p><a:p>"), "{xml}");
     }
 
     #[test]

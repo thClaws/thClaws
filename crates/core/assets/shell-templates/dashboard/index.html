@@ -86,7 +86,7 @@
 {"stats":[{"label":"…","value":"…","delta":"+5%"}],"activity":[{"text":"…","tag":"sale"}]}`;
       await window.thclaws.run(prompt);
     };
-    window.thclaws.on("text", ({ delta }) => { buf += delta; });
+    window.thclaws.on("text", (delta) => { buf += delta; });
     window.thclaws.on("done", tryParse);
     // Initial render — empty placeholders.
     renderStats([

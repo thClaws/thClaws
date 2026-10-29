@@ -161,6 +161,10 @@ impl VideoProvider for LtxVideoProvider {
         "ltx"
     }
 
+    fn fixed_aspects(&self) -> bool {
+        true
+    }
+
     fn models(&self) -> &'static [ImageModelInfo] {
         MODELS
     }

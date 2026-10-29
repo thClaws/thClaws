@@ -115,7 +115,7 @@ struct Sheet {
 /// `Vec<Vec<String>>` so JSON 2D-array input preserves number/bool types
 /// without lossy stringification.
 #[derive(Debug, Clone)]
-enum Cell {
+pub(crate) enum Cell {
     Empty,
     Text(String),
     Number(f64),
@@ -134,6 +134,9 @@ enum Cell {
 /// otherwise treat it as a 2D array. A mixed array of objects + raw
 /// row arrays is rejected (ambiguous).
 fn parse_sheets(data: &Value, default_name: &str) -> Result<Vec<Sheet>> {
+    if let Some(parsed) = stringified_json_array(data) {
+        return parse_sheets(&parsed, default_name);
+    }
     if let Some(s) = data.as_str() {
         // Shape 1: CSV string.
         return Ok(vec![Sheet {
@@ -214,6 +217,20 @@ fn parse_sheets(data: &Value, default_name: &str) -> Result<Vec<Sheet>> {
     }
 }
 
+/// Some models (qwen) send a nested array argument as a JSON string:
+/// `"data": "[[\"a\",1]]"`. Taken as the array it spells when it parses as
+/// one; a CSV whose first cell happens to start with `[` fails to parse and
+/// stays CSV.
+pub(crate) fn stringified_json_array(v: &Value) -> Option<Value> {
+    let s = v.as_str()?.trim();
+    if !s.starts_with('[') {
+        return None;
+    }
+    serde_json::from_str::<Value>(s)
+        .ok()
+        .filter(Value::is_array)
+}
+
 /// Parse a CSV body into typed rows. Same posture as the prior single-
 /// sheet path — flexible (uneven row widths allowed), no header
 /// special-casing here (header bolding is applied at render time).
@@ -233,6 +250,9 @@ fn parse_csv_rows(s: &str) -> Result<Vec<Vec<Cell>>> {
 /// Parse a JSON 2D array (each inner element is a row of cells).
 /// `sheet_idx` is used purely for the error message context.
 fn parse_2d_array(data: &Value, sheet_idx: usize) -> Result<Vec<Vec<Cell>>> {
+    if let Some(parsed) = stringified_json_array(data) {
+        return parse_2d_array(&parsed, sheet_idx);
+    }
     let arr = data.as_array().ok_or_else(|| {
         Error::Tool(format!(
             "data[{sheet_idx}] rows must be a 2D array (got {})",
@@ -288,7 +308,7 @@ fn value_to_cell(v: &Value) -> Cell {
 /// "5.0" stays as Text (round-trips as "5"), which is intentional —
 /// users who want "5.0" to render numeric should use the JSON
 /// 2D-array path with `5.0` as a typed value.
-fn string_to_cell(s: &str) -> Cell {
+pub(crate) fn string_to_cell(s: &str) -> Cell {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Cell::Empty;
@@ -439,6 +459,29 @@ mod tests {
             .await
             .unwrap();
         assert!(std::fs::metadata(&path).unwrap().len() > 1000);
+    }
+
+    /// qwen stringifies nested arguments (session sess-18e06d2c16d0d9c0):
+    /// the whole table landed on one row as CSV.
+    #[test]
+    fn stringified_2d_array_is_parsed_as_rows() {
+        let data = json!("[[\"รายการ\",\"จำนวนเงิน (บาท)\"],[\"ค่าใบอนุญาตซอฟต์แวร์\",6000000]]");
+        let sheets = parse_sheets(&data, "Sheet1").unwrap();
+        assert_eq!(sheets.len(), 1);
+        let rows = &sheets[0].rows;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(matches!(&rows[0][1], Cell::Text(t) if t == "จำนวนเงิน (บาท)"));
+        assert!(matches!(&rows[1][0], Cell::Text(t) if t == "ค่าใบอนุญาตซอฟต์แวร์"));
+        assert!(matches!(rows[1][1], Cell::Number(n) if n == 6000000.0));
+    }
+
+    #[test]
+    fn csv_starting_with_a_bracket_stays_csv() {
+        let data = json!("[draft] item,amount\nชา,40");
+        let rows = &parse_sheets(&data, "Sheet1").unwrap()[0].rows;
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(&rows[0][0], Cell::Text(t) if t == "[draft] item"));
+        assert!(matches!(rows[1][1], Cell::Number(n) if n == 40.0));
     }
 
     #[test]

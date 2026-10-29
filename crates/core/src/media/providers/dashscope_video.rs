@@ -154,7 +154,11 @@ impl DashScopeVideoProvider {
                 Some(url) => json!({
                     "model": req.model,
                     "input": { "prompt": req.prompt, "img_url": url },
-                    "parameters": { "resolution": Self::resolution(req), "duration": duration },
+                    "parameters": {
+                        "resolution": Self::resolution(req),
+                        "duration": duration,
+                        "watermark": false,
+                    },
                 }),
                 None => json!({
                     "model": req.model,
@@ -162,6 +166,7 @@ impl DashScopeVideoProvider {
                     "parameters": {
                         "size": legacy_size(&req.model, Self::resolution(req), &req.aspect_ratio),
                         "duration": duration,
+                        "watermark": false,
                     },
                 }),
             });
@@ -171,9 +176,13 @@ impl DashScopeVideoProvider {
         // data URI for a local image — verified accepted) and derives
         // aspect from the frame, so `ratio` is omitted.
         let mut input = json!({ "prompt": req.prompt });
+        // happyhorse stamps "Happy Horse" in the corner unless told not to
+        // (seen 2026-10-22); Model Studio's video API takes the same switch
+        // for every model.
         let mut parameters = json!({
             "resolution": Self::resolution(req),
             "duration": req.duration_seconds,
+            "watermark": false,
         });
         if let Some(url) = image {
             input["media"] = json!([{ "type": "first_frame", "url": url }]);
@@ -401,5 +410,22 @@ mod tests {
         assert_eq!(p.resolve_model("wan-i2v").as_deref(), Some("wan2.7-i2v"));
         assert_eq!(p.resolve_model("wan2.8-t2v").as_deref(), Some("wan2.8-t2v"));
         assert!(p.resolve_model("wan2.7-image").is_none());
+    }
+
+    #[test]
+    fn every_video_request_turns_the_watermark_off() {
+        for (model, image) in [
+            ("happyhorse-1.0-t2v", false),
+            ("happyhorse-1.0-i2v", true),
+            ("wan2.7-t2v", false),
+            ("wan2.2-t2v-plus", false),
+            ("wan2.2-i2v-plus", true),
+        ] {
+            assert_eq!(
+                body(model, image, 5, "720P", "16:9")["parameters"]["watermark"],
+                false,
+                "{model}"
+            );
+        }
     }
 }

@@ -27,6 +27,42 @@ pub struct DailyUsage {
     pub cache_read: u64,
     #[serde(default)]
     pub requests: u64,
+    /// Thinking tokens; a part of `output`, not added to it.
+    #[serde(default)]
+    pub reasoning: u64,
+}
+
+impl DailyUsage {
+    fn add(&mut self, d: &DailyUsage) {
+        self.input += d.input;
+        self.output += d.output;
+        self.cache_write += d.cache_write;
+        self.cache_read += d.cache_read;
+        self.requests += d.requests;
+        self.reasoning += d.reasoning;
+    }
+
+    /// `Nin (… cached)/Nout (… thinking) (N req)`: `in` is the whole prompt,
+    /// cache included, as the gateway and the provider bill count it
+    /// (`input` on disk is the uncached part).
+    pub fn line(&self) -> String {
+        let cache = match (self.cache_read, self.cache_write) {
+            (0, 0) => String::new(),
+            (r, 0) => format!(" ({r} cached)"),
+            (0, w) => format!(" ({w} cache-write)"),
+            (r, w) => format!(" ({r} cached, {w} cache-write)"),
+        };
+        let thinking = match self.reasoning {
+            0 => String::new(),
+            t => format!(" ({t} thinking)"),
+        };
+        format!(
+            "{}in{cache}/{}out{thinking} ({} req)",
+            self.input + self.cache_read + self.cache_write,
+            self.output,
+            self.requests
+        )
+    }
 }
 
 /// Per-model usage file: date → DailyUsage.
@@ -109,6 +145,7 @@ impl UsageTracker {
         entry.cache_write += usage.cache_creation_input_tokens.unwrap_or(0) as u64;
         entry.cache_read += usage.cache_read_input_tokens.unwrap_or(0) as u64;
         entry.requests += 1;
+        entry.reasoning += usage.reasoning_output_tokens.unwrap_or(0) as u64;
 
         // Write back via temp-file + atomic rename so a concurrent reader
         // never observes a half-written file.
@@ -130,11 +167,7 @@ impl UsageTracker {
         let mut total = DailyUsage::default();
         for (_, _, data) in self.all_models() {
             for day in data.values() {
-                total.input += day.input;
-                total.output += day.output;
-                total.cache_write += day.cache_write;
-                total.cache_read += day.cache_read;
-                total.requests += day.requests;
+                total.add(day);
             }
         }
         total
@@ -146,11 +179,7 @@ impl UsageTracker {
         let mut total = DailyUsage::default();
         for (_, _, data) in self.all_models() {
             if let Some(day) = data.get(&today) {
-                total.input += day.input;
-                total.output += day.output;
-                total.cache_write += day.cache_write;
-                total.cache_read += day.cache_read;
-                total.requests += day.requests;
+                total.add(day);
             }
         }
         total
@@ -205,36 +234,117 @@ impl UsageTracker {
         for (provider, model, data) in &models {
             let mut total = DailyUsage::default();
             for day in data.values() {
-                total.input += day.input;
-                total.output += day.output;
-                total.cache_write += day.cache_write;
-                total.cache_read += day.cache_read;
-                total.requests += day.requests;
+                total.add(day);
             }
-            let today = data.get(&today_key);
-            let today_str = today
-                .map(|d| format!("today: {}in/{}out ({} req)", d.input, d.output, d.requests))
+            let today_str = data
+                .get(&today_key)
+                .map(|d| format!("today: {}", d.line()))
                 .unwrap_or_else(|| "today: 0".into());
             parts.push(format!(
-                "  {}/{}: {}in/{}out ({} req) — {}",
-                provider, model, total.input, total.output, total.requests, today_str
+                "  {}/{}: {} — {}",
+                provider,
+                model,
+                total.line(),
+                today_str
             ));
         }
 
         let grand = self.total();
         let grand_today = self.today();
         parts.push(format!(
-            "\n## Total: {}in/{}out ({} req) — today: {}in/{}out ({} req)",
-            grand.input,
-            grand.output,
-            grand.requests,
-            grand_today.input,
-            grand_today.output,
-            grand_today.requests,
+            "\n## Total: {} — today: {}",
+            grand.line(),
+            grand_today.line()
         ));
 
         parts.join("\n")
     }
+}
+
+/// LLM calls made outside the main agent loop — Task subagents,
+/// compaction, workflow steps, GUI-shell `llm.complete`, research, KMS
+/// auto-link. The gateway bills them to the session, but the turn's `Done`
+/// usage never saw them, so the footer and `$ session` read less than the
+/// web Usage page. Each one is noted here under its session
+/// ([`crate::gateway_turn::current_session`]) and the session's next footer
+/// takes them ([`take_side_usage`]).
+#[derive(Debug, Clone, Default)]
+pub struct SideUsage {
+    pub calls: u32,
+    pub usage: Usage,
+    pub cost_usd: f64,
+    /// Per call, for the per-model tracker.
+    pub by_model: Vec<(String, Usage)>,
+}
+
+impl SideUsage {
+    /// ` · +N side calls: …` for a `[tokens: …]` line.
+    pub fn footer_note(&self) -> String {
+        format!(
+            " · +{} side call{}: {}",
+            self.calls,
+            if self.calls == 1 { "" } else { "s" },
+            self.usage.tokens_note()
+        )
+    }
+
+    /// Record every side call in the per-model tracker under `root`.
+    pub fn record(&self, tracker: &UsageTracker) {
+        for (model, u) in &self.by_model {
+            let provider = crate::providers::ProviderKind::detect(model)
+                .map(|k| k.name())
+                .unwrap_or("unknown");
+            tracker.record(provider, model, u);
+        }
+    }
+}
+
+static SIDE_USAGE: std::sync::Mutex<BTreeMap<String, SideUsage>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Note one side call's usage against the current session.
+pub fn note_side_usage(model: &str, u: &Usage) {
+    if u.input_tokens == 0 && u.output_tokens == 0 && u.cache_read_input_tokens.unwrap_or(0) == 0 {
+        return;
+    }
+    let cost = crate::model_catalogue::EffectiveCatalogue::load()
+        .compute_cost_usd(model, &crate::model_catalogue::TokenUsage::from_usage(u))
+        .unwrap_or(0.0);
+    // In a multiuser pod a call outside any session scope cannot be
+    // pinned to a member; booking it under "" would show it in whichever
+    // member's footer came next.
+    let key = match crate::gateway_turn::current_session() {
+        Some(k) => k,
+        None if crate::workdir::is_multiuser() => return,
+        None => String::new(),
+    };
+    let mut g = SIDE_USAGE.lock().unwrap_or_else(|p| p.into_inner());
+    let e = g.entry(key).or_default();
+    e.calls += 1;
+    e.usage.accumulate(u);
+    e.cost_usd += cost;
+    e.by_model.push((model.to_string(), u.clone()));
+}
+
+/// Everything noted for `session` (plus calls no session was known for)
+/// since the last take.
+pub fn take_side_usage(session: &str) -> Option<SideUsage> {
+    let mut g = SIDE_USAGE.lock().unwrap_or_else(|p| p.into_inner());
+    let mut out = SideUsage::default();
+    let unscoped = if crate::workdir::is_multiuser() {
+        None
+    } else {
+        Some("")
+    };
+    for key in std::iter::once(session).chain(unscoped) {
+        if let Some(e) = g.remove(key) {
+            out.calls += e.calls;
+            out.usage.accumulate(&e.usage);
+            out.cost_usd += e.cost_usd;
+            out.by_model.extend(e.by_model);
+        }
+    }
+    (out.calls > 0).then_some(out)
 }
 
 /// Today, where the user is.
@@ -464,5 +574,46 @@ mod tests {
         assert_eq!(d.len(), 10); // YYYY-MM-DD
         assert_eq!(&d[4..5], "-");
         assert_eq!(&d[7..8], "-");
+    }
+
+    #[test]
+    fn the_line_counts_cache_in_input_and_thinking_in_output() {
+        let d = DailyUsage {
+            input: 1000,
+            output: 200,
+            cache_write: 50,
+            cache_read: 300,
+            requests: 2,
+            reasoning: 120,
+        };
+        assert_eq!(
+            d.line(),
+            "1350in (300 cached, 50 cache-write)/200out (120 thinking) (2 req)"
+        );
+    }
+
+    #[tokio::test]
+    async fn side_calls_are_taken_once_by_their_session() {
+        let u = Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_input_tokens: Some(900),
+            ..Usage::default()
+        };
+        // Scoped, not process-wide: other tests set the process-wide one.
+        crate::gateway_turn::scope_session("sess-side-a".into(), async {
+            note_side_usage("some-unpriced-model", &u);
+            note_side_usage("some-unpriced-model", &u);
+        })
+        .await;
+        assert!(take_side_usage("sess-side-b").is_none());
+        let got = take_side_usage("sess-side-a").expect("noted");
+        assert_eq!(got.calls, 2);
+        assert_eq!(got.usage.prompt_tokens(), 2000);
+        assert_eq!(
+            got.footer_note(),
+            " · +2 side calls: 2000in (1800 cached)/40out"
+        );
+        assert!(take_side_usage("sess-side-a").is_none());
     }
 }

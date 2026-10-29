@@ -82,6 +82,21 @@ pub(crate) async fn scrape_via_hal(client: &reqwest::Client, url: &str) -> Resul
     })
 }
 
+/// HAL reports a target page's own failure as a gateway error (a 404
+/// page comes back as 502), which reads to the model like a flaky
+/// service worth retrying.
+fn hal_error_hint(detail: &str) -> Option<&'static str> {
+    if detail.contains("HTTP 404 error") || detail.contains("HTTP 410 error") {
+        Some("the page does not exist; don't retry it or guess nearby URLs, find the right link with a search first")
+    } else if detail.contains("ERR_TUNNEL_CONNECTION_FAILED")
+        || detail.contains("ERR_NAME_NOT_RESOLVED")
+    {
+        Some("the scraper cannot reach this site; retrying won't help, use a search result or another source")
+    } else {
+        None
+    }
+}
+
 /// Shared POST helper. Resolves the API key from the live process
 /// env (HAL_API_KEY), POSTs `body` to `<base>/<path>`, returns the
 /// raw response body on 2xx or maps to `Error::Tool` with the HAL
@@ -133,7 +148,10 @@ async fn hal_post(client: &reqwest::Client, path: &str, body: &Value) -> Result<
                     .map(|s| s.to_string())
             })
             .unwrap_or(text);
-        return Err(Error::Tool(format!("HAL {status}: {detail}")));
+        let hint = hal_error_hint(&detail)
+            .map(|h| format!(" — {h}"))
+            .unwrap_or_default();
+        return Err(Error::Tool(format!("HAL {status}: {detail}{hint}")));
     }
     serde_json::from_str(&text).map_err(|e| Error::Tool(format!("HAL JSON parse failed: {e}")))
 }
@@ -339,6 +357,19 @@ impl Tool for WebScrapeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hal_error_hint_names_dead_pages_and_unreachable_sites() {
+        assert!(hal_error_hint("HTTP 404 error for https://x.com/a")
+            .unwrap()
+            .contains("does not exist"));
+        assert!(
+            hal_error_hint("Navigation failed: net::ERR_TUNNEL_CONNECTION_FAILED")
+                .unwrap()
+                .contains("cannot reach")
+        );
+        assert_eq!(hal_error_hint("Internal Server Error"), None);
+    }
 
     #[test]
     fn youtube_declares_hal_env() {

@@ -136,10 +136,11 @@ impl Tool for PdfCreateTool {
             (inline.to_string(), crate::workdir::current_workdir())
         };
 
+        let content = replace_missing_glyphs(&content);
         let title = input
             .get("title")
             .and_then(|v| v.as_str())
-            .map(String::from)
+            .map(replace_missing_glyphs)
             .unwrap_or_else(|| {
                 Path::new(raw_path)
                     .file_stem()
@@ -233,6 +234,49 @@ struct InlineStyle {
 struct Span {
     text: String,
     style: InlineStyle,
+}
+
+/// Characters neither embedded face can draw come out as empty boxes
+/// (seen in an agent's report: "7.94 ☐ 13.57" for →, "☐" for ⚠). Swap the
+/// common ones for text the fonts carry; drop emoji and the rest.
+fn replace_missing_glyphs(text: &str) -> String {
+    let latin = ttf_parser::Face::parse(LATIN_REG_BYTES, 0).ok();
+    let thai = ttf_parser::Face::parse(THAI_REG_BYTES, 0).ok();
+    let has = |c: char| {
+        latin.as_ref().is_some_and(|f| f.glyph_index(c).is_some())
+            || thai.as_ref().is_some_and(|f| f.glyph_index(c).is_some())
+    };
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_whitespace() || c.is_control() || has(c) {
+            out.push(c);
+            continue;
+        }
+        let sub = match c {
+            '→' | '⟶' | '➜' | '➔' | '➡' | '▶' | '►' => "->",
+            '⇒' => "=>",
+            '←' | '⟵' | '⬅' | '◀' | '◄' => "<-",
+            '↔' | '⟷' => "<->",
+            '↑' | '⬆' | '▲' => "^",
+            '↓' | '⬇' | '▼' => "v",
+            '⚠' | '❗' | '❕' => "(!)",
+            '✓' | '✔' | '✅' | '☑' => {
+                if has('√') {
+                    "√"
+                } else {
+                    "v"
+                }
+            }
+            '✗' | '✘' | '❌' | '❎' => "x",
+            '★' | '⭐' | '☆' => "*",
+            '≥' => ">=",
+            '≤' => "<=",
+            '≠' => "!=",
+            _ => "",
+        };
+        out.push_str(sub);
+    }
+    out
 }
 
 fn font_for(c: char, style: InlineStyle) -> FontId {
@@ -1906,6 +1950,21 @@ mod tests {
         assert_eq!(
             normalize_path(Path::new("chapters/../images/x.jpg")),
             PathBuf::from("images/x.jpg")
+        );
+    }
+
+    #[test]
+    fn symbols_the_fonts_lack_are_replaced_not_boxed() {
+        let out = replace_missing_glyphs("7.94 → 13.57 ล้าน ⚠ เทียบไม่ได้ ✅ ok 🚀");
+        assert!(out.contains("7.94 -> 13.57 ล้าน"), "{out}");
+        assert!(out.contains("(!) เทียบไม่ได้"), "{out}");
+        assert!(
+            !out.contains('🚀') && !out.contains('→') && !out.contains('⚠'),
+            "{out}"
+        );
+        assert_eq!(
+            replace_missing_glyphs("ภาษาไทย ABC 1,234 บาท"),
+            "ภาษาไทย ABC 1,234 บาท"
         );
     }
 }

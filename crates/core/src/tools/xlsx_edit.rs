@@ -249,7 +249,11 @@ fn apply_edit(path: &std::path::Path, sheet: Option<&str>, edit: &Edit) -> Resul
             if let Some(fmt) = format {
                 apply_format(target, fmt);
             }
-            let what = if formula.is_some() {
+            let what = if formula.is_some()
+                || value
+                    .as_str()
+                    .is_some_and(|v| v.trim_start().starts_with('=') && v.trim().len() > 1)
+            {
                 "formula"
             } else {
                 "value"
@@ -263,7 +267,10 @@ fn apply_edit(path: &std::path::Path, sheet: Option<&str>, edit: &Edit) -> Resul
         Edit::SetCells { anchor, data } => {
             let sheet_name = resolve_sheet_name(&book, sheet)?;
             let (anchor_col, anchor_row) = parse_a1(anchor)?;
-            let rows = data
+            let parsed = super::xlsx_create::stringified_json_array(data);
+            let rows = parsed
+                .as_ref()
+                .unwrap_or(data)
                 .as_array()
                 .ok_or_else(|| Error::Tool("data must be a JSON 2D array".into()))?;
             let ws = book
@@ -377,9 +384,21 @@ fn apply_value(cell: &mut umya_spreadsheet::Cell, value: &Value) {
                 cell.set_value_number(f);
             }
         }
-        Value::String(s) => {
-            cell.set_value_string(s.clone());
+        // "6000000" stored as text makes `=SUM` read 0; same byte-identical
+        // round-trip rule XlsxCreate applies to CSV input.
+        // Models put formulas in `value` as often as in `formula`; written
+        // as text, "=SUM(E2:E6)" shows the formula and computes nothing.
+        Value::String(s) if s.trim_start().starts_with('=') && s.trim().len() > 1 => {
+            cell.set_formula(s.trim_start().trim_start_matches('='));
         }
+        Value::String(s) => match super::xlsx_create::string_to_cell(s) {
+            super::xlsx_create::Cell::Number(n) => {
+                cell.set_value_number(n);
+            }
+            _ => {
+                cell.set_value_string(s.clone());
+            }
+        },
         other => {
             // Arrays / objects fall back to a JSON-stringified value so
             // we never lose the data; user can normalize upstream if they
@@ -573,6 +592,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn numeric_strings_and_stringified_rows_are_typed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("budget.xlsx");
+        crate::tools::XlsxCreateTool
+            .call(json!({"path": path.to_string_lossy(), "data": [["x"]], "headers": false}))
+            .await
+            .unwrap();
+
+        XlsxEditTool
+            .call(json!({
+                "path": path.to_string_lossy(),
+                "op": "set_cells",
+                "anchor": "A1",
+                "data": "[[\"รายการ\",\"จำนวนเงิน (บาท)\"],[\"ค่าใบอนุญาตซอฟต์แวร์\",6000000]]"
+            }))
+            .await
+            .unwrap();
+        for (cell, value) in [("B3", json!("6000000")), ("B4", json!("00123"))] {
+            XlsxEditTool
+                .call(json!({
+                    "path": path.to_string_lossy(),
+                    "op": "set_cell",
+                    "cell": cell,
+                    "value": value
+                }))
+                .await
+                .unwrap();
+        }
+        XlsxEditTool
+            .call(json!({
+                "path": path.to_string_lossy(),
+                "op": "set_cell",
+                "cell": "B5",
+                "formula": "=SUM(B2:B3)"
+            }))
+            .await
+            .unwrap();
+
+        let book = umya_spreadsheet::reader::xlsx::read(&path).unwrap();
+        let ws = book.get_sheet(&0).unwrap();
+        assert_eq!(ws.get_cell("A2").unwrap().get_value(), "ค่าใบอนุญาตซอฟต์แวร์");
+        assert_eq!(ws.get_cell("B1").unwrap().get_value(), "จำนวนเงิน (บาท)");
+        let b2 = ws.get_cell("B2").unwrap();
+        assert_eq!(b2.get_data_type(), "n");
+        assert_eq!(b2.get_value_number(), Some(6000000.0));
+        let b3 = ws.get_cell("B3").unwrap();
+        assert_eq!(
+            b3.get_data_type(),
+            "n",
+            "a numeric string must land as a number"
+        );
+        assert_eq!(b3.get_value_number(), Some(6000000.0));
+        let b4 = ws.get_cell("B4").unwrap();
+        assert_eq!(b4.get_data_type(), "s", "leading zeros stay text");
+        assert!(ws
+            .get_cell("B5")
+            .unwrap()
+            .get_formula()
+            .contains("SUM(B2:B3)"));
+    }
+
+    #[tokio::test]
     async fn round_trip_create_edit_read() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("rt.xlsx");
@@ -636,5 +717,23 @@ mod tests {
             "Thai cell missing: {thai_csv:?}"
         );
         assert!(thai_csv.contains("ชื่อ"), "Thai header missing: {thai_csv:?}");
+    }
+
+    #[tokio::test]
+    async fn formula_in_value_is_written_as_a_formula() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.xlsx");
+        crate::tools::XlsxCreateTool
+            .call(serde_json::json!({"path": path.to_string_lossy(), "data": "a,b\nx,1\ny,2"}))
+            .await
+            .unwrap();
+        let msg = XlsxEditTool
+            .call(serde_json::json!({"path": path.to_string_lossy(), "op": "set_cell", "cell": "B4", "value": "=SUM(B2:B3)"}))
+            .await
+            .unwrap();
+        assert!(msg.contains("formula"), "{msg}");
+        let book = umya_spreadsheet::reader::xlsx::read(&path).unwrap();
+        let c = book.get_sheet(&0).unwrap().get_cell("B4").unwrap();
+        assert_eq!(c.get_formula(), "SUM(B2:B3)");
     }
 }

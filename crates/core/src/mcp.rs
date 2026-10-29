@@ -646,6 +646,9 @@ impl McpClient {
         config: McpServerConfig,
         approver: Option<Arc<dyn crate::permissions::ApprovalSink>>,
     ) -> Result<Arc<Self>> {
+        if let Some(reason) = crate::policy::mcp_server_refusal(&config) {
+            return Err(Error::Provider(reason));
+        }
         if config.transport == "http" {
             return Self::connect_http(config, false).await;
         }
@@ -661,6 +664,9 @@ impl McpClient {
         config: McpServerConfig,
         approver: Option<Arc<dyn crate::permissions::ApprovalSink>>,
     ) -> Result<Arc<Self>> {
+        if let Some(reason) = crate::policy::mcp_server_refusal(&config) {
+            return Err(Error::Provider(reason));
+        }
         if config.transport == "http" {
             return Self::connect_http(config, true).await;
         }
@@ -672,15 +678,21 @@ impl McpClient {
         // first time we see it and persist the decision.
         check_stdio_command_allowed(&config, approver).await?;
 
-        let mut cmd = Command::new(&config.command);
-        cmd.args(&config.args)
-            .stdin(std::process::Stdio::piped())
+        let mut cmd = crate::office::apps::spawn_command(&config).unwrap_or_else(|| {
+            let mut c = Command::new(&config.command);
+            c.args(&config.args);
+            c
+        });
+        cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             // Captured, not discarded: when a launcher dies before the
             // handshake all this client sees is EOF, and the reason
             // ("npm error code ENOTEMPTY") lives only here.
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        for k in crate::tools::bash::ENGINE_SECRET_ENV {
+            cmd.env_remove(k);
+        }
         for (k, v) in &config.env {
             cmd.env(k, v);
         }
@@ -1751,7 +1763,9 @@ impl Tool for McpTool {
 
     async fn call(&self, input: Value) -> Result<String> {
         self.lazy_browser_up().await;
-        self.client.call_tool(self.bare_name(), input).await
+        let out = self.client.call_tool(self.bare_name(), input).await?;
+        crate::office::apps::after_call(&self.client, self.bare_name(), &out).await;
+        Ok(out)
     }
 
     /// Multimodal variant: preserves `{type:"image"}` content blocks so
@@ -1765,6 +1779,14 @@ impl Tool for McpTool {
     async fn call_multimodal(&self, input: Value) -> Result<crate::types::ToolResultContent> {
         self.lazy_browser_up().await;
         let result = self.client.call_tool_raw(self.bare_name(), input).await?;
+        if crate::office::apps::is_office_server(self.client.name()) {
+            crate::office::apps::after_call(
+                &self.client,
+                self.bare_name(),
+                &extract_text(&result, self.bare_name()),
+            )
+            .await;
+        }
         match mcp_content_to_blocks(&result, self.bare_name()) {
             Some(blocks) => Ok(blocks),
             None => Ok(crate::types::ToolResultContent::Text(extract_text(

@@ -90,9 +90,9 @@
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
     });
 
-    window.thclaws.on("text", ({ delta }) => { if (current) current.textContent += delta; });
+    window.thclaws.on("text", (delta) => { if (current) current.textContent += delta; });
     window.thclaws.on("done", () => { current = null; send.disabled = false; });
-    window.thclaws.on("error", ({ message }) => {
+    window.thclaws.on("error", ({ error: message }) => {
       bubble("error", message || "unknown error");
       send.disabled = false; current = null;
     });

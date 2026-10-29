@@ -266,6 +266,11 @@ pub struct TurnUsage {
     /// `messages.len()` at the moment the turn completed.
     pub after: usize,
     pub text: String,
+    /// The turn's priced cost (main loop + side calls), so the session's
+    /// `$ session` total survives a worker restart. 0 for unpriced turns
+    /// and footers written before this field.
+    #[serde(default)]
+    pub cost_usd: f64,
 }
 
 impl PartialEq for Session {
@@ -508,14 +513,20 @@ impl Session {
 
     /// Append this turn's usage footer to the JSONL and remember it in
     /// memory, so both a live reload and a fresh `/load` show it.
-    pub fn append_turn_usage_to(&mut self, path: &Path, text: &str) -> Result<()> {
+    pub fn append_turn_usage_to(&mut self, path: &Path, text: &str, cost_usd: f64) -> Result<()> {
         let after = self.messages.len();
-        append_turn_usage(path, after, text)?;
+        append_turn_usage(path, after, text, cost_usd)?;
         self.turn_usage.push(TurnUsage {
             after,
             text: text.to_string(),
+            cost_usd,
         });
         Ok(())
+    }
+
+    /// Sum of the priced turns recorded on this session.
+    pub fn cost_usd(&self) -> f64 {
+        self.turn_usage.iter().map(|t| t.cost_usd).sum()
     }
 
     /// Record a mid-session model switch: append a `model` event (so a restore
@@ -830,6 +841,7 @@ impl Session {
                     turn_usage.push(TurnUsage {
                         after: ev.after,
                         text: ev.text,
+                        cost_usd: ev.cost_usd,
                     });
                 }
             } else if kind == "plan_snapshot" {
@@ -1175,7 +1187,13 @@ struct TurnUsageEvent {
     kind: String, // always "turn_usage"
     after: usize,
     text: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    cost_usd: f64,
     timestamp: u64,
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// Where `/dream` finds sessions, as glob patterns the agent's tools
@@ -1211,7 +1229,7 @@ pub fn dream_session_globs() -> (String, Vec<String>) {
 
 /// Append a per-turn usage footer. Called once per completed turn, so a
 /// reloaded session shows the same cost/latency lines the live one did.
-pub fn append_turn_usage(path: &Path, after: usize, text: &str) -> Result<()> {
+pub fn append_turn_usage(path: &Path, after: usize, text: &str, cost_usd: f64) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1219,6 +1237,7 @@ pub fn append_turn_usage(path: &Path, after: usize, text: &str) -> Result<()> {
         kind: "turn_usage".into(),
         after,
         text: text.to_string(),
+        cost_usd,
         timestamp: now_secs(),
     };
     let line = serde_json::to_string(&event)?;
@@ -1893,6 +1912,26 @@ mod tests {
         }
     }
 
+    /// `$ session` is the sum of the persisted turn costs, so a worker
+    /// restart or a `/load` brings the session's total back with it.
+    #[test]
+    fn turn_costs_survive_a_reload() {
+        let td = tempdir().unwrap();
+        let path = td.path().join("sess-cost.jsonl");
+        let mut s = Session::new("m", "/tmp");
+        s.messages.push(Message::user("q"));
+        s.append_to(&path).unwrap();
+        s.append_turn_usage_to(&path, "[tokens: 1in/1out · 1s]", 0.25)
+            .unwrap();
+        s.append_turn_usage_to(&path, "[tokens: 2in/2out · 1s]", 0.5)
+            .unwrap();
+        s.append_turn_usage_to(&path, "[tokens: 3in/3out · 1s]", 0.0)
+            .unwrap();
+        let loaded = Session::load_from(&path).unwrap();
+        assert!((loaded.cost_usd() - 0.75).abs() < 1e-12);
+        assert_eq!(loaded.turn_usage.len(), 3);
+    }
+
     /// Every record the engine writes is one the sidebar's scan can place.
     /// Built with the real writers, not hand-typed JSON: `turn_usage` was
     /// added to the writers and never to the scan, so every session that
@@ -1906,7 +1945,8 @@ mod tests {
         s.messages.push(Message::user("q"));
         s.messages.push(Message::assistant("a"));
         s.append_to(&path).unwrap();
-        s.append_turn_usage_to(&path, "1.2k in · 300 out").unwrap();
+        s.append_turn_usage_to(&path, "1.2k in · 300 out", 0.0125)
+            .unwrap();
         s.append_rename_to(&path, "a title").unwrap();
         s.append_provider_state_to(&path, Some("abcd".into()))
             .unwrap();

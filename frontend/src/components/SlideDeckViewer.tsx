@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { assetUrl } from "../lib/assetUrl";
 
+// assetUrl already carries `?bot=<slug>` in host mode; a second `?` folds the
+// version into the bot name and every slide 404s.
+function withVersion(url: string, version: number | string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}v=${version}`;
+}
+
 // Deck preview for the Files tab: shows ONE slide at a time with
 // ←/→ navigation, instead of the browser PDF viewer's endless scroll —
 // a `.pptx` is a deck, not a long document. The backend already writes
@@ -37,7 +43,7 @@ export function SlideDeckViewer({ slides, version, label, onShowPdf }: Props) {
     for (const p of [nextPath, prevPath]) {
       if (!p) continue;
       const img = new Image();
-      img.src = `${assetUrl(p)}?v=${version}`;
+      img.src = withVersion(assetUrl(p), version);
     }
   }, [prevPath, nextPath, version]);
 
@@ -81,7 +87,7 @@ export function SlideDeckViewer({ slides, version, label, onShowPdf }: Props) {
         style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
       >
         <img
-          src={`${assetUrl(slides[at])}?v=${version}`}
+          src={withVersion(assetUrl(slides[at]), version)}
           alt={`Slide ${at + 1} of ${count}`}
           className="max-w-full max-h-full object-contain"
           draggable={false}

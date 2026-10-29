@@ -97,7 +97,8 @@ export function MarketplaceModal() {
       : false;
 
   const onInstall = (e: Entry) => {
-    send({ type: "shell_input", text: `/${active.installCmd} install ${e.name}` });
+    const verb = tab === "skills" && isInstalled(e.name) ? "update" : "install";
+    send({ type: "shell_input", text: `/${active.installCmd} ${verb} ${e.name}` });
     setDispatched((d) => ({ ...d, [`${tab}:${e.name}`]: true }));
   };
 
@@ -193,6 +194,8 @@ export function MarketplaceModal() {
             const linkedOnly = e.license_tier === "linked-only";
             const installed = isInstalled(e.name);
             const sent = dispatched[`${tab}:${e.name}`];
+            const updatable = installed && tab === "skills";
+            const idle = !sent && (!installed || updatable);
             return (
               <div
                 key={e.name}
@@ -236,18 +239,21 @@ export function MarketplaceModal() {
                   <button
                     type="button"
                     onClick={() => onInstall(e)}
-                    disabled={installed || sent}
+                    disabled={!idle}
                     className="px-2.5 py-1 rounded text-xs font-medium whitespace-nowrap"
                     style={{
-                      background: installed || sent ? "transparent" : "var(--accent)",
+                      background: idle && !updatable ? "var(--accent)" : "transparent",
                       color:
-                        installed || sent
-                          ? "var(--text-secondary)"
-                          : "var(--accent-fg, #06231a)",
-                      border: `1px solid ${installed || sent ? "var(--border)" : "var(--accent)"}`,
+                        idle && !updatable
+                          ? "var(--accent-fg, #06231a)"
+                          : idle
+                            ? "var(--accent)"
+                            : "var(--text-secondary)",
+                      border: `1px solid ${idle ? "var(--accent)" : "var(--border)"}`,
                     }}
+                    title={updatable && idle ? "Replace it with the marketplace's current copy" : undefined}
                   >
-                    {installed ? "Installed" : sent ? "See chat…" : "Install"}
+                    {sent ? "See chat…" : updatable ? "Update" : installed ? "Installed" : "Install"}
                   </button>
                 )}
               </div>

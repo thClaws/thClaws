@@ -22,7 +22,6 @@ use crate::event_render::{
 };
 use crate::session::SessionStore;
 use crate::shared_session::{SharedSessionHandle, ShellInput, ViewEvent};
-use base64::Engine;
 use std::borrow::Cow;
 use std::sync::Arc;
 use tao::dpi::LogicalSize;
@@ -1864,125 +1863,8 @@ fn run_gui_inner(
                         .send_event(UserEvent::FileContent(payload.to_string()));
                 }
                 // set_cwd migrated to crate::ipc::handle_ipc.
-                "shell_input" | "chat_prompt" | "pty_write" => {
-                    // Unified entry point: a line of user input from
-                    // either tab. `chat_prompt` and `pty_write` are
-                    // legacy aliases kept so the frontend can roll over
-                    // without a flag-day. `pty_write` historically sent
-                    // a base64 chunk per keystroke — for backward compat
-                    // with any in-flight callers we accept both
-                    // `text` (new) and `data` (base64 of the line).
-                    let line = if let Some(t) = msg.get("text").and_then(|v| v.as_str()) {
-                        t.to_string()
-                    } else if let Some(b64) = msg.get("data").and_then(|v| v.as_str()) {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(b64)
-                            .ok()
-                            .and_then(|b| String::from_utf8(b).ok())
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    let trimmed = line.trim_end_matches(['\r', '\n']);
-
-                    // Optional image attachments shipped alongside the
-                    // text (Phase 4 paste/drag-drop). Frontend sends
-                    // `attachments: [{mediaType, data}, ...]` where
-                    // data is the base64 of the raw image bytes (no
-                    // data: prefix). Only the chat tab emits this
-                    // field; the terminal tab never has attachments.
-                    //
-                    // Caps below are defense-in-depth against a
-                    // malicious / buggy frontend bypassing the
-                    // ChatView per-image 10 MB cap. With both caps,
-                    // the worst-case payload is bounded at ~67 MB
-                    // base64 (50 MB raw) per IPC message, which the
-                    // agent can ingest without OOM on common dev
-                    // hardware.
-                    const MAX_ATTACHMENTS_PER_MESSAGE: usize = 10;
-                    const MAX_ATTACHMENTS_TOTAL_B64_BYTES: usize = 67 * 1024 * 1024;
-
-                    let mut attachments: Vec<(String, String)> = msg
-                        .get("attachments")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|a| {
-                                    let media_type = a
-                                        .get("mediaType")
-                                        .and_then(|v| v.as_str())?
-                                        .to_string();
-                                    let data =
-                                        a.get("data").and_then(|v| v.as_str())?.to_string();
-                                    if data.is_empty() {
-                                        None
-                                    } else {
-                                        Some((media_type, data))
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    if attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
-                        eprintln!(
-                            "[ipc chat_user_message] dropping {} attachments over the {}-per-message cap",
-                            attachments.len() - MAX_ATTACHMENTS_PER_MESSAGE,
-                            MAX_ATTACHMENTS_PER_MESSAGE,
-                        );
-                        attachments.truncate(MAX_ATTACHMENTS_PER_MESSAGE);
-                    }
-                    let total_b64: usize =
-                        attachments.iter().map(|(_, d)| d.len()).sum();
-                    if total_b64 > MAX_ATTACHMENTS_TOTAL_B64_BYTES {
-                        eprintln!(
-                            "[ipc chat_user_message] attachments total {} bytes (b64) exceed {} cap; dropping all",
-                            total_b64, MAX_ATTACHMENTS_TOTAL_B64_BYTES,
-                        );
-                        attachments.clear();
-                    }
-
-                    if !attachments.is_empty() {
-                        let _ = shared_for_ipc.input_tx.send(ShellInput::LineWithImages {
-                            text: trimmed.to_string(),
-                            images: attachments,
-                        });
-                    } else if !trimmed.is_empty() {
-                        // dev-plan/32 Tier 3 Terminal-tab approval
-                        // intercept (mirrors crate::ipc::handle_ipc).
-                        // The worker loop is blocked on the workflow
-                        // approver oneshot, so typed approvals queued
-                        // through input_tx wait forever. Resolve at
-                        // the IPC boundary instead.
-                        let pending = shared_for_ipc.workflow_approver.pending_ids();
-                        if !pending.is_empty() {
-                            match crate::workflow::parse_chat_decision(trimmed) {
-                                Some(decision) => {
-                                    if let Some(id) = pending.into_iter().next_back() {
-                                        shared_for_ipc
-                                            .workflow_approver
-                                            .resolve(&id, decision);
-                                    }
-                                    return;
-                                }
-                                None => {
-                                    let _ = shared_for_ipc.events_tx.send(
-                                        crate::shared_session::ViewEvent::SlashOutput(
-                                            "workflow review pending — type \
-                                             `approve`, `cancel`, or `rework: <note>` \
-                                             (or click in the Chat tab)"
-                                                .to_string(),
-                                        ),
-                                    );
-                                    return;
-                                }
-                            }
-                        }
-                        let _ = shared_for_ipc
-                            .input_tx
-                            .send(ShellInput::Line(trimmed.to_string()));
-                    }
-                }
+                // shell_input / chat_prompt / pty_write (incl. image
+                // attachments) migrated to crate::ipc::handle_ipc.
                 "pty_spawn" => {
                     // Legacy ack: the frontend sends this on Terminal-tab
                     // mount to trigger initial sidebar state. The shared

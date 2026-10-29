@@ -74,7 +74,7 @@
     go.onclick = generate;
     promptEl.addEventListener("keydown", (e) => { if (e.key === "Enter") generate(); });
 
-    window.thclaws.on("text", ({ delta }) => { pendingBuf += delta; });
+    window.thclaws.on("text", (delta) => { pendingBuf += delta; });
     window.thclaws.on("done", async () => {
       // Try to pull a URL out of the assistant's reply — author edits
       // this to match their actual image-gen tool's output shape.

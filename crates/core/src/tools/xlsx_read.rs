@@ -24,7 +24,9 @@ impl Tool for XlsxReadTool {
         "Extract a worksheet from an Excel file (.xlsx/.xlsm/.xlsb/.xls/.ods). \
          By default returns the first sheet as CSV. Pass `sheet` to pick \
          a different sheet by name, and `format: \"json\"` to get a typed \
-         2D-array JSON payload (numbers/booleans preserved) instead of CSV."
+         2D-array JSON payload (numbers/booleans preserved) instead of CSV. \
+         The first line names the sheet, all sheet names, the used A1 range \
+         and the next empty row — use those for XlsxEdit cell addresses."
     }
 
     fn input_schema(&self) -> Value {
@@ -53,9 +55,15 @@ impl Tool for XlsxReadTool {
             .to_string();
 
         let path_clone = validated.clone();
-        tokio::task::spawn_blocking(move || extract_xlsx(&path_clone, sheet_arg, &format))
-            .await
-            .map_err(|e| Error::Tool(format!("XLSX worker join failed: {e}")))?
+        tokio::task::spawn_blocking(move || -> Result<String> {
+            let head = sheet_header(&path_clone, sheet_arg.as_deref())?;
+            Ok(format!(
+                "{head}\n{}",
+                extract_xlsx(&path_clone, sheet_arg, &format)?
+            ))
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("XLSX worker join failed: {e}")))?
     }
 }
 
@@ -83,9 +91,33 @@ pub(crate) fn extract_xlsx(
             .ok_or_else(|| Error::Tool("workbook has no sheets".into()))?,
     };
 
-    let range = workbook
+    let mut range = workbook
         .worksheet_range(&sheet_name)
         .map_err(|e| Error::Tool(format!("read sheet {sheet_name:?}: {e}")))?;
+    // A formula written without a cached value reads back empty; show the
+    // formula there so a total row is visible rather than blank.
+    if let Ok(formulas) = workbook.worksheet_formula(&sheet_name) {
+        let (fr, fc) = formulas.start().unwrap_or((0, 0));
+        for (r, c, f) in formulas.cells() {
+            if f.is_empty() {
+                continue;
+            }
+            let pos = (fr + r as u32, fc + c as u32);
+            let blank = match range.get_value(pos) {
+                None | Some(Data::Empty) => true,
+                Some(Data::String(v)) => v.is_empty(),
+                _ => false,
+            };
+            if blank {
+                let f = if f.starts_with('=') {
+                    f.clone()
+                } else {
+                    format!("={f}")
+                };
+                range.set_value(pos, Data::String(f));
+            }
+        }
+    }
 
     match format {
         "csv" => Ok(range_to_csv(&range)?),
@@ -94,6 +126,75 @@ pub(crate) fn extract_xlsx(
             "unknown format {other:?}; expected \"csv\" or \"json\""
         ))),
     }
+}
+
+/// One line telling the model where the data sits, so an edit addresses
+/// the right cells: without it, a model guessed the sheet name ("Sheet1")
+/// and wrote its total row over the last data row (dev-plan/69).
+fn sheet_header(path: &std::path::Path, sheet: Option<&str>) -> Result<String> {
+    let mut workbook = open_workbook_auto(path)
+        .map_err(|e| Error::Tool(format!("open {}: {}", path.display(), e)))?;
+    let names = workbook.sheet_names();
+    let name = match sheet {
+        Some(s) => s.to_string(),
+        None => names.first().cloned().unwrap_or_default(),
+    };
+    let range = workbook
+        .worksheet_range(&name)
+        .map_err(|e| Error::Tool(format!("read sheet {name:?}: {e}")))?;
+    let formulas: Vec<String> = workbook
+        .worksheet_formula(&name)
+        .map(|f| {
+            f.cells()
+                .filter(|(_, _, v)| !v.is_empty())
+                .take(MAX_FORMULAS_LISTED)
+                .map(|(r, c, v)| {
+                    let (r0, c0) = f.start().unwrap_or((0, 0));
+                    let v = if v.starts_with('=') {
+                        v.clone()
+                    } else {
+                        format!("={v}")
+                    };
+                    format!("{}{} {v}", col_letters(c0 + c as u32), r0 + r as u32 + 1)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let formulas = if formulas.is_empty() {
+        String::new()
+    } else {
+        format!(" · formulas: {}", formulas.join(", "))
+    };
+    Ok(match (range.start(), range.end()) {
+        (Some((r0, c0)), Some((r1, c1))) => format!(
+            "[sheet {name:?} of {names:?} · range {}{}:{}{} · {} rows × {} columns · next empty row {}]",
+            col_letters(c0),
+            r0 + 1,
+            col_letters(c1),
+            r1 + 1,
+            r1 - r0 + 1,
+            c1 - c0 + 1,
+            r1 + 2
+        ) + &formulas,
+        _ => format!("[sheet {name:?} of {names:?} · empty · next empty row 1]"),
+    })
+}
+
+/// Formula cells written without a cached value read back empty, so the
+/// header lists them; otherwise the model goes to Python to check its SUM.
+const MAX_FORMULAS_LISTED: usize = 20;
+
+fn col_letters(mut c: u32) -> String {
+    let mut s = Vec::new();
+    loop {
+        s.push(b'A' + (c % 26) as u8);
+        if c < 26 {
+            break;
+        }
+        c = c / 26 - 1;
+    }
+    s.reverse();
+    String::from_utf8(s).unwrap_or_default()
 }
 
 fn range_to_csv(range: &calamine::Range<Data>) -> Result<String> {
@@ -207,13 +308,48 @@ mod tests {
             }))
             .await
             .unwrap();
-        let v: Value = serde_json::from_str(&s).unwrap();
+        let (head, body) = s.split_once('\n').unwrap();
+        assert!(head.contains("range A1:C3"), "header: {head}");
+        assert!(head.contains("next empty row 4"), "header: {head}");
+        assert!(!head.contains("formulas"), "header: {head}");
+        let v: Value = serde_json::from_str(body).unwrap();
         let rows = v.as_array().unwrap();
         assert_eq!(rows.len(), 3);
         // Numbers came back as numbers (not strings).
         assert!(rows[1][1].is_number(), "score not number: {:?}", rows[1][1]);
         // Booleans came back as bools.
         assert!(rows[1][2].is_boolean(), "bool not bool: {:?}", rows[1][2]);
+    }
+
+    #[tokio::test]
+    async fn header_lists_formulas_without_cached_values() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sum.xlsx");
+        crate::tools::XlsxCreateTool
+            .call(json!({"path": path.to_string_lossy(), "data": "item,amount\na,6000000\nb,4500000"}))
+            .await
+            .unwrap();
+        crate::tools::XlsxEditTool
+            .call(json!({"path": path.to_string_lossy(), "op": "set_cell", "cell": "B4", "formula": "=SUM(B2:B3)"}))
+            .await
+            .unwrap();
+        let out = XlsxReadTool
+            .call(json!({"path": path.to_string_lossy()}))
+            .await
+            .unwrap();
+        let head = out.lines().next().unwrap();
+        assert!(head.contains("B4 =SUM(B2:B3)"), "header: {head}");
+        assert!(out.lines().nth(4).unwrap().contains("=SUM(B2:B3)"), "{out}");
+        assert!(head.contains("next empty row 5"), "header: {head}");
+    }
+
+    #[test]
+    fn column_letters() {
+        assert_eq!(col_letters(0), "A");
+        assert_eq!(col_letters(25), "Z");
+        assert_eq!(col_letters(26), "AA");
+        assert_eq!(col_letters(701), "ZZ");
+        assert_eq!(col_letters(702), "AAA");
     }
 
     #[test]

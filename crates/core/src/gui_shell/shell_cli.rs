@@ -226,6 +226,26 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // event_render sends "text" as a bare string and "done" as null; a
+    // template that destructures them streams "undefined" or throws.
+    #[test]
+    fn templates_take_event_payloads_as_sent() {
+        let mut n = 0;
+        for d in TEMPLATES.dirs() {
+            for f in d
+                .files()
+                .filter(|f| f.path().extension().is_some_and(|e| e == "html"))
+            {
+                let src = f.contents_utf8().unwrap();
+                for bad in ["({ delta })", "({ message })", "ev.runId", "ev.text"] {
+                    assert!(!src.contains(bad), "{} uses {bad}", f.path().display());
+                }
+                n += 1;
+            }
+        }
+        assert!(n >= 7, "only {n} templates scanned");
+    }
+
     #[test]
     fn template_ids_covers_seven_canonical() {
         let ids = template_ids();

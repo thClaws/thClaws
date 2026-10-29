@@ -74,6 +74,17 @@ pub fn policy_gateway_mode() -> bool {
     crate::policy::thclaws_gateway().is_some()
 }
 
+/// True when an organisation pays for this install's calls: an EE desktop on
+/// its org gateway, or a hosted runner on a customer install (SIS, plan-09
+/// tenants), which the api marks with a gateway provider list or its brand.
+/// Stock thclaws.cloud sends neither, so its users still opt in per workspace.
+pub fn org_billed() -> bool {
+    let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
+    policy_gateway_mode()
+        || (std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+            && (gateway_providers_locked() || set("THCLAWS_BRAND_NAME")))
+}
+
 /// True when `THCLAWS_GATEWAY_PROVIDERS` names at least one provider: an
 /// install locked to its gateway. There, nothing counts as having its own
 /// credentials — not the keyless local runtimes, not the Agent SDK — so the

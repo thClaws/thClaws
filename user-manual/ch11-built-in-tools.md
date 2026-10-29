@@ -107,7 +107,8 @@ so Thai content renders correctly without a system-font dependency.
 | Tool | Approval | Summary |
 |---|---|---|
 | `PdfCreate` | prompt | Markdown → PDF (printpdf + embedded Thai font, A4/Letter/Legal) |
-| `PdfRead` | auto¹ | Extract text via `pdftotext` (poppler-utils — `brew install poppler` / `apt install poppler-utils`) |
+| `PdfRead` | auto¹ | Extract text via `pdftotext` (poppler-utils), else the document service; scanned pages are OCR'd (`ocr`: `auto` / `vision` / `tesseract`) |
+| `DocConvert` | prompt | Convert on the document service: Word/Excel/PowerPoint/OpenDocument/.doc/.xls/.ppt ↔ each other or → PDF; `.html` → typeset PDF. Writes beside the source, never overwrites |
 | `DocxCreate` | prompt | Markdown → Word (.docx) via `docx-rs` — headings, lists, code blocks |
 | `DocxRead` | auto | Extract text from a Word doc (pure Rust XML walk) |
 | `DocxEdit` | prompt | `find_replace` / `append_paragraph` in place |
@@ -121,10 +122,12 @@ so Thai content renders correctly without a system-font dependency.
 **¹ Reading a PDF without installing poppler.** `PdfRead` prefers
 `pdftotext` on your machine: it is the best extractor there is for Thai and
 the file never leaves your computer. If poppler is not installed, rather than
-failing, thClaws offers to extract the text through a public thClaws
-service — **no account and no key needed** — and asks you first, naming the
-file and where it is going. The text comes back marked so you can see which
-path produced it.
+failing, thClaws offers to extract the text on the document service behind
+your thClaws Gateway — or, signed out, through a public thClaws service that
+needs **no account and no key** — and asks you first, naming the file and
+where it is going. The text comes back marked so you can see which path
+produced it. On an Enterprise install the document service is your
+organisation's own gateway, so it is used without asking.
 
 Three things worth knowing:
 
@@ -134,21 +137,26 @@ Three things worth knowing:
 - Set `"pdfCloudFallback": false` in `.thclaws/settings.json` and nothing is
   ever uploaded — you get the install instructions instead. Do this if your
   PDFs are confidential by default.
-- **Scanned PDFs still need poppler.** When a PDF has no text layer, thClaws
-  reads it by rendering the pages as images for the model to look at, and that
-  rendering is `pdftoppm` — from the same package. The public service returns
-  text only.
+- **Scanned PDFs.** When a PDF has no text layer, `ocr: "auto"` (the
+  default) OCRs it on the document service (Thai + English) and sends any page
+  the OCR is unsure of (confidence under 70) to the model as an image. With no
+  document service available — or with poppler installed on an open-core
+  desktop, where nothing leaves the machine unasked — the pages are rendered
+  locally with `pdftoppm` for the model to read, as before. `ocr: "vision"`
+  always uses the images; `ocr: "tesseract"` returns OCR text only. The public
+  service returns text only.
 
 **Thai rendering across formats:**
 
 - `PdfCreate` embeds the Noto Sans Thai TTF directly in the PDF —
   Thai renders identically on every viewer regardless of installed
   fonts.
-- `DocxCreate` / `PptxCreate` set `<w:rFonts w:cs="Noto Sans Thai"/>`
-  / `<a:cs typeface="Noto Sans Thai"/>` per run, so Word and
-  PowerPoint pick the Thai font from the user's system. Modern Win/
-  Mac/Linux ship Noto Sans Thai by default; Office falls back to
-  Tahoma / Cordia New if absent.
+- `DocxCreate` / `PptxCreate` set `<w:rFonts w:cs="Sarabun"/>` /
+  `<a:cs typeface="Sarabun"/>` per run, with Thai at the same point size
+  as the Latin text. Sarabun is a free Google Font; the document service
+  that converts and previews files has it installed. On a computer
+  without it, Word and PowerPoint substitute a system Thai font —
+  install Sarabun for documents to look as intended.
 - `XlsxCreate` uses Calibri (Excel's default) — Excel's text engine
   handles Thai script via the OS Thai font stack with no per-cell
   configuration.

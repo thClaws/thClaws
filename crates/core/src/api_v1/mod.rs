@@ -26,6 +26,7 @@ pub mod callback;
 pub mod chat;
 pub mod deploy;
 pub mod errors;
+pub mod guard;
 pub mod info;
 pub mod messages;
 pub mod models;
@@ -56,6 +57,16 @@ pub fn router() -> Router {
         .route("/v1/deploy/manifest", post(deploy::deploy_manifest))
         .layer(DefaultBodyLimit::max(DEPLOY_BODY_LIMIT_BYTES));
 
+    loopback_router()
+        .route("/v1/restart", post(deploy::restart))
+        .merge(deploy_routes)
+}
+
+/// The routes the always-on desktop bridge serves: everything except
+/// `/v1/deploy*` and `/v1/restart`, which replace a pod's `.thclaws/` and
+/// kill the process — orchestrator verbs for a `--serve` pod, not
+/// anything a local MCP server needs from a desktop session.
+fn loopback_router() -> Router {
     Router::new()
         .route("/v1/models", get(models::list_models))
         .route("/v1/chat/completions", post(chat::chat_completions))
@@ -75,12 +86,10 @@ pub fn router() -> Router {
                 .layer(DefaultBodyLimit::max(artifacts::INPUTS_BODY_LIMIT_BYTES)),
         )
         .route("/v1/agent/info", get(info::get_info))
-        .route("/v1/restart", post(deploy::restart))
         // OAuth callback is intentionally public — the provider's
         // redirect won't carry the Bearer token. State-nonce match
         // is the auth, not a header. See oauth_callback.rs.
         .route("/v1/oauth/callback", get(oauth_callback::oauth_callback))
-        .merge(deploy_routes)
 }
 
 /// Bearer-token extractor enforcing [`auth_token`] policy. Returned by
@@ -205,17 +214,73 @@ pub const LOOPBACK_PORT_ENV: &str = "THCLAWS_LOOPBACK_PORT";
 /// keeps the listener loopback-only. Docker / WSL setups where the
 /// out-of-process MCP server runs in a sibling VM need to set this to
 /// `0.0.0.0` so connections via `host.docker.internal` (the host's
-/// non-loopback IP from the container's POV) land. Caveat: opening
-/// 0.0.0.0 with `disable-auth` exposes /v1 to anyone on the LAN —
-/// only safe behind a host firewall.
+/// non-loopback IP from the container's POV) land. The bearer is still
+/// required; only the loopback Host check is dropped.
 pub const LOOPBACK_BIND_ENV: &str = "THCLAWS_LOOPBACK_BIND";
+
+/// Exported to every child process once the bridge is up, beside
+/// `THCLAWS_API_TOKEN`, so an MCP server we spawn finds both.
+pub const LOOPBACK_URL_ENV: &str = "THCLAWS_LOOPBACK_URL";
+
+/// `~/.config/<app>/loopback.json` (`{url, token}`, mode 0600): how a
+/// local client this process did NOT spawn (an HTTP MCP server started by
+/// hand, a script) learns the per-launch token.
+pub const LOOPBACK_FILE: &str = "loopback.json";
+
+/// The bearer the bridge requires: the operator's own `THCLAWS_API_TOKEN`
+/// when one is set, else a fresh random one. `disable-auth` is not honoured
+/// here — this listener is always on, so it is never allowed to be open.
+fn loopback_token(existing: Option<&str>) -> std::io::Result<String> {
+    match existing.map(str::trim) {
+        Some(t) if !t.is_empty() && t != "disable-auth" => Ok(t.to_string()),
+        _ => {
+            let mut bytes = [0u8; 32];
+            getrandom::getrandom(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+            Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+        }
+    }
+}
+
+fn write_loopback_file(url: &str, token: &str) {
+    let Some(dir) = crate::profile::config_dir() else {
+        return;
+    };
+    let path = dir.join(LOOPBACK_FILE);
+    let body = serde_json::json!({ "url": url, "token": token }).to_string();
+    let res = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        let _ = std::fs::remove_file(&path);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        use std::io::Write;
+        opts.open(&path)?.write_all(body.as_bytes())
+    })();
+    if let Err(e) = res {
+        eprintln!(
+            "\x1b[33m[api_v1 loopback] could not write {}: {e}\x1b[0m",
+            path.display()
+        );
+    }
+}
 
 /// Bind the always-on loopback `/v1/*` listener. Resolves the port
 /// from `$THCLAWS_LOOPBACK_PORT` or falls back to
-/// [`LOOPBACK_DEFAULT_PORT`]. Auth is forced to `disable-auth` because
-/// the listener is loopback-only — the safety boundary is the bind
-/// address, not a bearer token an out-of-process MCP server would need
-/// to discover from us anyway.
+/// [`LOOPBACK_DEFAULT_PORT`].
+///
+/// Every request needs `Authorization: Bearer <token>`, a per-launch
+/// random token (or the operator's `THCLAWS_API_TOKEN`). The token is put
+/// in this process's environment before any child is spawned, so MCP
+/// servers, agents and tools we start inherit it with
+/// [`LOOPBACK_URL_ENV`]; anything else reads [`LOOPBACK_FILE`]. A
+/// loopback Host is required and a foreign browser Origin refused, which
+/// closes DNS rebinding and cross-site requests.
+///
+/// Not started when org policy says `allow_serve: false`.
 ///
 /// Run once at startup. Logs the bound URL to stderr; returns it so the
 /// caller can stash it for in-process clients. Idempotent — a second
@@ -230,6 +295,12 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
     if let Some(url) = LOOPBACK_URL.get() {
         return Ok(url.clone());
     }
+    if !crate::policy::serve_allowed() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "disabled by org policy (policies.runtime.allow_serve = false)",
+        ));
+    }
 
     let port: u16 = std::env::var(LOOPBACK_PORT_ENV)
         .ok()
@@ -239,17 +310,13 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "127.0.0.1".to_string());
+    let public_bind = !bind_host
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(bind_host.eq_ignore_ascii_case("localhost"));
 
-    // Force disable-auth so out-of-process clients on the same host
-    // (HTTP-transport MCP servers, host scripts) don't need to learn a
-    // per-process bearer token to reach our /v1 surface. Safety is
-    // anchored to the loopback bind, not the token.
-    if std::env::var("THCLAWS_API_TOKEN")
-        .map(|v| v != "disable-auth")
-        .unwrap_or(true)
-    {
-        std::env::set_var("THCLAWS_API_TOKEN", "disable-auth");
-    }
+    let token = loopback_token(std::env::var("THCLAWS_API_TOKEN").ok().as_deref())?;
+    std::env::set_var("THCLAWS_API_TOKEN", &token);
 
     let bind = format!("{bind_host}:{port}");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -258,8 +325,14 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
     // override is purely for in-from-the-container reach.
     let url = format!("http://127.0.0.1:{port}");
     let _ = LOOPBACK_URL.set(url.clone());
+    std::env::set_var(LOOPBACK_URL_ENV, &url);
+    write_loopback_file(&url, &token);
 
-    let app = axum::Router::new().merge(router());
+    let app = if public_bind {
+        loopback_router()
+    } else {
+        loopback_router().layer(axum::middleware::from_fn(guard::v1_loopback_guard))
+    };
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("\x1b[33m[api_v1 loopback] serve error: {e}\x1b[0m");
@@ -267,7 +340,7 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
     });
 
     eprintln!(
-        "\x1b[36m[api_v1 loopback] /v1/* available at {url} for out-of-process MCP servers\x1b[0m"
+        "\x1b[36m[api_v1 loopback] /v1/* available at {url} (bearer required: $THCLAWS_API_TOKEN in child processes, {LOOPBACK_FILE} in the config dir)\x1b[0m"
     );
     Ok(url)
 }
@@ -312,6 +385,17 @@ mod tests {
         assert!(!constant_time_eq(b"hello", b"world"));
         assert!(!constant_time_eq(b"hello", b"hell"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn loopback_token_never_bypasses() {
+        assert_eq!(loopback_token(Some("op-secret")).unwrap(), "op-secret");
+        for open in [None, Some(""), Some("  "), Some("disable-auth")] {
+            let t = loopback_token(open).unwrap();
+            assert_eq!(t.len(), 64, "{open:?}");
+            assert_ne!(t, "disable-auth");
+        }
+        assert_ne!(loopback_token(None).unwrap(), loopback_token(None).unwrap());
     }
 
     #[test]

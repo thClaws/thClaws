@@ -90,7 +90,7 @@ Instruction: ${ask.value.trim()}`;
       const span = document.createElement("span");
       span.style.color = "var(--teal)";
       body.appendChild(span);
-      const unsub = window.thclaws.on("text", ({ delta }) => { span.textContent += delta; dirty(); });
+      const unsub = window.thclaws.on("text", (delta) => { span.textContent += delta; dirty(); });
       const unsubDone = window.thclaws.on("done", () => { unsub(); unsubDone(); });
       await window.thclaws.run(prompt);
     });

@@ -42,6 +42,14 @@ thclaws.shell.id; thclaws.shell.sessionId; thclaws.transport;  // 'tauri' | 'ws'
 const { runId } = await thclaws.run("user message");
 thclaws.cancel(runId);
 thclaws.on("text" | "tool_call" | "tool_result" | "done" | "error", cb);
+// cb receives the payload itself, never an envelope, and none carries a runId:
+//   "text"        → string (one streamed delta — append it)
+//   "done"        → null   (the turn finished)
+//   "error"       → { error }
+//   "tool_call"   → { name, label, input }
+//   "tool_result" → { name, output }
+// Only one turn runs at a time, so track "my run is in flight" with a flag,
+// not by matching ids. Never dereference the "done" payload.
 
 // direct tool invocation — skips the model, deterministic
 const out = await thclaws.tools.invoke("ToolName", args);

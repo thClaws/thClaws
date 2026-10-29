@@ -80,7 +80,7 @@ pub fn bridged_tool_names(registry: &ToolRegistry) -> Vec<String> {
     let mut names: Vec<String> = registry
         .names()
         .into_iter()
-        .filter(|n| !EXCLUDED_TOOLS.contains(n))
+        .filter(|n| !EXCLUDED_TOOLS.contains(n) && crate::policy::tool_allowed(n))
         .map(String::from)
         .collect();
     names.sort();
@@ -152,6 +152,9 @@ pub async fn handle_mcp_message(registry: Arc<ToolRegistry>, message: &Value) ->
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
             if EXCLUDED_TOOLS.contains(&name) {
                 return jsonrpc_error(id, -32601, &format!("tool '{name}' is not bridged"));
+            }
+            if !crate::policy::tool_allowed(name) {
+                return jsonrpc_error(id, -32601, &crate::policy::tool_denied_message(name));
             }
             let Some(tool) = registry.get(name) else {
                 return jsonrpc_error(id, -32601, &format!("unknown tool '{name}'"));

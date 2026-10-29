@@ -72,7 +72,7 @@ fn save_under_output(name: &str, bytes: &[u8]) -> Result<PathBuf> {
     Ok(rel)
 }
 
-/// Detect video container from magic bytes. Veo returns MP4 (ISO-BMFF:
+/// Detect video container from magic bytes. Omni returns MP4 (ISO-BMFF:
 /// `....ftyp` at offset 4); fall back to mp4.
 pub fn sniff_video_ext(bytes: &[u8]) -> &'static str {
     if bytes.len() > 11 && &bytes[4..8] == b"ftyp" {
@@ -102,4 +102,178 @@ pub fn save_audio(bytes: &[u8], ext: &str) -> Result<PathBuf> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let name = format!("tts-{ts}-{sha_hex}.{ext}");
     save_under_output(&name, bytes)
+}
+
+/// Largest input image sent as-is. Media gateways cap a request at 5 MB
+/// and base64 adds a third, so a bigger image would be refused outright —
+/// qwen-image-3.0's own 2688px PNGs (≈6.6 MB) could not be animated by
+/// ImageToVideo. Above this the image is re-encoded as JPEG, and shrunk to
+/// a 2048px long side when that alone is not enough.
+pub const MAX_INPUT_IMAGE_BYTES: usize = 3_500_000;
+
+/// `(bytes, mime)` of an input image small enough to send; unchanged when
+/// it already is, or when it cannot be decoded (the provider says why).
+pub fn fit_input_image(bytes: Vec<u8>, mime: String) -> (Vec<u8>, String) {
+    if bytes.len() <= MAX_INPUT_IMAGE_BYTES {
+        return (bytes, mime);
+    }
+    let Ok(img) = image::load_from_memory(&bytes) else {
+        return (bytes, mime);
+    };
+    let jpeg = |img: &image::DynamicImage, quality: u8| -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+            .encode_image(&image::DynamicImage::ImageRgb8(img.to_rgb8()))
+            .ok()?;
+        Some(out)
+    };
+    let mut candidates = vec![(img.clone(), 90u8)];
+    if img.width().max(img.height()) > 2048 {
+        let small = img.resize(2048, 2048, image::imageops::FilterType::Lanczos3);
+        candidates.push((small.clone(), 90));
+        candidates.push((small, 75));
+    }
+    for (im, q) in candidates {
+        if let Some(out) = jpeg(&im, q) {
+            if out.len() <= MAX_INPUT_IMAGE_BYTES {
+                return (out, "image/jpeg".into());
+            }
+        }
+    }
+    (bytes, mime)
+}
+
+/// Pad a frame for a provider that only renders 16:9 / 9:16 (Omni, LTX):
+/// they centre-crop anything else, so a square product shot lost its top
+/// and bottom (2026-10-22). Fills with the border's mean colour. `asked`
+/// is the caller's aspect; without one, portrait → 9:16, else 16:9.
+/// Returns the padded JPEG and the aspect it now has; an image that can't
+/// be decoded comes back untouched.
+pub fn pad_to_video_aspect(
+    bytes: Vec<u8>,
+    mime: String,
+    asked: Option<&str>,
+) -> (Vec<u8>, String, &'static str) {
+    let Ok(img) = image::load_from_memory(&bytes) else {
+        let aspect = match asked {
+            Some("1:1" | "3:4" | "9:16") => "9:16",
+            _ => "16:9",
+        };
+        return (bytes, mime, aspect);
+    };
+    let img = img.to_rgb8();
+    let (w, h) = img.dimensions();
+    let portrait = match asked {
+        Some(a) => matches!(a, "1:1" | "3:4" | "9:16"),
+        None => h > w,
+    };
+    let (aw, ah) = if portrait { (9u64, 16u64) } else { (16, 9) };
+    let aspect = if portrait { "9:16" } else { "16:9" };
+    let (cw, ch) = if (w as u64) * ah >= (h as u64) * aw {
+        (w, ((w as u64 * ah).div_ceil(aw)) as u32)
+    } else {
+        (((h as u64 * aw).div_ceil(ah)) as u32, h)
+    };
+    if cw.abs_diff(w) <= w / 100 && ch.abs_diff(h) <= h / 100 {
+        return (bytes, mime, aspect);
+    }
+    let (mut sum, mut n) = ([0u64; 3], 0u64);
+    for (x, y, p) in img.enumerate_pixels() {
+        if x == 0 || y == 0 || x + 1 == w || y + 1 == h {
+            for c in 0..3 {
+                sum[c] += p[c] as u64;
+            }
+            n += 1;
+        }
+    }
+    let fill = image::Rgb([0, 1, 2].map(|c| (sum[c] / n.max(1)) as u8));
+    let mut canvas = image::RgbImage::from_pixel(cw, ch, fill);
+    image::imageops::overlay(
+        &mut canvas,
+        &img,
+        ((cw - w) / 2) as i64,
+        ((ch - h) / 2) as i64,
+    );
+    let mut out = Vec::new();
+    if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92)
+        .encode_image(&image::DynamicImage::ImageRgb8(canvas))
+        .is_err()
+    {
+        return (bytes, mime, aspect);
+    }
+    (out, "image/jpeg".into(), aspect)
+}
+
+#[cfg(test)]
+mod pad_tests {
+    use super::*;
+
+    fn jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([250, 250, 250]));
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90)
+            .encode_image(&image::DynamicImage::ImageRgb8(img))
+            .unwrap();
+        out
+    }
+
+    fn dims(b: &[u8]) -> (u32, u32) {
+        let i = image::load_from_memory(b).unwrap();
+        (i.width(), i.height())
+    }
+
+    #[test]
+    fn a_square_photo_is_padded_not_cropped() {
+        let (b, _, a) = pad_to_video_aspect(jpeg(1000, 1000), "image/jpeg".into(), None);
+        assert_eq!(a, "16:9");
+        assert_eq!(dims(&b), (1778, 1000));
+        let (b, _, a) = pad_to_video_aspect(jpeg(1000, 1000), "image/jpeg".into(), Some("9:16"));
+        assert_eq!(a, "9:16");
+        assert_eq!(dims(&b), (1000, 1778));
+    }
+
+    #[test]
+    fn portrait_goes_9_16_and_a_16_9_frame_is_left_alone() {
+        let (b, _, a) = pad_to_video_aspect(jpeg(600, 800), "image/jpeg".into(), None);
+        assert_eq!((a, dims(&b)), ("9:16", (600, 1067)));
+        let src = jpeg(1280, 720);
+        let (b, _, a) = pad_to_video_aspect(src.clone(), "image/jpeg".into(), None);
+        assert_eq!(a, "16:9");
+        assert_eq!(b, src);
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    #[test]
+    fn a_big_png_is_sent_as_a_jpeg_under_the_cap() {
+        // Noise does not compress: a 2600px PNG of it is far over the cap.
+        let mut seed: u32 = 7;
+        let img = image::RgbImage::from_fn(2600, 1500, |_, _| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let b = seed.to_le_bytes();
+            image::Rgb([b[0], b[1], b[2]])
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                image::ImageOutputFormat::Png,
+            )
+            .unwrap();
+        assert!(png.len() > MAX_INPUT_IMAGE_BYTES);
+        let (out, mime) = fit_input_image(png, "image/png".into());
+        assert_eq!(mime, "image/jpeg");
+        assert!(out.len() <= MAX_INPUT_IMAGE_BYTES, "{}", out.len());
+        let back = image::load_from_memory(&out).unwrap();
+        assert!(back.width() <= 2600 && back.width() >= 2048);
+    }
+
+    #[test]
+    fn a_small_image_is_untouched() {
+        let (out, mime) = fit_input_image(vec![1, 2, 3], "image/png".into());
+        assert_eq!((out, mime.as_str()), (vec![1, 2, 3], "image/png"));
+    }
 }

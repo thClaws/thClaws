@@ -81,7 +81,7 @@
       await window.thclaws.run(`Write a thorough multi-section markdown report on: ${topic.value}.
 Use ## headings for each section. Cite sources at the end.`);
     };
-    window.thclaws.on("text", ({ delta }) => {
+    window.thclaws.on("text", (delta) => {
       buf += delta;
       content.innerHTML = renderMarkdownLite(buf);
       rebuildToc();

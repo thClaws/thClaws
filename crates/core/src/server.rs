@@ -47,7 +47,7 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -600,6 +600,7 @@ pub async fn run_with_engine(
     if std::env::var("THCLAWS_SUPERVISED").ok().as_deref() != Some("1") {
         spawn_cloud_heartbeat(ws_connections);
     }
+    spawn_media_poller();
 
     // Loopback-only safety check for the API auth-bypass token. The
     // bypass mode (`THCLAWS_API_TOKEN=disable-auth`) makes the OpenAI
@@ -612,6 +613,17 @@ pub async fn run_with_engine(
              Set a real token or use --bind 127.0.0.1.",
             config.bind
         )));
+    }
+    // H5: off loopback, a single-user serve with no bearer is the whole
+    // engine for anyone on the network. Multiuser (HMAC) and a gui-shell's
+    // own token authenticate every request themselves.
+    let own_auth = config.multi_tenant.is_some()
+        || config
+            .gui_shell
+            .as_ref()
+            .is_some_and(|m| !m.no_auth || m.no_auth_allow_public);
+    if let Some(msg) = crate::api_v1::guard::public_bind_refusal(&config.bind, own_auth) {
+        return Err(crate::error::Error::Tool(msg));
     }
 
     // dev-plan/33 Tier 2 Mode B: when a shell is bound, swap the
@@ -645,6 +657,7 @@ pub async fn run_with_engine(
     // The address actually bound, not the one asked for: with `--port 0` the
     // two differ, and the banner used to print `:0`.
     let bound = listener.local_addr().unwrap_or(config.bind);
+    let app = loopback_guarded(app, &bound);
     if config.gui_shell.is_none() {
         eprintln!("\x1b[36m[serve] thClaws listening on http://{bound}\x1b[0m");
         eprintln!("\x1b[36m[serve] open the URL above in your browser (over an SSH tunnel for remote access)\x1b[0m");
@@ -1095,6 +1108,7 @@ fn classic_router(state: ServeState) -> Router {
         .route("/ws", get(ws_handler))
         .route("/upload", post(serve_upload).layer(upload_body_limit()))
         .route("/api/branding", get(serve_branding))
+        .route("/api/egress", get(serve_egress))
         .route("/gui-shell/{shell_id}", get(serve_gui_shell_index))
         .route("/gui-shell/{shell_id}/", get(serve_gui_shell_index))
         .route(
@@ -1174,6 +1188,11 @@ pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::erro
         return Err(crate::error::Error::Tool(
             "--serve is disabled by org policy (policies.runtime.allow_serve = false)".into(),
         ));
+    }
+    if let Ok(addr) = listener.local_addr() {
+        if let Some(msg) = crate::api_v1::guard::public_bind_refusal(&addr, false) {
+            return Err(crate::error::Error::Tool(msg));
+        }
     }
     let workspace = std::env::current_dir()
         .map_err(|e| crate::error::Error::Tool(format!("workspace cwd unavailable: {e}")))?;
@@ -1291,7 +1310,7 @@ pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::erro
         .map_err(|e| crate::error::Error::Tool(format!("listener address: {e}")))?;
     eprintln!("\x1b[36m[serve] thClaws host listening on http://{bound}\x1b[0m");
     publish_bound_addr(bound);
-    axum::serve(listener, supervisor_router(sup))
+    axum::serve(listener, loopback_guarded(supervisor_router(sup), &bound))
         .await
         .map_err(|e| crate::error::Error::Tool(format!("serve: {e}")))?;
     Ok(())
@@ -1319,6 +1338,9 @@ fn supervisor_router(sup: Arc<crate::bots::supervisor::BotSupervisor>) -> Router
         .route("/gui-shell/{shell_id}/{*rel}", get(supervisor_forward))
         // The host forwards the raw body; the agent's `/upload` enforces the cap.
         .route("/upload", post(supervisor_forward))
+        // The cloud switch is box-wide (hub file + env), so the host answers
+        // it directly — every agent it supervises reads the same file.
+        .route("/api/egress", get(serve_egress))
         // dev-plan/60 G5: /cloud push|pull teleports the whole workspace, so
         // under a host it is the host's to serve — no single agent's tree is
         // the workspace.
@@ -2059,6 +2081,18 @@ fn is_loopback(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
 }
 
+/// A loopback listener still answers web pages: DNS rebinding and
+/// cross-site requests reach it with a foreign Host or Origin.
+fn loopback_guarded(app: Router, bound: &SocketAddr) -> Router {
+    if is_loopback(bound) {
+        app.layer(axum::middleware::from_fn(
+            crate::api_v1::guard::serve_loopback_guard,
+        ))
+    } else {
+        app
+    }
+}
+
 /// RAII guard that increments the WS-connection counter on
 /// construction and decrements on drop. Used inside `handle_socket`
 /// so the counter is panic-safe — any early return / unwind still
@@ -2148,7 +2182,8 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
                 _ = transition.notified() => {}
             }
             let connected = connections.load(Ordering::SeqCst) > 0;
-            let busy = crate::agent_activity::is_agent_busy();
+            let busy =
+                crate::agent_activity::is_agent_busy() || MEDIA_RENDERING.load(Ordering::SeqCst);
             // Earliest pending `/schedule` fire, reported so the cloud
             // reaper can resume this workspace in time to run it. On a
             // paused runner nothing is executing when the cron comes
@@ -2192,6 +2227,34 @@ fn spawn_cloud_heartbeat(connections: Arc<AtomicUsize>) {
                     eprintln!("[serve] heartbeat {endpoint} failed: {e}");
                 }
             }
+        }
+    });
+}
+
+/// A video submitted here is still rendering at its provider.
+static MEDIA_RENDERING: AtomicBool = AtomicBool::new(false);
+
+/// Fetch renders whose turn has ended (the user closed the tab) and report
+/// them as busy until they land, so the cloud reaper — which asks
+/// `/healthz` — does not pause the pod under a clip the provider has
+/// already billed. Jobs older than two hours are left for an explicit
+/// `MediaJobStatus`, so a dead provider job cannot keep a pod up forever.
+fn spawn_media_poller() {
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let max_age = chrono::Duration::hours(2);
+            let pending = crate::media::job::pending(max_age).unwrap_or_default();
+            for job in &pending {
+                if let Err(e) = crate::tools::video_gen::advance(&job.id).await {
+                    eprintln!("[serve] media job {} poll failed: {e}", job.id);
+                }
+            }
+            let left = !pending.is_empty()
+                && crate::media::job::pending(max_age).is_ok_and(|p| !p.is_empty());
+            MEDIA_RENDERING.store(left, Ordering::SeqCst);
         }
     });
 }
@@ -2412,8 +2475,25 @@ async fn serve_branding() -> impl IntoResponse {
     axum::Json(crate::branding::payload())
 }
 
+/// Whether this thClaws may reach the thClaws cloud — for the AI Server
+/// hub's 🔒/☁️ badge (dev-plan/71). Reports state, never a credential.
+async fn serve_egress() -> impl IntoResponse {
+    let aiserver = crate::aiserver::cached().is_some();
+    let (allowed, source) = crate::providers::thclaws_gateway::cloud_mode();
+    axum::Json(serde_json::json!({
+        "aiserver": aiserver,
+        // Off an AI Server box the gate does not exist: cloud use is allowed.
+        "allow_cloud": !aiserver || allowed,
+        "source": if aiserver { source } else { "not-aiserver" },
+        "cloud_credential": crate::providers::thclaws_gateway::has_cloud_credential(),
+        "switch_file": crate::profile::config_dir().map(|d| d.join("aiserver.json")),
+    }))
+}
+
 async fn serve_health() -> impl IntoResponse {
-    let busy = crate::agent_activity::is_agent_busy() || background_jobs_alive();
+    let busy = crate::agent_activity::is_agent_busy()
+        || background_jobs_alive()
+        || MEDIA_RENDERING.load(Ordering::SeqCst);
     axum::Json(serde_json::json!({
         "ok": true,
         "busy": busy,
@@ -2464,10 +2544,15 @@ async fn serve_gui_shell_asset(
 /// crafted `../etc/passwd` can't escape. Single-tenant per --serve
 /// process; multi-tenant adds HMAC in `build_shell_router`.
 async fn serve_file_asset(
+    State(state): State<ServeState>,
     axum::extract::Path(rel): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let cwd = crate::workdir::workspace_root();
+    let cwd = match caller_member_root(&state, &headers) {
+        Ok(Some((_, root))) => root,
+        Ok(None) => crate::workdir::workspace_root(),
+        Err(status) => return status.into_response(),
+    };
     let range = headers
         .get(axum::http::header::RANGE)
         .and_then(|v| v.to_str().ok());
@@ -2498,14 +2583,35 @@ struct UploadQuery {
 async fn serve_upload(
     State(state): State<ServeState>,
     Query(q): Query<UploadQuery>,
+    headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    let workspace = state.workspace.as_ref();
+    // Multiuser: the upload lands in, and is announced to, the calling
+    // member's own workspace and session — never the shared pod root.
+    let member = match caller_member_root(&state, &headers) {
+        Ok(m) => m,
+        Err(status) => return status.into_response(),
+    };
+    let (session_input, workspace_buf) = match &member {
+        Some((handle, root)) => (handle.input_tx.clone(), root.clone()),
+        None => (
+            state.shared.input_tx.clone(),
+            state.workspace.as_ref().to_path_buf(),
+        ),
+    };
+    let workspace = workspace_buf.as_path();
     let target_dir = q.dir.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let uploads_dir = match target_dir {
         Some(rel) => ensure_target_dir(workspace, rel),
         None => ensure_uploads_dir(workspace),
-    };
+    }
+    .and_then(|dir| {
+        if member.is_none() {
+            return Ok(dir);
+        }
+        crate::multi_tenant::resolve_member_path(workspace, &dir.to_string_lossy())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))
+    });
     let uploads_dir = match uploads_dir {
         Ok(p) => p,
         Err(e) => {
@@ -2614,7 +2720,7 @@ async fn serve_upload(
     // would make the agent react to files it isn't meant to see yet.
     if target_dir.is_none() {
         let synth = render_upload_message("serve", &saved);
-        let _ = state.shared.input_tx.send(ShellInput::Line(synth));
+        let _ = session_input.send(ShellInput::Line(synth));
     }
 
     let files: Vec<serde_json::Value> = saved
@@ -2632,6 +2738,32 @@ async fn serve_upload(
         Json(serde_json::json!({ "ok": true, "files": files })),
     )
         .into_response()
+}
+
+/// Multiuser: the authenticated member's own `workspace-<id>/`. `None` off
+/// multiuser, or in the dev-plan/35 shared-cwd layout that has no per-member
+/// folder.
+fn member_workspace_root(shared: &SharedSessionHandle) -> Option<std::path::PathBuf> {
+    if !crate::workdir::is_multiuser() {
+        return None;
+    }
+    shared
+        .session_roots
+        .as_ref()
+        .and_then(|r| r.workspace_root.clone())
+}
+
+/// The calling member's session + root from the signed identity headers
+/// (never from a client-supplied path). `Ok(None)` = not multiuser.
+fn caller_member_root(
+    state: &ServeState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(Arc<SharedSessionHandle>, std::path::PathBuf)>, StatusCode> {
+    if state.multi_tenant.is_none() || !crate::workdir::is_multiuser() {
+        return Ok(None);
+    }
+    let handle = resolve_session_handle(state, headers)?;
+    Ok(member_workspace_root(&handle).map(|root| (handle, root)))
 }
 
 async fn ws_handler(
@@ -3074,6 +3206,7 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
         }
     });
 
+    let ipc_root = member_workspace_root(&shared);
     // Inbound reader loop.
     while let Some(frame) = stream.next().await {
         match frame {
@@ -3083,7 +3216,14 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
                 };
                 // Web has no fall-through transport — anything
                 // handle_ipc doesn't recognize is silently dropped.
-                let _handled = handle_ipc(msg, &ctx);
+                // Multiuser: every file op in the frame resolves inside the
+                // calling member's own `workspace-<id>/` (C2).
+                let _handled = match ipc_root.clone() {
+                    Some(root) => {
+                        crate::workdir::sync_scope_workdir(root, || handle_ipc(msg, &ctx))
+                    }
+                    None => handle_ipc(msg, &ctx),
+                };
             }
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {} // ignore Ping/Pong/Binary for now

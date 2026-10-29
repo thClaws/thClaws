@@ -88,6 +88,9 @@ pub struct OpencodeGoProvider {
     base_url: String,
     list_models_url: Option<String>,
     wire_cache: OnceLock<HashMap<String, WireFormat>>,
+    /// opencode.ai rejects inference POSTs without a stable per-conversation
+    /// `x-opencode-session` (400 MissingSessionID, #228); one id per provider.
+    session: String,
 }
 
 impl OpencodeGoProvider {
@@ -98,6 +101,7 @@ impl OpencodeGoProvider {
             base_url: DEFAULT_API_URL.to_string(),
             list_models_url: None,
             wire_cache: OnceLock::new(),
+            session: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -545,7 +549,8 @@ impl OpencodeGoProvider {
         let req = self
             .client
             .post(url)
-            .header("content-type", "application/json");
+            .header("content-type", "application/json")
+            .header("x-opencode-session", &self.session);
         let req = match wire_format {
             WireFormat::Anthropic => req
                 .header("x-api-key", &self.api_key)

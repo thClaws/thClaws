@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod ask;
 pub mod bash;
+pub mod doc_convert;
+pub mod doc_render;
 pub mod docx_create;
 pub mod docx_edit;
 pub mod docx_read;
@@ -59,6 +61,7 @@ pub mod xlsx_read;
 
 pub use ask::{set_gui_ask_sender, set_line_driven_turn, AskUserRequest, AskUserTool};
 pub use bash::BashTool;
+pub use doc_convert::DocConvertTool;
 pub use docx_create::DocxCreateTool;
 pub use docx_edit::DocxEditTool;
 pub use docx_read::DocxReadTool;
@@ -427,6 +430,7 @@ impl ToolRegistry {
         r.register(Arc::new(EpubCreateTool));
         r.register(Arc::new(PdfCreateTool));
         r.register(Arc::new(PdfReadTool));
+        r.register(Arc::new(DocConvertTool));
         r.register(Arc::new(WebFetchTool::new()));
         r.register(Arc::new(FetchImagesTool::new()));
         r.register(Arc::new(FolderIndexTool));
@@ -773,6 +777,7 @@ mod tests {
             vec![
                 "AskUserQuestion",
                 "Bash",
+                "DocConvert",
                 "DocxCreate",
                 "DocxEdit",
                 "DocxRead",

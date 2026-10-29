@@ -8,6 +8,7 @@ import { type ModeCost } from "./kmsRunCost";
 import { marked } from "marked";
 import { send, subscribe } from "../hooks/useIPC";
 import { assetUrl } from "../lib/assetUrl";
+import { sanitizeHtml } from "../lib/sanitizeHtml";
 import { MarkdownEditor } from "./MarkdownEditor";
 import type { ViewerTarget } from "./KmsBrowserSidebar";
 
@@ -316,9 +317,13 @@ export function KmsViewerOverlay({ initial, onClose }: Props) {
 
   const html = useMemo(() => {
     if (content === null) return "";
-    return markHighlight(
-      rewriteImageSrcs(renderMarkdownToHtml(content, citations), assetBase),
-      current.highlight,
+    // Sanitized last, after every rewrite: pages and web-ingested sources
+    // are untrusted, and `marked` passes raw HTML straight through.
+    return sanitizeHtml(
+      markHighlight(
+        rewriteImageSrcs(renderMarkdownToHtml(content, citations), assetBase),
+        current.highlight,
+      ),
     );
   }, [content, assetBase, citations, current.highlight]);
 

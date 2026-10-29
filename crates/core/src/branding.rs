@@ -165,6 +165,17 @@ pub fn embedded_pubkey_fingerprint() -> Option<String> {
     Some(d[..16].iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// A cloud workspace runs the stock engine image, so it has no logo baked in;
+/// the provisioner hands it the deployment's mark (logo URLs on the same host
+/// as the workspace page, and the short name) so the chat shows what the
+/// organisation's EE desktop shows.
+fn runtime_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 /// The frame the GUI renders branding from (`branding_get` IPC and
 /// `GET /api/branding`). `banner` is the policy's banner text only — the
 /// REPL's ASCII art default is not a GUI banner.
@@ -185,15 +196,30 @@ pub fn payload() -> serde_json::Value {
             "key_source": a.key_source_label,
         })
     });
-    let logo = data_uri(CUSTOMER_LOGO, CUSTOMER_LOGO_MIME);
+    let (logo, logo_dark) = match data_uri(CUSTOMER_LOGO, CUSTOMER_LOGO_MIME) {
+        Some(logo) => {
+            let dark =
+                data_uri(CUSTOMER_LOGO_DARK, CUSTOMER_LOGO_DARK_MIME).unwrap_or(logo.clone());
+            (Some(logo), Some(dark))
+        }
+        None => {
+            let logo = runtime_env("THCLAWS_BRAND_LOGO_URL");
+            let dark = runtime_env("THCLAWS_BRAND_LOGO_DARK_URL").or_else(|| logo.clone());
+            (logo, dark)
+        }
+    };
+    let name = match (bp, runtime_env("THCLAWS_BRAND_NAME")) {
+        (None, Some(n)) => n,
+        _ => b.name.clone(),
+    };
     serde_json::json!({
         "type": "branding",
-        "name": b.name,
+        "name": name,
         "support_email": b.support_email,
         "about": b.about_text,
         "banner": banner,
         "logo": logo,
-        "logo_dark": data_uri(CUSTOMER_LOGO_DARK, CUSTOMER_LOGO_DARK_MIME).or_else(|| logo.clone()),
+        "logo_dark": logo_dark,
         "customer_build": has_customer_logo(),
         "pubkey_fingerprint": embedded_pubkey_fingerprint(),
         "policy": policy,
@@ -227,6 +253,31 @@ mod tests {
     // `tests/policy_smoke/` rather than unit-tested here. These tests
     // cover the materialization helper and template substitution
     // directly, which don't depend on the cache.
+
+    #[test]
+    fn cloud_workspace_takes_the_deployment_mark_from_env() {
+        let _guard = crate::kms::test_env_lock();
+        // Open-core test build: nothing baked in, no policy.
+        assert!(!has_customer_logo());
+        std::env::set_var("THCLAWS_BRAND_LOGO_URL", "/api/branding/logo");
+        std::env::remove_var("THCLAWS_BRAND_LOGO_DARK_URL");
+        std::env::set_var("THCLAWS_BRAND_NAME", "SiS");
+        let p = payload();
+        std::env::remove_var("THCLAWS_BRAND_LOGO_URL");
+        std::env::remove_var("THCLAWS_BRAND_NAME");
+        assert_eq!(p["logo"], "/api/branding/logo");
+        assert_eq!(
+            p["logo_dark"], "/api/branding/logo",
+            "dark falls back to light"
+        );
+        assert_eq!(p["name"], "SiS");
+        assert_eq!(
+            p["customer_build"], false,
+            "a URL logo is not a customer build"
+        );
+        let p = payload();
+        assert!(p["logo"].is_null(), "no env, no logo: {p}");
+    }
 
     #[test]
     fn defaults_are_today_strings() {
@@ -263,6 +314,7 @@ mod tests {
 
     #[test]
     fn payload_has_the_gui_fields() {
+        let _guard = crate::kms::test_env_lock();
         let p = payload();
         assert_eq!(p["type"], "branding");
         assert!(p["name"].is_string());

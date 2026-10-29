@@ -423,7 +423,7 @@ you hear them from us:
 | Limitation | What it means in practice |
 |---|---|
 | A few React GUI strings still render "thClaws" literals | Backend branding (REPL banner, GUI window title, system prompt) is fully active; some strings inside the GUI window are not yet routed through the branding module. Cosmetic |
-| **stdio** MCP servers are not gated by the allow-list | Only HTTP MCP servers are filtered. The contents of `mcp.json` are the administrator's responsibility |
+| The plugin allow-list guards installs, not the disk | With `allow_external_mcp: false` stdio MCP servers are refused and HTTP ones must match `allowed_hosts`, but a file copied straight into a skills or plugins folder (by hand or by the agent's `Bash`) still loads. Pair it with `runtime.deny_tools` and egress filtering |
 | `WebFetch` / `WebSearch` are not gateway-routed | They are general web access. Use your network firewall for those |
 | `gateway.fail_closed` is enforced by construction | No code path builds a direct provider while the gateway is active, but there is no separate HTTP-layer guard |
 | Audit sinks are fail-open | An unreachable SIEM never blocks a tool call; drops are counted and shown in `/policy status`. If your posture requires fail-closed auditing, tell us — it is a change request, not a flag |

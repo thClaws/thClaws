@@ -325,14 +325,146 @@ pub fn serve_shell_asset(shell: &ShellRef, rel: &str) -> Response<Body> {
                 .expect("build 404");
         }
     };
-    Response::builder()
+    let mut rb = Response::builder()
         .header(header::CONTENT_TYPE, HeaderValue::from_str(mime).unwrap())
         .header(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
+        );
+    // A shell folder is agent-supplied content: any HTML/SVG in it gets the
+    // same opaque origin as the shell index (see `SHELL_INDEX_CSP`).
+    if is_scriptable_document(mime) {
+        rb = rb.header(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(WORKSPACE_DOC_CSP),
+        );
+    }
+    rb.body(Body::from(bytes)).expect("build asset response")
+}
+
+/// The Mode C shell index runs agent-supplied script. On a path-scheme
+/// install (`<tenant>/u/<h>/<s>/gui-shell/<id>/`) it would otherwise share
+/// the web app's origin and read its localStorage JWT — opened in the
+/// workspace's iframe or as a link sent to an admin. No `allow-same-origin`,
+/// so the shell talks to the host only over the postMessage bridge.
+pub const SHELL_INDEX_CSP: &str = WORKSPACE_DOC_CSP;
+
+/// Largest shell asset inlined into the Mode C index.
+const INLINE_ASSET_MAX: usize = 4 * 1024 * 1024;
+
+/// Inline the shell's own relative `<script src>` (as a `data:` URL, so
+/// `defer`/`async` and order still hold) and `<link rel="stylesheet">` (as a
+/// `<style>`) into the Mode C index.
+///
+/// The sandboxed index has an opaque origin, so the browser treats its
+/// sub-requests as cross-site and the cloud's `SameSite=Lax` session cookie
+/// no longer rides on them — ForwardAuth would bounce `style.css`/`main.js`
+/// to /login. The index itself is a navigation from the (unsandboxed) parent
+/// and still carries the cookie, so everything it carries inline loads.
+/// Later dynamic loads (images, `fetch`) go through the bridge's parent
+/// proxy instead.
+pub fn inline_shell_assets(html: &[u8], shell: &ShellRef) -> Vec<u8> {
+    use base64::Engine;
+    use std::sync::OnceLock;
+    static SCRIPT: OnceLock<regex::Regex> = OnceLock::new();
+    static LINK: OnceLock<regex::Regex> = OnceLock::new();
+    let Ok(text) = std::str::from_utf8(html) else {
+        return html.to_vec();
+    };
+    let script = SCRIPT.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)(<script\b[^>]*?\ssrc\s*=\s*)("[^"]*"|'[^']*'|[^\s>"']+)([^>]*>)"#,
         )
-        .body(Body::from(bytes))
-        .expect("build asset response")
+        .expect("script regex")
+    });
+    let link = LINK.get_or_init(|| regex::Regex::new(r#"(?is)<link\b[^>]*>"#).expect("link regex"));
+    let read = |raw: &str| -> Option<Vec<u8>> {
+        let rel = local_asset_path(raw)?;
+        let (bytes, _) = shell.read_asset(&rel).ok()?;
+        (bytes.len() <= INLINE_ASSET_MAX).then_some(bytes)
+    };
+    let out = script.replace_all(text, |c: &regex::Captures| {
+        let raw = unquote(&c[2]);
+        match read(raw) {
+            Some(bytes) => format!(
+                "{}\"data:text/javascript;base64,{}\"{}",
+                &c[1],
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+                &c[3]
+            ),
+            None => c[0].to_string(),
+        }
+    });
+    let out = link.replace_all(&out, |c: &regex::Captures| {
+        let tag = &c[0];
+        let is_stylesheet = attr(tag, "rel")
+            .map(|r| {
+                r.split_ascii_whitespace()
+                    .any(|t| t.eq_ignore_ascii_case("stylesheet"))
+            })
+            .unwrap_or(false);
+        let css = is_stylesheet
+            .then(|| attr(tag, "href"))
+            .flatten()
+            .and_then(read)
+            .and_then(|b| String::from_utf8(b).ok());
+        match css {
+            Some(css) => {
+                let media = attr(tag, "media")
+                    .map(|m| format!(" media=\"{}\"", m.replace('"', "&quot;")))
+                    .unwrap_or_default();
+                format!("<style{media}>{}</style>", css.replace("</", "<\\/"))
+            }
+            None => tag.to_string(),
+        }
+    });
+    out.into_owned().into_bytes()
+}
+
+fn unquote(v: &str) -> &str {
+    let v = v.trim();
+    v.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(v)
+}
+
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let re = regex::Regex::new(&format!(
+        r#"(?is)\s{}\s*=\s*("[^"]*"|'[^']*'|[^\s>"']+)"#,
+        regex::escape(name)
+    ))
+    .ok()?;
+    re.captures(tag)
+        .map(|c| unquote(c.get(1).unwrap().as_str()))
+}
+
+/// A shell-relative asset path, or `None` for anything that is not one
+/// (absolute, scheme-qualified, protocol-relative, templated). Containment
+/// is still `read_asset`'s job.
+fn local_asset_path(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.starts_with('/')
+        || raw.starts_with('#')
+        || raw.contains("${")
+        || raw.contains('\\')
+    {
+        return None;
+    }
+    let scheme_like = raw
+        .split_once(':')
+        .map(|(s, _)| !s.is_empty() && !s.contains(['/', '?', '#']))
+        .unwrap_or(false);
+    if scheme_like {
+        return None;
+    }
+    let path = raw.split(['?', '#']).next().unwrap_or("");
+    let path = path.trim_start_matches("./");
+    if path.is_empty() || path.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+    urlencoding::decode(path).ok().map(|p| p.into_owned())
 }
 
 /// Serve a shell's index.html for the cloud `--serve` mount (Mode C):
@@ -352,7 +484,8 @@ pub fn serve_shell_index_inline(shell: &ShellRef) -> Response<Body> {
                 .expect("build 500");
         }
     };
-    let injected = inject_inline_bridge_with_id(&bytes, &shell.manifest().id);
+    let inlined = inline_shell_assets(&bytes, shell);
+    let injected = inject_inline_bridge_with_id(&inlined, &shell.manifest().id);
     Response::builder()
         .header(
             header::CONTENT_TYPE,
@@ -361,6 +494,10 @@ pub fn serve_shell_index_inline(shell: &ShellRef) -> Response<Body> {
         .header(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store, must-revalidate"),
+        )
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(SHELL_INDEX_CSP),
         )
         // See the mode-B response above: `same-origin` still withholds the
         // per-shell token from external pages, while leaving the Referer that
@@ -533,6 +670,99 @@ mod tests {
             .get(header::REFERRER_POLICY)
             .expect("shell index sets a referrer policy");
         assert_eq!(policy, "same-origin");
+    }
+
+    fn disk_shell(files: &[(&str, &str)]) -> (tempfile::TempDir, ShellRef) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for (name, body) in files {
+            let p = tmp.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        let manifest: crate::gui_shell::manifest::ShellManifest = serde_json::from_str(
+            r#"{"id":"deskx","name":"Desk X","version":"1.0.0",
+                "description":"t","entry":"index.html"}"#,
+        )
+        .expect("manifest parses");
+        let shell = ShellRef::OnDisk {
+            manifest,
+            root: tmp.path().to_path_buf(),
+            source: crate::gui_shell::registry::ShellSource::Project,
+        };
+        (tmp, shell)
+    }
+
+    /// The shell must not share the web app's origin (its JWT is in
+    /// localStorage on path-scheme installs), wherever it is opened.
+    #[test]
+    fn the_shell_index_and_its_html_assets_get_an_opaque_origin() {
+        let (_tmp, shell) = disk_shell(&[
+            ("index.html", "<html><head></head></html>"),
+            ("other.html", "x"),
+            ("icon.svg", "<svg/>"),
+            ("main.js", "1"),
+        ]);
+        let index = serve_shell_index_inline(&shell);
+        let v = index
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .expect("shell index has a CSP")
+            .to_str()
+            .unwrap();
+        assert!(
+            v.starts_with("sandbox ") && v.contains("allow-scripts"),
+            "{v}"
+        );
+        assert!(!v.contains("allow-same-origin"), "{v}");
+        for rel in ["other.html", "icon.svg"] {
+            let r = serve_shell_asset(&shell, rel);
+            let v = r.headers().get(header::CONTENT_SECURITY_POLICY);
+            assert!(v.is_some_and(|v| !v.to_str().unwrap().contains("allow-same-origin")));
+        }
+        assert!(serve_shell_asset(&shell, "main.js")
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .is_none());
+    }
+
+    #[test]
+    fn inline_shell_assets_carries_own_css_and_js() {
+        let (_tmp, shell) = disk_shell(&[
+            ("style.css", "body{color:red}</style><b>"),
+            ("main.js", "window.x=1"),
+            ("lib/v.js", "window.v=1"),
+            ("secret.txt", "s"),
+        ]);
+        let html = br#"<head><link rel="icon" href="icon.svg"><link rel="stylesheet" href="./style.css" media="screen"><link rel=stylesheet href="https://cdn/x.css">
+<script data-src="x" src="main.js" defer></script><script src='lib/v.js?v=2'></script>
+<script src="/abs.js"></script><script src="../secret.txt"></script><script src="https://cdn/y.js"></script></head>"#;
+        let out = String::from_utf8(inline_shell_assets(html, &shell)).unwrap();
+        assert!(
+            out.contains(r#"<style media="screen">body{color:red}<\/style><b></style>"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"<link rel="icon" href="icon.svg">"#),
+            "{out}"
+        );
+        assert!(out.contains(r#"href="https://cdn/x.css""#), "{out}");
+        use base64::Engine;
+        let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+        assert!(
+            out.contains(&format!(
+                r#"src="data:text/javascript;base64,{}" defer>"#,
+                b64("window.x=1")
+            )),
+            "{out}"
+        );
+        assert!(out.contains(&b64("window.v=1")), "{out}");
+        for kept in [
+            r#"src="/abs.js""#,
+            r#"src="../secret.txt""#,
+            r#"src="https://cdn/y.js""#,
+        ] {
+            assert!(out.contains(kept), "{kept} rewritten: {out}");
+        }
     }
     use std::net::SocketAddr;
 

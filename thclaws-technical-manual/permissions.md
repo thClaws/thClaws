@@ -209,7 +209,7 @@ Default for any tool that doesn't override is `false` (read-only).
 | EnterPlanMode / ExitPlanMode / SubmitPlan / UpdatePlanStep | `false` | Plan-control tools must sail through the dispatch gate. |
 | Bash | `true` (always) | Plus `is_destructive_command` for stderr ⚠ marker (no extra block). |
 | Write / Edit | `true` | Filesystem mutations. |
-| DocxCreate / DocxEdit / XlsxCreate / XlsxEdit / PptxCreate / PptxEdit / PdfCreate | `true` | Office doc mutations. |
+| DocxCreate / DocxEdit / XlsxCreate / XlsxEdit / PptxCreate / PptxEdit / PdfCreate / DocConvert | `true` | Office doc mutations (DocConvert also uploads to the document service). |
 | WebFetch / WebSearch | `true` | Outbound HTTP — leaks the query/URL. |
 | TodoWrite | `true` | Triggers M6.20 BUG M1 fix path: TodoWrite-specific plan-mode message fires before generic. |
 | MCP tools (any) | `true` | MCP tool semantics aren't introspectable; conservative default until per-tool annotation lands. |

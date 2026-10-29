@@ -85,7 +85,7 @@ Pending: ${cols.todo.join("; ") || "—"}`;
       await window.thclaws.run(`${summary}\n\nWhich task should I pick next and why?`);
     };
     let answer = null;
-    window.thclaws.on("text", ({ delta }) => {
+    window.thclaws.on("text", (delta) => {
       if (!answer) {
         answer = document.createElement("div");
         answer.style.cssText = "padding: 12px 24px; color: var(--muted); border-top: 1px solid var(--border);";

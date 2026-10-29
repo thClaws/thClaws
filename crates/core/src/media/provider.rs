@@ -155,7 +155,7 @@ pub trait SpeechProvider: Send + Sync {
 /// A video-generation request, provider-agnostic. `init_image` empty ⇒
 /// text→video; present ⇒ image→video (the image conditions the first
 /// frame). `aspect_ratio` is the engine's portable tier; each provider
-/// maps it onto what it accepts (Veo only takes 9:16 / 16:9).
+/// maps it onto what it accepts (Omni only takes 9:16 / 16:9).
 #[derive(Debug, Clone)]
 pub struct VideoRequest {
     pub model: String,
@@ -163,13 +163,13 @@ pub struct VideoRequest {
     pub init_image: Option<InputImage>,
     pub aspect_ratio: String,
     pub duration_seconds: u32,
-    /// Output resolution tier, e.g. `720P` / `1080P`. Veo ignores it
-    /// (resolution follows its aspect); DashScope video (happyhorse)
-    /// takes it as a `resolution` parameter that changes pricing.
+    /// Output resolution tier, e.g. `720P` / `1080P`. Omni and LTX take it;
+    /// DashScope video (happyhorse) takes it as a `resolution` parameter
+    /// that changes pricing.
     pub resolution: String,
     /// Frame rate, when the caller pinned one. LTX takes 24/25/48/50 and
     /// the high end is the lever for clean speech (48/50 resolves the
-    /// P/B/M lip closures that 24/25 smears); Veo and DashScope have no
+    /// P/B/M lip closures that 24/25 smears); Omni and DashScope have no
     /// such knob and ignore it.
     pub fps: Option<u32>,
     /// Generate the soundtrack (dialogue, ambience) alongside the video.
@@ -178,9 +178,8 @@ pub struct VideoRequest {
     pub generate_audio: bool,
 }
 
-/// Opaque handle to a provider-side job (e.g. a Veo long-running
-/// operation name). Stored in the job log so a poll can resume after a
-/// restart.
+/// Opaque handle to a provider-side job (e.g. an LTX or DashScope task
+/// id). Stored in the job log so a poll can resume after a restart.
 #[derive(Debug, Clone)]
 pub struct ProviderJobRef {
     pub op: String,
@@ -208,6 +207,18 @@ pub trait VideoProvider: Send + Sync {
             }
         }
         None
+    }
+
+    /// A clip length the provider always returns, whatever was asked
+    /// (Omni: ~10 s); `None` = it honours `duration_seconds`.
+    fn fixed_duration(&self) -> Option<u32> {
+        None
+    }
+
+    /// Renders only 16:9 / 9:16 and crops any other frame to fit (Omni,
+    /// LTX); the engine pads an input image first.
+    fn fixed_aspects(&self) -> bool {
+        false
     }
 
     /// Submit a video job; returns the provider job ref to poll. Fast

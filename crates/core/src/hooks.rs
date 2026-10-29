@@ -239,6 +239,9 @@ pub fn fire(config: &HooksConfig, event: HookEvent, env: &HashMap<String, String
     // Build a tokio Command (reusing the platform-shell logic via
     // shell_command_async so THCLAWS_SHELL overrides apply).
     let mut command = crate::util::shell_command_async(cmd);
+    for k in crate::tools::bash::ENGINE_SECRET_ENV {
+        command.env_remove(k);
+    }
 
     command.env("THCLAWS_HOOK_EVENT", event.name());
     for (k, v) in env {
@@ -347,6 +350,9 @@ pub async fn fire_pre_tool_use_gate(
     };
 
     let mut command = crate::util::shell_command_async(cmd);
+    for k in crate::tools::bash::ENGINE_SECRET_ENV {
+        command.env_remove(k);
+    }
     command.env("THCLAWS_HOOK_EVENT", HookEvent::PreToolUse.name());
     command.env("THCLAWS_TOOL_NAME", tool_name);
     // The env var stays truncated (per-arg env limits), but the FULL,

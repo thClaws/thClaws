@@ -41,42 +41,35 @@ const MODELS: &[ImageModelInfo] = &[
     },
     ImageModelInfo {
         id: "qwen-image-3.0",
-        aliases: &["qwen-3", "qwen-image-3.0"],
+        // qwen-image-plus is gone from Model Studio (404 on the intl
+        // region and on SIS's workspace, 2026-10-22); its name lands here.
+        aliases: &["qwen-3", "qwen-image-3.0", "qwen-plus", "qwen-image-plus"],
         label: "Qwen Image 3.0",
     },
     ImageModelInfo {
         id: "qwen-image-3.0-pro",
-        aliases: &["qwen-3-pro", "qwen-image-3.0-pro"],
+        // …and qwen-image-max's here.
+        aliases: &[
+            "qwen-3-pro",
+            "qwen-image-3.0-pro",
+            "qwen-max",
+            "qwen-image-max",
+        ],
         label: "Qwen Image 3.0 Pro",
     },
     ImageModelInfo {
-        id: "qwen-image-max",
-        aliases: &["qwen-max", "qwen-image-max"],
-        label: "Qwen Image Max",
-    },
-    ImageModelInfo {
-        id: "qwen-image-plus",
-        aliases: &["qwen-plus", "qwen-image-plus"],
-        label: "Qwen Image Plus",
-    },
-    ImageModelInfo {
-        id: "qwen-image-edit-plus",
-        aliases: &["qwen-edit", "qwen-image-edit-plus"],
-        label: "Qwen Image Edit Plus (image→image)",
-    },
-    ImageModelInfo {
-        id: "qwen-image-edit-max",
-        aliases: &["qwen-edit-max", "qwen-image-edit-max"],
-        label: "Qwen Image Edit Max (image→image)",
-    },
-    ImageModelInfo {
-        id: "qwen-image-edit",
-        aliases: &["qwen-image-edit"],
-        label: "Qwen Image Edit (image→image)",
-    },
-    ImageModelInfo {
         id: "wan2.7-image",
-        aliases: &["wan-image", "wan2.7-image"],
+        // The editor now: the qwen-image-edit models are gone from Model
+        // Studio (404, 2026-10-22), and saved prompts naming them land here.
+        aliases: &[
+            "wan-image",
+            "wan2.7-image",
+            "qwen-edit",
+            "qwen-image-edit",
+            "qwen-image-edit-plus",
+            "qwen-edit-max",
+            "qwen-image-edit-max",
+        ],
         label: "Wan 2.7 Image",
     },
     ImageModelInfo {
@@ -122,6 +115,13 @@ fn family(model: &str) -> Family {
 }
 
 pub struct QwenImageProvider;
+
+/// DashScope's accepted range is 0..=2^31-1.
+fn random_seed() -> u32 {
+    let mut b = [0u8; 4];
+    let _ = getrandom::getrandom(&mut b);
+    u32::from_le_bytes(b) & 0x7fff_ffff
+}
 
 impl QwenImageProvider {
     /// Map the engine's portable aspect tiers onto DashScope `W*H` size
@@ -173,15 +173,15 @@ impl QwenImageProvider {
         match fam {
             Family::QwenFixed | Family::ZImage if editing => {
                 return Err(Error::Tool(format!(
-                    "{} is text→image only — use qwen-image-edit-plus (or wan2.7-image) to edit an image",
+                    "{} is text→image only — use wan2.7-image to edit an image",
                     req.model
                 )))
             }
             Family::QwenEdit if !editing => {
                 return Err(Error::Tool(format!(
-                    "{} edits an image — give it an input image, or use qwen-image-3.0 for text→image",
-                    req.model
-                )))
+                "{} edits an image — give it an input image, or use qwen-image-3.0 for text→image",
+                req.model
+            )))
             }
             _ => {}
         }
@@ -226,7 +226,11 @@ impl ImageProvider for QwenImageProvider {
     }
 
     async fn generate(&self, req: &ImageRequest) -> Result<ImageResult> {
-        let parameters = Self::parameters(req)?;
+        let mut parameters = Self::parameters(req)?;
+        // DashScope returns the identical image for an identical request
+        // when no seed is given, so a retry would cost a call and change
+        // nothing.
+        parameters["seed"] = json!(random_seed());
         let ep = crate::media::provider::resolve_dashscope_endpoint(DASHSCOPE_BASE)?;
 
         // content: image parts first (data URIs for local bytes), then
@@ -334,6 +338,13 @@ mod tests {
     }
 
     #[test]
+    fn seeds_differ_and_stay_in_range() {
+        let a: Vec<u32> = (0..8).map(|_| random_seed()).collect();
+        assert!(a.iter().all(|s| *s <= 0x7fff_ffff));
+        assert!(a.windows(2).any(|w| w[0] != w[1]), "{a:?}");
+    }
+
+    #[test]
     fn each_family_sends_its_own_parameters() {
         let p = |m: &str, a: &str, n: usize| QwenImageProvider::parameters(&req(m, a, n)).unwrap();
         assert_eq!(p("qwen-image-3.0", "16:9", 0)["size"], "2688*1536");
@@ -366,10 +377,17 @@ mod tests {
             p.resolve_model("wan-image").as_deref(),
             Some("wan2.7-image")
         );
-        assert_eq!(
-            p.resolve_model("qwen-edit").as_deref(),
-            Some("qwen-image-edit-plus")
-        );
+        // Retired on Model Studio (404, 2026-10-22): their names land on
+        // living models instead of erroring.
+        for (gone, now) in [
+            ("qwen-edit", "wan2.7-image"),
+            ("qwen-image-edit-plus", "wan2.7-image"),
+            ("qwen-image-edit-max", "wan2.7-image"),
+            ("qwen-image-max", "qwen-image-3.0-pro"),
+            ("qwen-image-plus", "qwen-image-3.0"),
+        ] {
+            assert_eq!(p.resolve_model(gone).as_deref(), Some(now), "{gone}");
+        }
         assert_eq!(
             p.resolve_model("wan2.8-image").as_deref(),
             Some("wan2.8-image")

@@ -40,3 +40,71 @@ pub use metering::{
 #[cfg(feature = "gui")]
 pub use registry::{RegistryConfig, UserSession, UserSessionRegistry};
 pub use user_state::{is_in_user_writable, SessionRoots, UserStatePaths};
+
+/// C2: resolve a client-supplied path inside the calling member's own
+/// `workspace-<id>/`. Canonicalising, `..`- and symlink-safe (the same
+/// [`crate::sandbox::Sandbox::check_in`] the file tools use); another
+/// member's folder, the shared pod root and absolute escapes are refused.
+pub fn resolve_member_path(
+    member_root: &std::path::Path,
+    raw: &str,
+) -> crate::error::Result<std::path::PathBuf> {
+    crate::sandbox::Sandbox::check_in(member_root, raw)
+}
+
+#[cfg(test)]
+mod member_path_tests {
+    use super::resolve_member_path;
+    use crate::sandbox::Sandbox;
+
+    fn two_members() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let alice = base.join("workspace-alice");
+        let bob = base.join("workspace-bob");
+        std::fs::create_dir_all(&alice).unwrap();
+        std::fs::create_dir_all(&bob).unwrap();
+        std::fs::write(alice.join("notes.md"), "a").unwrap();
+        std::fs::write(bob.join("secret.md"), "b").unwrap();
+        std::fs::write(base.join(".env"), "k").unwrap();
+        (tmp, alice, bob)
+    }
+
+    #[test]
+    fn multiuser_member_path_refuses_other_member_and_dotdot() {
+        let (_tmp, alice, bob) = two_members();
+        assert_eq!(
+            resolve_member_path(&alice, "notes.md").unwrap(),
+            alice.join("notes.md")
+        );
+        for bad in [
+            "../workspace-bob/secret.md",
+            "../.env",
+            "sub/../../workspace-bob/secret.md",
+            bob.join("secret.md").to_str().unwrap(),
+        ] {
+            assert!(
+                resolve_member_path(&alice, bad).is_err(),
+                "{bad} must be refused"
+            );
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&bob, alice.join("peek")).unwrap();
+            assert!(resolve_member_path(&alice, "peek/secret.md").is_err());
+        }
+    }
+
+    /// The IPC path: a WS frame runs under `sync_scope_workdir(member_root)`,
+    /// so `Sandbox::check` (file_read/file_write/file_list) is bounded the same way.
+    #[test]
+    fn multiuser_ipc_scope_bounds_sandbox_check() {
+        let (_tmp, alice, bob) = two_members();
+        crate::workdir::sync_scope_workdir(alice.clone(), || {
+            assert_eq!(Sandbox::check("notes.md").unwrap(), alice.join("notes.md"));
+            assert!(Sandbox::check("../workspace-bob/secret.md").is_err());
+            assert!(Sandbox::check(bob.join("secret.md").to_str().unwrap()).is_err());
+            assert!(Sandbox::check("../.env").is_err());
+        });
+    }
+}

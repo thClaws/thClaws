@@ -24,10 +24,10 @@ pub struct FetchImagesTool {
 
 impl FetchImagesTool {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::net_guard::guarded_client_builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("http client");
         Self { client }
     }
 }

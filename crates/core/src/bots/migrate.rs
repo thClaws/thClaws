@@ -603,6 +603,16 @@ pub fn stale_agents(root: &Path) -> Vec<(String, Option<String>)> {
         if mentions {
             continue;
         }
+        // Stale means there is a bare `.thclaws/…` path for fix-paths to
+        // rewrite (or one it would have to skip). A skill that reaches its
+        // files through `{skill_dir}` has none, and flagging it put a notice
+        // on every page load that the repair could never clear.
+        let needs_repair = super::agent_paths::fix(&dir, true)
+            .map(|r| r.changed() || !r.skipped.is_empty())
+            .unwrap_or(true);
+        if !needs_repair {
+            continue;
+        }
         let id = std::fs::read_to_string(dir.join("manifest.json"))
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -654,10 +664,13 @@ pub fn workspace_notice_frames(root: &Path) -> Vec<String> {
         // An agent from the catalogue is replaced by getting it again, which
         // also brings whatever else it has gained since. One the user wrote
         // has nowhere to come from, so its copy is repaired in place.
-        let command = id.as_deref().map_or_else(
-            || "thclaws bots fix-paths".to_string(),
-            |i| format!("/cloud get {i}"),
-        );
+        // A hosted runner has no shell for the user to run the CLI in.
+        let hosted = std::env::var_os("THCLAWS_HOSTED").is_some();
+        let command = match id.as_deref() {
+            Some(i) => format!("/cloud get {i}"),
+            None if hosted => String::new(),
+            None => "thclaws bots fix-paths".to_string(),
+        };
         out.push(
             serde_json::json!({
                 "type": "workspace_notice",
@@ -666,7 +679,7 @@ pub fn workspace_notice_frames(root: &Path) -> Vec<String> {
                 "detail": "It was installed before agents learned to find their own folder \
                            under a workspace host, so its scripts and state look for themselves \
                            in the wrong place. It shows an empty project rather than an error.",
-                "command": command,
+                "command": (!command.is_empty()).then_some(command),
             })
             .to_string(),
         );
@@ -1255,8 +1268,8 @@ pub fn looks_like_v2_agent(ws: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// A prose skill is not a stale agent; a skill that ships a script and
-    /// never names THCLAWS_AGENT_DIR still is.
+    /// A prose skill is not a stale agent, nor is one whose scripts never
+    /// name a bare `.thclaws/` path; one that does still is.
     #[test]
     fn a_prose_skill_does_not_make_an_agent_stale() {
         let ws = tempfile::tempdir().unwrap();
@@ -1279,7 +1292,18 @@ mod tests {
         std::fs::write(skill.join("SKILL.md"), "---\nname: notes\n---\nSummarise.").unwrap();
         assert!(stale_agents(root).is_empty());
 
+        // Ships a script but finds it through {skill_dir}: nothing for
+        // fix-paths to rewrite, so not stale (thai-text-image, 2026-10-22).
         std::fs::create_dir_all(skill.join("scripts")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: notes\n---\nRun `python3 {skill_dir}/scripts/run.py`.",
+        )
+        .unwrap();
+        std::fs::write(skill.join("scripts/run.py"), "print(__file__)").unwrap();
+        std::fs::write(skill.join("scripts/font.ttf"), [0u8; 16]).unwrap();
+        assert!(stale_agents(root).is_empty());
+
         std::fs::write(skill.join("scripts/run.py"), "open('.thclaws/x')").unwrap();
         assert_eq!(stale_agents(root).len(), 1);
     }

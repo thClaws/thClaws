@@ -889,6 +889,10 @@ export function TerminalView({ active, modalOpen }: Props) {
         // turn (setState bailouts on equal value), so the per-event
         // hot path doesn't re-render needlessly.
         setStreaming(true);
+      } else if (msg.type === "initial_state" && msg.agent_busy === false) {
+        // Reconnect to an idle worker: the chat_done this overlay was
+        // waiting for went out while the socket was down.
+        setStreaming(false);
       } else if (msg.type === "ask_user_question") {
         // Mark the next submit as an answer rather than a new prompt.
         // The cyan-bordered question block already rendered via

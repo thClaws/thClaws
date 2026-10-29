@@ -83,6 +83,29 @@ pub fn check_url_with(url: &str, policy: &Policy) -> AllowDecision {
     }
 }
 
+/// Redirect policy for install downloads: at most five hops, and every
+/// hop must pass the allow-list, so an allowed host can't bounce the
+/// fetch to one the policy never named.
+pub fn install_redirect_policy() -> reqwest::redirect::Policy {
+    redirect_policy_with(check_url)
+}
+
+pub fn redirect_policy_with(
+    check: impl Fn(&str) -> AllowDecision + Send + Sync + 'static,
+) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("too many redirects");
+        }
+        match check(attempt.url().as_str()) {
+            AllowDecision::Denied { reason } => {
+                attempt.error(format!("redirect blocked by org policy: {reason}"))
+            }
+            _ => attempt.follow(),
+        }
+    })
+}
+
 /// Strip scheme, query, fragment, and trailing `.git` suffix; lowercase
 /// host. Leaves `host[/path/...]` for matching.
 pub fn normalize_url_for_match(url: &str) -> String {
@@ -91,12 +114,20 @@ pub fn normalize_url_for_match(url: &str) -> String {
     let after_scheme = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
     // Strip user@ prefix (e.g. git ssh URLs — though we don't really
     // support them yet, defensive).
-    let after_user = after_scheme
-        .split_once('@')
-        .map(|(_, rest)| rest)
-        .unwrap_or(after_scheme);
+    // Only an `@` inside the authority is userinfo; one in the path or
+    // query would otherwise let `evil.example/x@allowed.host` pass as
+    // `allowed.host` while the fetch still goes to evil.example.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let (authority, tail) = after_scheme.split_at(authority_end);
+    let host_part = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let after_user = format!("{host_part}{tail}");
     // Strip query / fragment.
-    let body = after_user.split(['?', '#']).next().unwrap_or(after_user);
+    let body = after_user.split(['?', '#']).next().unwrap_or(&after_user);
     // Strip trailing `.git`.
     let body = body.strip_suffix(".git").unwrap_or(body);
     // Drop port from host segment (only the first path segment is host).
@@ -365,5 +396,127 @@ mod tests {
             normalize_url_for_match("https://github.com/acme/repo.git"),
             "github.com/acme/repo"
         );
+    }
+    #[test]
+    fn at_sign_in_path_or_query_does_not_change_the_host() {
+        let p = policy_with_plugins(PluginsPolicy {
+            enabled: true,
+            allowed_hosts: vec!["sis.thclaws.ai".into()],
+            allow_external_scripts: true,
+            allow_external_mcp: true,
+        });
+        for url in [
+            "https://evil.example/x@sis.thclaws.ai/skill.zip",
+            "https://evil.example/skill.zip?ref=@sis.thclaws.ai",
+            "https://evil.example/repo.git#@sis.thclaws.ai",
+        ] {
+            assert!(!check_url_with(url, &p).is_allowed(), "{url} was allowed");
+        }
+    }
+    fn mcp(name: &str, transport: &str, url: &str) -> crate::mcp::McpServerConfig {
+        crate::mcp::McpServerConfig {
+            name: name.into(),
+            transport: transport.into(),
+            command: if transport == "stdio" {
+                "npx".into()
+            } else {
+                String::new()
+            },
+            args: Vec::new(),
+            env: Default::default(),
+            url: url.into(),
+            headers: Default::default(),
+            trusted: false,
+            engine_managed: false,
+        }
+    }
+
+    fn sis_plugins(allow_external_mcp: bool) -> Policy {
+        policy_with_plugins(PluginsPolicy {
+            enabled: true,
+            allowed_hosts: vec!["sis.thclaws.ai".into(), "*.sis.thclaws.ai".into()],
+            allow_external_scripts: false,
+            allow_external_mcp,
+        })
+    }
+
+    #[test]
+    fn locked_mcp_refuses_stdio_and_foreign_http_only() {
+        use crate::policy::mcp_server_refusal_with as refuse;
+        let p = sis_plugins(false);
+        assert!(refuse(&mcp("fs", "stdio", ""), &p).is_some());
+        assert!(refuse(&mcp("x", "http", "https://mcp.evil.example/v1"), &p).is_some());
+        assert!(refuse(&mcp("kb", "http", "https://mcp.sis.thclaws.ai/v1"), &p).is_none());
+        let mut managed = mcp("browser", "stdio", "");
+        managed.engine_managed = true;
+        assert!(refuse(&managed, &p).is_none());
+    }
+
+    #[test]
+    fn open_mcp_or_no_plugins_block_refuses_nothing() {
+        use crate::policy::mcp_server_refusal_with as refuse;
+        assert!(refuse(&mcp("fs", "stdio", ""), &sis_plugins(true)).is_none());
+        let no_block = Policy {
+            policies: Policies::default(),
+            ..sis_plugins(false)
+        };
+        assert!(refuse(&mcp("fs", "stdio", ""), &no_block).is_none());
+    }
+
+    #[tokio::test]
+    async fn redirect_to_a_host_outside_the_list_is_refused() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let resp = if req.starts_with("GET /a.zip") {
+                    format!("HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/b.zip\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                        .to_string()
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let p = policy_with_plugins(PluginsPolicy {
+            enabled: true,
+            allowed_hosts: vec!["127.0.0.1".into()],
+            allow_external_scripts: true,
+            allow_external_mcp: true,
+        });
+        let client = |p: Policy| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(redirect_policy_with(move |u| check_url_with(u, &p)))
+                .build()
+                .unwrap()
+        };
+        let err = client(p.clone())
+            .get(format!("http://127.0.0.1:{port}/a.zip"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("redirect blocked by org policy"),
+            "{err:?}"
+        );
+
+        let mut open = p;
+        open.policies
+            .plugins
+            .as_mut()
+            .unwrap()
+            .allowed_hosts
+            .push("localhost".into());
+        let ok = client(open)
+            .get(format!("http://127.0.0.1:{port}/a.zip"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
     }
 }

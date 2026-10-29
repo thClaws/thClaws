@@ -42,6 +42,31 @@ pub struct Endpoints {
     pub direct: Option<Endpoint>,
 }
 
+/// A Suite service announced in discovery (`slide_render`, `rag`, and each
+/// studio). Shape agreed with dgx in xchg 20261025-1000.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Service {
+    pub base_url: String,
+    #[serde(default)]
+    pub up: bool,
+    #[serde(default)]
+    pub needs_key: bool,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub tls_selfsigned: bool,
+    /// Only on `rag`: the engine's MCP endpoint (Streamable HTTP).
+    #[serde(default)]
+    pub mcp_url: Option<String>,
+}
+
+impl Service {
+    /// Usable now: announced *and* its health check answered.
+    pub fn live(&self) -> bool {
+        self.up && !self.base_url.is_empty()
+    }
+}
+
 /// The discovery document. Unknown fields are ignored on purpose: §7 of the
 /// guide promises fields may be *added*, never removed or retyped.
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +89,18 @@ pub struct Discovery {
     pub hub: String,
     #[serde(default)]
     pub machine_id: String,
+    /// The Suite's document service (DocConvert, OCR, previews, slides).
+    #[serde(default)]
+    pub slide_render: Option<Service>,
+    /// Speech-to-text (asr-studio, https self-signed).
+    #[serde(default)]
+    pub asr: Option<Service>,
+    /// RAG Engine (namespaces under the caller's key).
+    #[serde(default)]
+    pub rag: Option<Service>,
+    /// video / voice / image / 3d — every block is always present; check `up`.
+    #[serde(default)]
+    pub studios: std::collections::BTreeMap<String, Service>,
 }
 
 impl Discovery {
@@ -92,6 +129,32 @@ fn hub_base() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "http://127.0.0.1:9000".to_string())
+}
+
+/// The box owner treats any outbound call as needing the user's say-so; left
+/// alone, a model reaches for WebSearch to work around a failing local tool.
+pub const WEB_ONLY_WHEN_ASKED: &str = "This machine is an on-premise AI Server. Use the internet \
+     (WebSearch, WebFetch, browser) only when the user asks for information from the \
+     internet or gives you a URL. Never go online on your own initiative, e.g. to work \
+     around a local tool that failed or to look up how to do something: report what \
+     failed and ask the user instead.";
+
+/// Local AI: an AI Server box (discovery answered), or a workspace of the
+/// thClaws EE Pack on one (`THCLAWS_LOCAL_AI=1`, set by the Pack's
+/// provisioner — the pod can't see the Suite's discovery itself).
+pub fn local_ai() -> bool {
+    cached().is_some()
+        || std::env::var("THCLAWS_LOCAL_AI")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+}
+
+/// `base` off the box; `base` plus [`WEB_ONLY_WHEN_ASKED`] on it.
+pub fn web_tool_description(base: &'static str, cell: &'static OnceLock<String>) -> &'static str {
+    if !local_ai() {
+        return base;
+    }
+    cell.get_or_init(|| format!("{base}\n\n{WEB_ONLY_WHEN_ASKED}"))
 }
 
 /// Probe once and remember the answer for the rest of the process. Safe to
@@ -156,7 +219,49 @@ pub fn apply_to_env(d: &Discovery) -> bool {
             std::env::set_var("LITELLM_API_KEY", key);
         }
     }
+    // On the box, documents render on the box: without this the tools fall
+    // back to the cloud gateway, i.e. the file leaves the machine.
+    // Every block is always announced, installed or not — only a live one
+    // is worth pointing at.
+    if let Some(sr) = d.slide_render.as_ref().filter(|s| s.live()) {
+        if std::env::var("SLIDE_RENDER_API").is_err() {
+            std::env::set_var("SLIDE_RENDER_API", &sr.base_url);
+            if let Some(key) = sr.api_key.as_deref().filter(|k| !k.is_empty()) {
+                if std::env::var("SLIDE_RENDER_TOKEN").is_err() {
+                    std::env::set_var("SLIDE_RENDER_TOKEN", key);
+                }
+            }
+        }
+    }
     set_base
+}
+
+/// The Suite's RAG Engine as an engine-managed MCP server (dev-plan/71):
+/// `search_knowledge`, `read_document`, `list_sources` over the caller's
+/// namespaces. Loopback needs no key; with `AISERVER_API_KEY` set it is sent
+/// (§13.2), which also selects that key's own namespaces.
+pub fn rag_mcp_config() -> Option<crate::mcp::McpServerConfig> {
+    rag_mcp_config_for(cached()?, std::env::var("AISERVER_API_KEY").ok())
+}
+
+fn rag_mcp_config_for(d: &Discovery, key: Option<String>) -> Option<crate::mcp::McpServerConfig> {
+    let rag = d.rag.as_ref().filter(|r| r.live())?;
+    let url = rag.mcp_url.clone().filter(|u| !u.is_empty())?;
+    let mut headers = std::collections::HashMap::new();
+    if let Some(k) = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
+        headers.insert("X-API-Key".to_string(), k);
+    }
+    Some(crate::mcp::McpServerConfig {
+        name: "aiserver-rag".into(),
+        transport: "http".into(),
+        command: String::new(),
+        args: Vec::new(),
+        env: std::collections::HashMap::new(),
+        url,
+        headers,
+        trusted: false,
+        engine_managed: true,
+    })
 }
 
 /// Probe, wire up the environment, and tell the operator what happened.
@@ -184,6 +289,26 @@ pub async fn bootstrap() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_tools_unchanged_off_the_box() {
+        let _g = crate::kms::test_env_lock();
+        static CELL: OnceLock<String> = OnceLock::new();
+        assert!(cached().is_none());
+        assert_eq!(web_tool_description("base", &CELL), "base");
+    }
+
+    #[test]
+    fn an_ee_pack_workspace_counts_as_local_ai() {
+        let _g = crate::kms::test_env_lock();
+        std::env::remove_var("THCLAWS_LOCAL_AI");
+        assert!(!local_ai());
+        std::env::set_var("THCLAWS_LOCAL_AI", "1");
+        assert!(local_ai());
+        static CELL: OnceLock<String> = OnceLock::new();
+        assert!(web_tool_description("base", &CELL).ends_with(WEB_ONLY_WHEN_ASKED));
+        std::env::remove_var("THCLAWS_LOCAL_AI");
+    }
 
     // `THCLAWS_AISERVER_HUB` is process-global, so the two probe tests must
     // not overlap or one clears the other's target mid-request.
@@ -220,6 +345,64 @@ mod tests {
         assert_eq!(d.model_id(), "litellm/auto");
         assert!(d.ready());
         assert_eq!(d.machine_id, "2b50a0679bab64bc");
+    }
+
+    #[test]
+    fn suite_service_blocks_parse_as_frozen_by_dgx() {
+        let mut v = doc("aiserver");
+        v["studios"] = serde_json::json!({
+            "video": {"base_url": "http://127.0.0.1:8189", "up": true, "needs_key": false, "tls_selfsigned": false},
+            "voice": {"base_url": "https://127.0.0.1:8191", "up": true, "needs_key": false, "tls_selfsigned": true},
+            "3d":    {"base_url": "http://127.0.0.1:8194", "up": false, "needs_key": false, "tls_selfsigned": false}
+        });
+        v["asr"] = serde_json::json!({"base_url": "https://127.0.0.1:8193", "up": true, "needs_key": false, "tls_selfsigned": true});
+        v["rag"] = serde_json::json!({"base_url": "http://127.0.0.1:8195", "up": true, "needs_key": false,
+                                      "tls_selfsigned": false, "mcp_url": "http://127.0.0.1:8195/mcp"});
+        v["slide_render"] = serde_json::json!({"base_url": "http://127.0.0.1:8475", "up": false, "needs_key": false, "tls_selfsigned": false});
+        let d: Discovery = serde_json::from_value(v).expect("parses");
+        assert!(d.asr.as_ref().is_some_and(|a| a.live() && a.tls_selfsigned));
+        assert_eq!(
+            d.rag.as_ref().and_then(|r| r.mcp_url.as_deref()),
+            Some("http://127.0.0.1:8195/mcp")
+        );
+        assert!(d.studios["voice"].live() && !d.studios["3d"].live());
+        assert!(
+            !d.slide_render.as_ref().unwrap().live(),
+            "announced but not installed"
+        );
+    }
+
+    #[test]
+    fn rag_mcp_is_wired_only_when_live_and_sends_the_key_when_set() {
+        let mut v = doc("aiserver");
+        v["rag"] = serde_json::json!({"base_url": "http://127.0.0.1:8195", "up": true,
+                                      "mcp_url": "http://127.0.0.1:8195/mcp"});
+        let d: Discovery = serde_json::from_value(v.clone()).expect("parses");
+        let open = rag_mcp_config_for(&d, None).expect("live rag → server");
+        assert_eq!(open.transport, "http");
+        assert!(open.engine_managed && open.headers.is_empty());
+        let keyed = rag_mcp_config_for(&d, Some("ais_x".into())).unwrap();
+        assert_eq!(
+            keyed.headers.get("X-API-Key").map(String::as_str),
+            Some("ais_x")
+        );
+        v["rag"]["up"] = serde_json::json!(false);
+        let down: Discovery = serde_json::from_value(v).unwrap();
+        assert!(rag_mcp_config_for(&down, None).is_none());
+        let none: Discovery = serde_json::from_value(doc("aiserver")).unwrap();
+        assert!(rag_mcp_config_for(&none, None).is_none());
+    }
+
+    #[test]
+    fn slide_render_block_parses_and_is_optional() {
+        let d: Discovery = serde_json::from_value(doc("aiserver")).expect("parses");
+        assert!(d.slide_render.is_none());
+        let mut v = doc("aiserver");
+        v["slide_render"] = serde_json::json!({"base_url": "http://127.0.0.1:8475", "up": true, "needs_key": false});
+        let d: Discovery = serde_json::from_value(v).expect("parses");
+        let sr = d.slide_render.expect("slide_render present");
+        assert_eq!(sr.base_url, "http://127.0.0.1:8475");
+        assert!(sr.up && !sr.needs_key && sr.api_key.is_none());
     }
 
     /// `direct` carries no `api_key`; the struct must not require one.

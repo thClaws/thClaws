@@ -176,6 +176,25 @@ pub fn get(id: &str) -> Result<Option<MediaJob>> {
     Ok(load_all()?.into_iter().find(|j| j.id == id))
 }
 
+/// Jobs still rendering that were submitted within `max_age`: what a
+/// cloud workspace keeps fetching, and stays awake for, after the turn
+/// that started them has ended. Older ones are left for an explicit
+/// `MediaJobStatus` so a dead provider job can't keep a pod up forever.
+pub fn pending(max_age: chrono::Duration) -> Result<Vec<MediaJob>> {
+    let _g = LOCK.lock().unwrap();
+    Ok(pending_in(load_all()?, chrono::Utc::now() - max_age))
+}
+
+fn pending_in(jobs: Vec<MediaJob>, since: chrono::DateTime<chrono::Utc>) -> Vec<MediaJob> {
+    jobs.into_iter()
+        .filter(|j| !j.is_terminal())
+        .filter(|j| {
+            chrono::DateTime::parse_from_rfc3339(&j.created_at)
+                .is_ok_and(|t| t.with_timezone(&chrono::Utc) >= since)
+        })
+        .collect()
+}
+
 /// Append a new state snapshot for an existing job.
 pub fn update(job: &MediaJob) -> Result<()> {
     let _g = LOCK.lock().unwrap();
@@ -253,5 +272,34 @@ mod tests {
         assert!(j.is_terminal());
         j.status = STATUS_FAILED.into();
         assert!(j.is_terminal());
+    }
+
+    #[test]
+    fn pending_is_recent_and_unfinished() {
+        let job = |id: &str, status: &str, at: &str| MediaJob {
+            id: id.into(),
+            kind: "text2video".into(),
+            provider: "ltx".into(),
+            model: "ltx-2-3-fast".into(),
+            op: format!("op-{id}"),
+            status: status.into(),
+            asset_path: None,
+            error: None,
+            duration_seconds: 6,
+            created_at: at.into(),
+        };
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-22T03:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let got = pending_in(
+            vec![
+                job("a", STATUS_RUNNING, "2026-10-22T03:10:00+00:00"),
+                job("b", STATUS_DONE, "2026-10-22T03:10:00+00:00"),
+                job("c", STATUS_RUNNING, "2026-10-22T01:00:00+00:00"),
+                job("d", STATUS_RUNNING, "not a time"),
+            ],
+            since,
+        );
+        assert_eq!(got.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), ["a"]);
     }
 }

@@ -1,7 +1,7 @@
 ---
 name: summarizer
 description: Summarize text, files, or a webpage (URL) into a shorter faithful digest — key points, decisions, and takeaways — optionally in a target language, preserving useful structure (headings, lists)
-tools: Read, Write, Edit, Glob, Grep, WebFetch, WebScrape, PdfRead, DocxRead, PptxRead
+tools: Read, Write, Edit, Glob, Grep, WebFetch, WebScrape, PdfRead, DocxRead, PptxRead, XlsxRead, DocConvert
 permissionMode: auto
 maxTurns: 60
 color: yellow
@@ -36,7 +36,7 @@ The user pastes text or a snippet directly into the prompt. No filesystem reads 
 
 The user names a file path. The output file path may be implicit (append `-summary` + the language suffix before the extension: "`docs/report.md`" → `docs/report-summary.md`; with `--language=ja` → `docs/report-summary-ja.md`) or explicit (`output to docs/report-tldr.md`).
 
-1. **Read the source** with the appropriate tool (`Read` for `.md` / `.txt` / source code; other extractors if available for PDF/DOCX/etc.).
+1. **Read the source** with the appropriate tool: `Read` for `.md` / `.txt` / source code, `PdfRead` for `.pdf` (scans are OCR'd automatically), `DocxRead` / `PptxRead` / `XlsxRead` for `.docx` / `.pptx` / `.xlsx` / `.xls`. For `.doc` / `.ppt` / `.odt`, `DocConvert` it to docx / pptx first, then read the result. The summary of an office or PDF source is Markdown (`report.pdf` → `report-summary.md`).
 2. **Identify** the output language + length.
 3. **Summarize the content**, preserving:
    - The document's own structure where it aids scanning — keep section headings as a lightweight outline when the source is long and multi-section.

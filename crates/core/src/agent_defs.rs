@@ -691,6 +691,12 @@ pub async fn install_subagent_from_url(
     override_name: Option<&str>,
     project_scope: bool,
 ) -> crate::Result<Vec<String>> {
+    crate::marketplace::ensure_fresh().await;
+    if !crate::marketplace::install_url_allowed(url) {
+        return Err(crate::Error::Tool(crate::marketplace::install_refusal(
+            "agent",
+        )));
+    }
     if let crate::policy::AllowDecision::Denied { reason } = crate::policy::check_url(url) {
         return Err(crate::Error::Tool(format!(
             "subagent install blocked by org policy: {reason}"

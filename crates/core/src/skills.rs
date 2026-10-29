@@ -482,6 +482,16 @@ impl SkillStore {
                 self.skills.insert(skill.name.clone(), skill);
             }
         }
+        // dev-plan/70: only where the office apps are installed, so the model
+        // is never told about tools it doesn't have.
+        if !crate::office::apps::enabled(None).is_empty() {
+            if let Some(skill) = parse_builtin_skill(
+                "office-apps",
+                include_str!("default_prompts/skills/office-apps.md"),
+            ) {
+                self.skills.insert(skill.name.clone(), skill);
+            }
+        }
     }
 
     fn user_skill_dirs() -> Vec<PathBuf> {
@@ -668,6 +678,10 @@ pub async fn install_from_url(
     // URL must match allowed_hosts. Single guard covers both .zip and
     // git dispatch paths below. Open-core builds without a policy fall
     // through unchanged (AllowDecision::NoPolicy).
+    crate::marketplace::ensure_fresh().await;
+    if !crate::marketplace::install_url_allowed(url) {
+        return Err(Error::Tool(crate::marketplace::install_refusal("skill")));
+    }
     if let crate::policy::AllowDecision::Denied { reason } = crate::policy::check_url(url) {
         return Err(Error::Tool(format!(
             "skill install blocked by org policy: {reason}"
@@ -678,6 +692,60 @@ pub async fn install_from_url(
     } else {
         install_from_git(url, override_name, project_scope)
     }
+}
+
+/// `/skill update <name>`: install the current copy beside the old one, then
+/// swap, so a failed download or a bad archive leaves the installed skill as
+/// it was. Replaces one skill only — a bundle archive is refused.
+pub async fn update_from_url(url: &str, name: &str, project_scope: bool) -> Result<Vec<String>> {
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
+        return Err(Error::Tool(format!(
+            "'{name}' is not a skill name — /skill update takes the name of an installed marketplace skill"
+        )));
+    }
+    let root = target_root(project_scope)?;
+    let final_dir = root.join(name);
+    if !final_dir.join("SKILL.md").is_file() {
+        return Err(Error::Tool(format!(
+            "'{name}' is not installed at {} — use /skill install {name}",
+            root.display()
+        )));
+    }
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let fresh_name = format!(".thclaws-update-{tag}");
+    let fresh = root.join(&fresh_name);
+    let report = install_from_url(url, Some(&fresh_name), project_scope).await?;
+    if !fresh.join("SKILL.md").is_file() {
+        let _ = std::fs::remove_dir_all(&fresh);
+        return Err(Error::Tool(format!(
+            "{url} is not a single skill (no SKILL.md at its root) — update replaces one skill"
+        )));
+    }
+    swap_in(
+        &fresh,
+        &final_dir,
+        &root.join(format!(".thclaws-old-{tag}")),
+    )?;
+    let mut out: Vec<String> = report
+        .into_iter()
+        .filter(|l| !l.contains(&fresh_name))
+        .collect();
+    out.push(format!("updated skill '{name}'"));
+    Ok(out)
+}
+
+/// Put `fresh` where `installed` is, keeping `installed` intact if any step
+/// fails. `aside` is a free name on the same volume.
+fn swap_in(fresh: &Path, installed: &Path, aside: &Path) -> Result<()> {
+    std::fs::rename(installed, aside)
+        .map_err(|e| Error::Tool(format!("move {} aside: {e}", installed.display())))?;
+    if let Err(e) = std::fs::rename(fresh, installed) {
+        let _ = std::fs::rename(aside, installed);
+        let _ = std::fs::remove_dir_all(fresh);
+        return Err(Error::Tool(format!("move new copy into place: {e}")));
+    }
+    let _ = std::fs::remove_dir_all(aside);
+    Ok(())
 }
 
 /// Reject skills carrying executable scripts when the active org policy
@@ -868,12 +936,15 @@ pub(crate) async fn download_zip(url: &str) -> Result<Vec<u8>> {
     // marketplace fetch uses a similar 10s cap; zip installs may pull
     // larger payloads so we allow a touch more headroom.
     let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(crate::policy::allowlist::install_redirect_policy())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| Error::Tool(format!("http client: {e}")))?;
-    let resp = client
-        .get(url)
+    let mut req = client.get(url);
+    if let Some(token) = crate::marketplace::auth_token_for(url) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| Error::Tool(format!("download: {e}")))?;
@@ -1902,6 +1973,42 @@ impl Tool for SkillSearchTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn swap_in_replaces_and_keeps_the_old_copy_on_failure() {
+        let t = tempfile::tempdir().unwrap();
+        let installed = t.path().join("s");
+        let fresh = t.path().join(".fresh");
+        let aside = t.path().join(".old");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("SKILL.md"), "v1").unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("SKILL.md"), "v2").unwrap();
+        swap_in(&fresh, &installed, &aside).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(installed.join("SKILL.md")).unwrap(),
+            "v2"
+        );
+        assert!(!fresh.exists() && !aside.exists());
+
+        // The new copy is missing: the installed one must survive untouched.
+        assert!(swap_in(&fresh, &installed, &aside).is_err());
+        assert_eq!(
+            std::fs::read_to_string(installed.join("SKILL.md")).unwrap(),
+            "v2"
+        );
+        assert!(!aside.exists());
+    }
+
+    #[tokio::test]
+    async fn update_refuses_a_path_or_url_as_the_name() {
+        for bad in ["https://x/y.zip", "../etc", ".hidden", ""] {
+            let e = update_from_url("https://x/y.zip", bad, true)
+                .await
+                .unwrap_err();
+            assert!(e.to_string().contains("not a skill name"), "{bad}: {e}");
+        }
+    }
+
     use super::*;
     use tempfile::tempdir;
 

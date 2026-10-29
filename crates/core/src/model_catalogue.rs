@@ -369,8 +369,11 @@ impl Catalogue {
     /// portion. Subtract `cached_input_tokens` so uncached input pays
     /// `input_per_mtok`, cached portion pays `cached_input_per_mtok`,
     /// and newly-written cache tokens pay `cache_creation_per_mtok` on
-    /// top. Reasoning tokens (OpenAI o1) are billed separately at
-    /// `reasoning_per_mtok` when set; otherwise folded into completion.
+    /// top. Reasoning tokens are a part of `completion_tokens` on every
+    /// provider that reports them (OpenAI, DashScope/Qwen, DeepSeek, and
+    /// Gemini once its parser folds thoughts in): that part pays
+    /// `reasoning_per_mtok` when set, the output rate otherwise — never
+    /// both. Adding them on top priced thinking twice.
     pub fn compute_cost_usd(&self, model: &str, usage: &TokenUsage) -> Option<f64> {
         let entry = self.find_entry(model)?;
         if entry.tier_billed == Some(true) {
@@ -401,9 +404,13 @@ impl Catalogue {
             entry.cached_input_per_mtok.or(entry.input_per_mtok),
         );
         let cache_write = per_m(usage.cache_creation_tokens, entry.cache_creation_per_mtok);
-        let output = per_m(usage.completion_tokens, entry.output_per_mtok);
+        let reasoning_tokens = usage.reasoning_tokens.min(usage.completion_tokens);
+        let output = per_m(
+            usage.completion_tokens - reasoning_tokens,
+            entry.output_per_mtok,
+        );
         let reasoning = per_m(
-            usage.reasoning_tokens,
+            reasoning_tokens,
             entry.reasoning_per_mtok.or(entry.output_per_mtok),
         );
         let total = uncached + cached + cache_write + output + reasoning;
@@ -2015,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn cost_reasoning_tokens_billed_separately() {
+    fn cost_reasoning_tokens_are_part_of_completion() {
         let c = pricing_catalogue();
         let cost = c
             .compute_cost_usd(
@@ -2029,9 +2036,10 @@ mod tests {
                 },
             )
             .expect("priced");
-        // 1000 * 3.0/1M + 500 * 12.0/1M + 200 * 12.0/1M
-        // = 0.003 + 0.006 + 0.0024 = 0.0114
-        assert!((cost - 0.0114).abs() < 1e-9, "got {cost}");
+        // 200 of the 500 completion tokens are reasoning, priced once:
+        // 1000 * 3.0/1M + 300 * 12.0/1M + 200 * 12.0/1M
+        // = 0.003 + 0.0036 + 0.0024 = 0.009
+        assert!((cost - 0.009).abs() < 1e-9, "got {cost}");
     }
 
     #[test]

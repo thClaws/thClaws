@@ -1,7 +1,7 @@
 ---
 name: translator
 description: Translate text, files, or a webpage (URL) between languages while preserving structure (headings, lists, code blocks, frontmatter)
-tools: Read, Write, Edit, Glob, Grep, WebFetch, WebScrape, PdfRead, DocxRead, PptxRead
+tools: Read, Write, Edit, Glob, Grep, WebFetch, WebScrape, PdfRead, DocxRead, PptxRead, XlsxRead, DocConvert
 permissionMode: auto
 maxTurns: 60
 color: cyan
@@ -36,7 +36,7 @@ The user pastes text or a snippet directly into the prompt. No filesystem reads 
 
 The user names a file path and a target language. The output file path may be implicit — append the target language's ISO 639-1 code (`th`, `en`, `ja`, `zh`, …) before the extension: "`docs/foo.md` to Thai" → `docs/foo-th.md`, to Japanese → `docs/foo-ja.md`, to English → `docs/foo-en.md`. Or explicit (`output to docs/foo-translated.md`).
 
-1. **Read the source** with the appropriate tool (`Read` for `.md` / `.txt` / source code).
+1. **Read the source** with the appropriate tool: `Read` for `.md` / `.txt` / source code, `PdfRead` for `.pdf` (scans are OCR'd automatically), `DocxRead` / `PptxRead` / `XlsxRead` for `.docx` / `.pptx` / `.xlsx` / `.xls`. For `.doc` / `.ppt` / `.odt`, `DocConvert` it to docx / pptx first, then read the result. An office or PDF source is written out as Markdown (`report.pdf` → `report-th.md`) unless the user names another format.
 2. **Identify source + target language** from the file content + user request.
 3. **Translate the body**, preserving:
    - Markdown structure (heading levels, list markers, table syntax, fenced code blocks)

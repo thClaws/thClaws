@@ -681,16 +681,21 @@ pub fn parse_sse_event(raw: &str, state: &mut ParseState) -> Result<Vec<Provider
             let cached = u.get("cachedContentTokenCount").and_then(Value::as_u64);
             let cached_count = cached.unwrap_or(0);
             let uncached_input = total_input.saturating_sub(cached_count);
+            // 2.5+/3 thinking: `thoughtsTokenCount` is NOT inside
+            // candidatesTokenCount and Google bills it as output. Fold it in
+            // (the gateway does the same) and report it as reasoning, so
+            // `out` matches the bill and the thinking part shows.
+            let candidates = u
+                .get("candidatesTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let thoughts = u.get("thoughtsTokenCount").and_then(Value::as_u64);
             Usage {
                 input_tokens: uncached_input as u32,
-                output_tokens: u
-                    .get("candidatesTokenCount")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as u32,
+                output_tokens: (candidates + thoughts.unwrap_or(0)) as u32,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: cached.map(|v| v as u32),
-                // Gemini doesn't surface reasoning-token counts.
-                reasoning_output_tokens: None,
+                reasoning_output_tokens: thoughts.map(|v| v as u32),
             }
         });
         out.push(ProviderEvent::MessageStop {
@@ -1009,6 +1014,24 @@ mod tests {
         assert_eq!(stop.output_tokens, 200);
         assert_eq!(stop.cache_read_input_tokens, Some(4500));
         assert_eq!(stop.cache_creation_input_tokens, None);
+    }
+
+    /// Thinking models bill `thoughtsTokenCount` as output on top of
+    /// candidatesTokenCount; the footer used to drop it (out 20, bill 320).
+    #[test]
+    fn parse_folds_thoughts_into_output_as_reasoning() {
+        let events = parse_all(&[
+            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":20,\"thoughtsTokenCount\":300,\"totalTokenCount\":420},\"modelVersion\":\"gemini-2.5-flash\"}",
+        ]);
+        let stop = events
+            .iter()
+            .find_map(|e| match e {
+                ProviderEvent::MessageStop { usage: Some(u), .. } => Some(u),
+                _ => None,
+            })
+            .expect("MessageStop with usage");
+        assert_eq!(stop.output_tokens, 320);
+        assert_eq!(stop.reasoning_output_tokens, Some(300));
     }
 
     #[test]

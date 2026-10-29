@@ -1495,22 +1495,37 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// The cache part of a `[tokens: …]` line, or nothing.
-    ///
-    /// It used to be printed only when a provider reported BOTH cache writes
-    /// and cache reads, which is Anthropic alone. OpenAI-compatible
-    /// providers (DeepSeek, OpenAI, Qwen) report reads only — and since
-    /// `input_tokens` is what was NOT served from cache, a long conversation
-    /// on one of them showed a falling `in` count and no sign of why.
-    pub fn cache_note(&self) -> String {
-        let w = self.cache_creation_input_tokens.unwrap_or(0);
+    /// Every prompt token the provider read: uncached + cache reads + cache
+    /// writes. `input_tokens` holds the uncached part only (Anthropic's
+    /// convention), but the gateway, the provider bill and the web Usage
+    /// page all call the whole prompt "input" — showing the uncached part
+    /// as `in` made one turn read 16k here and 32k there.
+    pub fn prompt_tokens(&self) -> u64 {
+        self.input_tokens as u64
+            + self.cache_read_input_tokens.unwrap_or(0) as u64
+            + self.cache_creation_input_tokens.unwrap_or(0) as u64
+    }
+
+    /// The `Nin/Nout` part of a `[tokens: …]` line, each side broken down
+    /// by type: `in` includes cache, `out` includes thinking.
+    pub fn tokens_note(&self) -> String {
         let r = self.cache_read_input_tokens.unwrap_or(0);
-        match (w, r) {
+        let w = self.cache_creation_input_tokens.unwrap_or(0);
+        let cache = match (r, w) {
             (0, 0) => String::new(),
-            (0, r) => format!(" · cache: {r}r"),
-            (w, 0) => format!(" · cache: +{w}w"),
-            (w, r) => format!(" · cache: +{w}w/{r}r"),
-        }
+            (r, 0) => format!(" ({r} cached)"),
+            (0, w) => format!(" ({w} cache-write)"),
+            (r, w) => format!(" ({r} cached, {w} cache-write)"),
+        };
+        let thinking = match self.reasoning_output_tokens.unwrap_or(0) {
+            0 => String::new(),
+            t => format!(" ({t} thinking)"),
+        };
+        format!(
+            "{}in{cache}/{}out{thinking}",
+            self.prompt_tokens(),
+            self.output_tokens
+        )
     }
 }
 
@@ -3045,10 +3060,10 @@ mod tests {
         // A router, not local inference: masking and the org-policy gateway
         // must keep treating its traffic as leaving the host.
         assert!(!ProviderKind::LiteLlm.is_local());
+        // The EE Pack's gateway relays to the box's LiteLLM (dev-plan/73).
         assert_eq!(
             crate::providers::thclaws_gateway::provider_segment(ProviderKind::LiteLlm),
-            None,
-            "self-hosted — never metered through the thClaws gateway"
+            Some("litellm")
         );
     }
 
@@ -3716,21 +3731,32 @@ pub(crate) fn http_client() -> reqwest::Client {
 #[cfg(test)]
 mod http_client_tests {
     #[test]
-    fn the_usage_line_shows_cache_reads_on_their_own() {
+    fn the_usage_line_counts_cache_in_input_and_breaks_it_down() {
         use super::Usage;
-        let u = |w: Option<u32>, r: Option<u32>| Usage {
+        let u = |input: u32, w: Option<u32>, r: Option<u32>, t: Option<u32>| Usage {
+            input_tokens: input,
+            output_tokens: 78,
             cache_creation_input_tokens: w,
             cache_read_input_tokens: r,
-            ..Usage::default()
+            reasoning_output_tokens: t,
         };
-        assert_eq!(u(None, None).cache_note(), "");
-        assert_eq!(u(Some(0), Some(0)).cache_note(), "");
-        // DeepSeek / OpenAI: reads only. This printed nothing.
-        assert_eq!(u(None, Some(48_000)).cache_note(), " · cache: 48000r");
-        assert_eq!(u(Some(900), None).cache_note(), " · cache: +900w");
+        assert_eq!(u(500, None, None, None).tokens_note(), "500in/78out");
         assert_eq!(
-            u(Some(900), Some(48_000)).cache_note(),
-            " · cache: +900w/48000r"
+            u(500, Some(0), Some(0), Some(0)).tokens_note(),
+            "500in/78out"
+        );
+        // DeepSeek / OpenAI / Qwen: reads only; `in` is the whole prompt.
+        assert_eq!(
+            u(16_251, None, Some(16_128), None).tokens_note(),
+            "32379in (16128 cached)/78out"
+        );
+        assert_eq!(
+            u(21, Some(900), None, None).tokens_note(),
+            "921in (900 cache-write)/78out"
+        );
+        assert_eq!(
+            u(21, Some(900), Some(48_000), Some(60)).tokens_note(),
+            "48921in (48000 cached, 900 cache-write)/78out (60 thinking)"
         );
     }
 

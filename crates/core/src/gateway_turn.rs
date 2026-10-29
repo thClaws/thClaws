@@ -10,10 +10,46 @@
 //! the parent's turn) reuse it. The header goes only to the thClaws gateway,
 //! never to a third-party endpoint; outside a turn each request gets a fresh
 //! id.
+//!
+//! `X-Thclaws-Session` names the chat session the call belongs to, so the
+//! gateway can total a session the way the chat footer does. A multiuser
+//! worker runs several sessions at once and scopes each turn
+//! ([`scope_session`]); everywhere else the surface sets the process-wide
+//! one before a turn ([`set_session`]).
 
 use std::sync::Mutex;
 
 pub const TURN_HEADER: &str = "X-Thclaws-Turn";
+pub const SESSION_HEADER: &str = "X-Thclaws-Session";
+
+tokio::task_local! {
+    static SESSION: String;
+}
+
+static LAST_SESSION: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_session(id: &str) {
+    *LAST_SESSION.lock().unwrap_or_else(|p| p.into_inner()) = Some(id.to_string());
+}
+
+pub async fn scope_session<F: std::future::Future>(id: String, fut: F) -> F::Output {
+    SESSION.scope(id, fut).await
+}
+
+/// The session the current call belongs to. A multiuser worker never falls
+/// back to the process-wide id: that one may be another user's session.
+pub fn current_session() -> Option<String> {
+    SESSION.try_with(|s| s.clone()).ok().or_else(|| {
+        if crate::workdir::is_multiuser() {
+            None
+        } else {
+            LAST_SESSION
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    })
+}
 
 struct Active {
     id: Option<String>,
@@ -66,8 +102,8 @@ fn same_origin(url: &reqwest::Url, base: &str) -> bool {
         && url.port_or_known_default() == base.port_or_known_default()
 }
 
-/// Add `X-Thclaws-Turn` and `X-Thclaws-Client` when the request goes to the
-/// thClaws gateway.
+/// Add `X-Thclaws-Turn`, `X-Thclaws-Session` and `X-Thclaws-Client` when the
+/// request goes to the thClaws gateway.
 /// Called from `multi_tenant::attach_member`, the helper every gateway-capable
 /// HTTP site already uses.
 pub fn tag(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -78,6 +114,11 @@ pub fn tag(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
                 let id = current().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 if let Ok(v) = reqwest::header::HeaderValue::from_str(&id) {
                     req.headers_mut().insert(TURN_HEADER, v);
+                }
+                if let Some(v) =
+                    current_session().and_then(|s| reqwest::header::HeaderValue::from_str(&s).ok())
+                {
+                    req.headers_mut().insert(SESSION_HEADER, v);
                 }
                 crate::desktop_update::insert_client_header(req.headers_mut());
             }
@@ -171,5 +212,14 @@ mod tests {
         assert!(!native.build().unwrap().headers().contains_key(client_hdr));
         // A builder that already failed stays failed.
         assert!(tag(client.get("not a url")).build().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_scoped_session_wins_over_the_process_wide_one() {
+        set_session("sess-process");
+        assert_eq!(current_session().as_deref(), Some("sess-process"));
+        let inner = scope_session("sess-scoped".into(), async { current_session() }).await;
+        assert_eq!(inner.as_deref(), Some("sess-scoped"));
+        assert_eq!(current_session().as_deref(), Some("sess-process"));
     }
 }

@@ -111,6 +111,20 @@ pub struct Policies {
     /// Phase 8 — what the agent and the binary may do on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimePolicy>,
+    /// Phase 6 — installs come only from the org's private marketplace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marketplace: Option<MarketplacePolicy>,
+}
+
+/// Skills, plugins, subagents and MCP servers install only by name from
+/// the catalogue at `url` (the engine's marketplace.json schema), never
+/// from a URL or a path. Unreachable catalogue = nothing installable.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MarketplacePolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub url: String,
 }
 
 /// Phase 8 — the block that says *no*.
@@ -216,11 +230,12 @@ pub struct PluginsPolicy {
     /// air-gapped deployments.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
-    /// Reject skills that ship executable `scripts/` dirs.
-    /// `false` (default) → declarative-only skills only.
+    /// `false` rejects skills that ship executable `scripts/` dirs.
+    /// Defaults to `true`; set it explicitly to lock scripts out.
     #[serde(default = "default_true")]
     pub allow_external_scripts: bool,
-    /// Reject MCP servers whose endpoint isn't in `allowed_hosts`.
+    /// `false` refuses stdio MCP servers and HTTP ones whose endpoint
+    /// isn't in `allowed_hosts`. Defaults to `true` (no MCP restriction).
     #[serde(default = "default_true")]
     pub allow_external_mcp: bool,
 }
@@ -453,7 +468,73 @@ pub fn denied_tools() -> Vec<String> {
 
 /// Whether a given tool may run at all under the active policy.
 pub fn tool_allowed(name: &str) -> bool {
-    !denied_tools().iter().any(|d| d.eq_ignore_ascii_case(name))
+    tool_allowed_in(&denied_tools(), name)
+}
+
+pub fn tool_allowed_in(denied: &[String], name: &str) -> bool {
+    !denied.iter().any(|d| d.eq_ignore_ascii_case(name))
+}
+
+/// Error text for a tool the org denies, shared by every dispatch path.
+pub fn tool_denied_message(name: &str) -> String {
+    format!("tool '{name}' is disabled by your organisation's policy")
+}
+
+use crate::permissions::PermissionMode;
+
+fn mode_rank(m: PermissionMode) -> u8 {
+    match m {
+        PermissionMode::Auto => 0,
+        PermissionMode::Plan => 2,
+        _ => 1,
+    }
+}
+
+fn mode_from_forced(f: &str) -> Option<PermissionMode> {
+    match f {
+        "auto" => Some(PermissionMode::Auto),
+        "ask" => Some(PermissionMode::Ask),
+        "plan" => Some(PermissionMode::Plan),
+        _ => None,
+    }
+}
+
+/// Never let the live mode be looser than the org-forced one. Stricter is
+/// kept (plan mode while `ask` is forced; channel-gated asks).
+pub fn clamp_mode_to(forced: Option<&str>, m: PermissionMode) -> PermissionMode {
+    match forced.and_then(mode_from_forced) {
+        Some(f) if mode_rank(m) < mode_rank(f) => f,
+        _ => m,
+    }
+}
+
+/// `clamp_mode_to` against the active policy. Multiuser keeps its own
+/// forced Auto: approvals can't be routed to one member there.
+pub fn clamp_permission_mode(m: PermissionMode) -> PermissionMode {
+    if crate::workdir::is_multiuser() {
+        return m;
+    }
+    clamp_mode_to(forced_permission_mode().as_deref(), m)
+}
+
+/// Refusal for a user-initiated mode switch (`/permissions`, a shell's
+/// mode selector) that would leave the org-forced mode.
+pub fn permission_mode_refusal_for(
+    forced: Option<&str>,
+    requested: PermissionMode,
+) -> Option<String> {
+    let f = forced?;
+    let fm = mode_from_forced(f)?;
+    if mode_rank(requested) == mode_rank(fm) {
+        return None;
+    }
+    Some(format!(
+        "Permission mode is set by your organisation ('{f}') and can't be changed."
+    ))
+}
+
+pub fn permission_mode_refusal(requested: PermissionMode) -> Option<String> {
+    permission_mode_refusal_for(forced_permission_mode().as_deref(), requested)
 }
 
 /// Whether thClaws Remote may connect.
@@ -492,6 +573,81 @@ pub fn external_mcp_disallowed() -> bool {
         .and_then(|a| a.policy.policies.plugins.as_ref())
         .map(|p| p.enabled && !p.allow_external_mcp)
         .unwrap_or(false)
+}
+
+/// Env pair a hosted runner gets from its provisioner. It can only
+/// tighten: an open-core user who sets it locks only themselves.
+pub const ENV_INSTALL_SOURCE: &str = "THCLAWS_INSTALL_SOURCE";
+pub const ENV_MARKETPLACE_URL: &str = "THCLAWS_MARKETPLACE_URL";
+
+/// `Some(catalogue url)` when installs are restricted to a private
+/// marketplace — from the signed policy, else from the runner env. An
+/// empty url still locks (nothing installable) rather than falling open.
+pub fn marketplace_only_url() -> Option<String> {
+    if let Some(m) = active()
+        .and_then(|a| a.policy.policies.marketplace.as_ref())
+        .filter(|m| m.enabled)
+    {
+        return Some(m.url.trim().to_string());
+    }
+    marketplace_only_from_env(
+        std::env::var(ENV_INSTALL_SOURCE).ok().as_deref(),
+        std::env::var(ENV_MARKETPLACE_URL).ok().as_deref(),
+    )
+}
+
+pub fn marketplace_only_from_env(source: Option<&str>, url: Option<&str>) -> Option<String> {
+    source
+        .filter(|s| s.trim().eq_ignore_ascii_case("marketplace"))
+        .map(|_| url.unwrap_or("").trim().to_string())
+}
+
+/// Why the active policy refuses this MCP server, or `None` when it may
+/// run. Checked where a server is saved and again where it is started,
+/// so `/mcp add`, marketplace installs, plugin-contributed servers and
+/// hand-edited mcp.json all meet the same rule.
+pub fn mcp_server_refusal(cfg: &crate::mcp::McpServerConfig) -> Option<String> {
+    if let Some(reason) = active().and_then(|a| mcp_server_refusal_with(cfg, &a.policy)) {
+        return Some(reason);
+    }
+    if marketplace_only_url().is_some()
+        && !cfg.engine_managed
+        && !crate::marketplace::mcp_server_listed(cfg)
+    {
+        return Some(format!(
+            "mcp '{}' blocked: only MCP servers from your organisation's marketplace may run",
+            cfg.name
+        ));
+    }
+    None
+}
+
+/// With `allow_external_mcp: false`, an HTTP server must match
+/// `allowed_hosts` and a stdio server is refused outright: its command
+/// typically fetches a package from npm or PyPI, which no host rule can
+/// see. Engine-managed servers are the engine's own choice, not an
+/// install, and pass.
+pub fn mcp_server_refusal_with(
+    cfg: &crate::mcp::McpServerConfig,
+    policy: &Policy,
+) -> Option<String> {
+    let plugins = policy.policies.plugins.as_ref()?;
+    if !plugins.enabled || plugins.allow_external_mcp || cfg.engine_managed {
+        return None;
+    }
+    if cfg.transport == "http" {
+        return match allowlist::check_url_with(&cfg.url, policy) {
+            AllowDecision::Denied { reason } => Some(format!(
+                "mcp '{}' blocked by org policy: {reason}",
+                cfg.name
+            )),
+            _ => None,
+        };
+    }
+    Some(format!(
+        "mcp '{}' blocked by org policy: stdio MCP servers are disabled (allow_external_mcp: false)",
+        cfg.name
+    ))
 }
 
 /// Startup entry point. Call once, before `AppConfig::load()`. On
@@ -862,6 +1018,53 @@ fn fingerprint_matches(expected: &str, actual: &str) -> bool {
     let exp_inner = expected.strip_prefix("sha256:").unwrap_or(expected);
     let act_inner = actual.strip_prefix("sha256:").unwrap_or(actual);
     !exp_inner.is_empty() && act_inner.starts_with(exp_inner)
+}
+
+#[cfg(test)]
+mod permission_pin_tests {
+    use super::*;
+
+    /// H4: an org-pinned mode can't be switched by a user setter, and the
+    /// live mode never ends up looser than the pin.
+    #[test]
+    fn pinned_permission_mode_not_changeable() {
+        let ask = Some("ask");
+        assert!(permission_mode_refusal_for(ask, PermissionMode::Auto).is_some());
+        assert!(permission_mode_refusal_for(ask, PermissionMode::Ask).is_none());
+        assert!(permission_mode_refusal_for(ask, PermissionMode::LineGated).is_none());
+        assert!(permission_mode_refusal_for(Some("auto"), PermissionMode::Ask).is_some());
+        assert!(permission_mode_refusal_for(None, PermissionMode::Auto).is_none());
+        let msg = permission_mode_refusal_for(ask, PermissionMode::Auto).unwrap();
+        assert!(msg.contains("organisation"), "{msg}");
+
+        assert_eq!(
+            clamp_mode_to(ask, PermissionMode::Auto),
+            PermissionMode::Ask
+        );
+        assert_eq!(
+            clamp_mode_to(ask, PermissionMode::Plan),
+            PermissionMode::Plan
+        );
+        assert_eq!(
+            clamp_mode_to(Some("plan"), PermissionMode::Ask),
+            PermissionMode::Plan
+        );
+        assert_eq!(
+            clamp_mode_to(None, PermissionMode::Auto),
+            PermissionMode::Auto
+        );
+        assert_eq!(
+            clamp_mode_to(Some("auto"), PermissionMode::Ask),
+            PermissionMode::Ask
+        );
+    }
+
+    #[test]
+    fn tool_allowed_in_is_case_insensitive() {
+        let denied = vec!["Bash".to_string()];
+        assert!(!tool_allowed_in(&denied, "bash"));
+        assert!(tool_allowed_in(&denied, "Read"));
+    }
 }
 
 #[cfg(test)]
@@ -1309,6 +1512,7 @@ mod tests {
                 sso: None,
                 audit: None,
                 runtime: None,
+                marketplace: None,
             },
             signature: Some("sig".into()),
         };
@@ -1320,6 +1524,42 @@ mod tests {
             parsed.policies.plugins.as_ref().unwrap().allowed_hosts,
             vec!["github.com/acme/*"]
         );
+    }
+}
+
+#[cfg(test)]
+mod marketplace_only_tests {
+    use super::*;
+
+    #[test]
+    fn env_locks_only_when_it_says_marketplace() {
+        assert_eq!(
+            marketplace_only_from_env(
+                Some("marketplace"),
+                Some(" https://t/api/marketplace.json ")
+            ),
+            Some("https://t/api/marketplace.json".into())
+        );
+        assert_eq!(
+            marketplace_only_from_env(Some("Marketplace"), None),
+            Some(String::new())
+        );
+        assert_eq!(
+            marketplace_only_from_env(Some("open"), Some("https://t")),
+            None
+        );
+        assert_eq!(marketplace_only_from_env(None, Some("https://t")), None);
+    }
+
+    #[test]
+    fn policy_block_parses() {
+        let p: Policies = serde_json::from_str(
+            r#"{"marketplace":{"enabled":true,"url":"https://sis.thclaws.ai/api/marketplace.json"}}"#,
+        )
+        .unwrap();
+        let m = p.marketplace.unwrap();
+        assert!(m.enabled);
+        assert_eq!(m.url, "https://sis.thclaws.ai/api/marketplace.json");
     }
 }
 

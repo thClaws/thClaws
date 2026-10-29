@@ -27,10 +27,11 @@ Trigger when the user combines an **input artifact** with an **explicit save-to-
 3. **Identify what to extract.** Often obvious from the request ("line items", "names and emails", "key dates"). When not, ask: "Which fields do you want me to capture?" — fewer round-trips than guessing wrong.
 4. **Read the source** with the right tool:
    - Images (JPG / PNG / HEIC / WebP / GIF): `Read` — the model sees the pixels, vision-driven OCR
-   - PDF: `PdfRead` (text-extraction; if the PDF is a scanned image, use `Read` instead)
+   - PDF: `PdfRead` (text-extraction; scanned pages are OCR'd automatically — `ocr: "auto"`, the default — and `ocr: "vision"` forces the model to read the rendered pages)
    - DOCX: `DocxRead`
    - PPTX: `PptxRead`
-   - XLSX: `XlsxRead`
+   - XLSX / XLS / ODS: `XlsxRead`
+   - Old or OpenDocument files (.doc / .ppt / .odt / .odp): `DocConvert` to docx / pptx first, then read the result
    - Markdown / plain text / source code: `Read`
 5. **Extract structured fields.** Skip blanks rather than inventing values. Preserve original-script text for multilingual content (e.g. capture both English and Thai names).
 6. **Confirm before writing.** Show the user a preview of what you extracted as a markdown bullet list (or table for tabular data). One round-trip beats silent corruption — names, phone digits, monetary amounts, and dates are the most-likely-to-misread fields.
@@ -49,7 +50,8 @@ Trigger when the user combines an **input artifact** with an **explicit save-to-
 |---|---|---|
 | Read an image (jpg / png / heic / webp) | `Read` | Vision-driven OCR; works on photos, screenshots, dual-language cards |
 | Read a PDF (text-based) | `PdfRead` | Returns selectable text + structure |
-| Read a PDF (scanned / image-based) | `Read` | Falls back to vision OCR on the rendered pages |
+| Read a PDF (scanned / image-based) | `PdfRead` (`ocr: "auto"` default, or `ocr: "vision"`) | OCR first; low-confidence pages go to vision on the rendered pages |
+| Read .doc / .ppt / .odt | `DocConvert` then `DocxRead` / `PptxRead` | Converts on the document service; nothing to install |
 | Read DOCX / PPTX / XLSX | `DocxRead` / `PptxRead` / `XlsxRead` | Native Office format readers |
 | Create new XLSX with header | `XlsxCreate` | Specify columns + first row |
 | Append rows to existing XLSX | `XlsxEdit` | Insert at last-row + 1 |
@@ -125,6 +127,6 @@ User: "Extract the line items from this invoice as JSON for our pipeline"
 - **Numbers are the highest-risk field.** Phone digits, monetary amounts, dates, IDs. Confirm visually with the user before writing — silent off-by-one in a phone number means an unreachable contact; silent off-by-one in an amount means a wrong expense report.
 - **Multilingual content**: capture both scripts when present (e.g. Thai + Latin names on a Thai namecard). Use a separate column / field for the non-default script — it's searchable later.
 - **Low-resolution or partial inputs**: name what you couldn't read so the user can fill it in manually. Better to fail visibly than to invent plausible-looking nonsense.
-- **Tables in PDFs**: when `PdfRead` returns garbled column alignment, fall back to `Read` (vision-OCR the rendered page) and reconstruct the table cell-by-cell. Slower but more accurate.
+- **Tables in PDFs**: when `PdfRead` returns garbled column alignment, re-run `PdfRead` with `ocr: "vision"` on that page (the model reads the rendered page) and reconstruct the table cell-by-cell. Slower but more accurate.
 - **Existing-file detection**: before `XlsxCreate` / `DocxCreate`, check whether the target file already exists. If it does, confirm with the user — overwriting an existing expense report by accident is the bug we want to avoid.
 - **Empty fields**: leave them blank. Don't fill with `"N/A"` / `"—"` / `null`-as-text — those clutter the output and confuse downstream filters.

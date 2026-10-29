@@ -50,8 +50,8 @@
       output.textContent = ""; output.classList.add("live");
       try { await window.thclaws.run(prompt); } catch (e) { output.textContent = String(e); }
     });
-    window.thclaws.on("text", ({ delta }) => { output.textContent += delta; });
-    window.thclaws.on("error", ({ message }) => { output.textContent = `error: ${message}`; });
+    window.thclaws.on("text", (delta) => { output.textContent += delta; });
+    window.thclaws.on("error", ({ error: message }) => { output.textContent = `error: ${message}`; });
   </script>
 </body>
 </html>

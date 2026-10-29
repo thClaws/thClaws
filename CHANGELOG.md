@@ -7,8 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.147.0] — 2026-10-29
+
+**A security release.** An outside review before the thClaws Enterprise launch found ways for a cloned project, a web page or an agent-built UI tab to reach further than it should. This release closes them. Some defaults are stricter, so read *Changed* if you use project `.env` files, the local `/v1` API or `--serve` on a network.
+
+### Security
+
+- **Opening a project no longer runs anything from it.** Project hooks, loosened permission or sandbox settings, `remoteAgentUrl`, and endpoint or tool-path variables in a project `.env` (for example `XDG_*`, `*_BASE_URL`, `CLAUDE_BIN`) apply only in a folder you trust. Until a trust prompt ships, trust a folder by starting thClaws with `THCLAWS_TRUST_PROJECT=1`.
+- **Sandboxed shell commands stay sandboxed.** Bash can't write to `.thclaws/`, and whether confinement works is checked once at start-up instead of read from a command's own output. Multi-user workspaces never run commands unconfined, and the local server's tokens are no longer passed to commands, MCP servers or hooks.
+- **The local `/v1` API (port 18443) always needs its token** and checks the Host and Origin headers. The token is in `~/.config/thclaws/loopback.json`. Deploy and restart are no longer served there.
+- **Web pages can't drive a local `--serve`.** It checks Host and Origin, and a request without an origin (`Origin: null`) can only read: no WebSocket, no writes.
+- **Agent-built UI tabs are isolated.** On `--serve` and the cloud they run in a sandboxed frame without access to the app. A tab can't choose which message type it sends, speak for another tab, or approve its own tool calls.
+- **Web fetches check every redirect and every DNS answer.** WebFetch, image fetching and KMS web ingest refuse to be redirected or resolved into private and metadata addresses.
+- **KMS page names can't leave the knowledge base** (`../` is refused), and the KMS viewer sanitizes the HTML it shows.
+- **Enterprise policy:** `deny_tools` now also covers UI tabs, the Agent SDK tool bridge, MCP widgets and `!` shell commands, and a pinned permission mode can't be changed.
+
+### Changed
+
+- **A project `.env` in a folder you haven't trusted sets only API keys and tokens** (names ending in `_API_KEY`, `_KEY`, `_TOKEN` or `_SECRET`). Other values in it — model names, regions, endpoints — are ignored with a warning. Put them in settings, your user-level `.env`, or trust the folder.
+- **`--serve` refuses to listen on a network address without `THCLAWS_SERVE_TOKEN`.** Loopback is unaffected; hosted runners and setups behind an authenticating proxy (`THCLAWS_SERVE_BEHIND_PROXY=1`) are exempt.
+- **Clients of the local `/v1` API must send the bearer token** from `loopback.json`.
+- **KmsDelete points at `/kms drop`** for deleting a whole knowledge base, instead of the agent removing folders by hand.
+- **On an AI Server box, the agent uses the internet only when you ask**, never to work around a failing local tool.
+- **Web scraping errors say what happened.** A page that doesn't exist or a site the scraper can't reach is reported as such, so the agent stops retrying it.
+
 ### Added
-- **Requesty: a new BYOK provider with an OpenAI-compatible API.** Models use the `requesty/<id>` prefix and the key is read from `REQUESTY_API_KEY`.
+
+- **Enterprise:** organization RAG is available to cloud workspaces through the gateway, and LiteLLM (the AI Server hub's model router) works as a provider behind the gateway. The engine image also builds on arm64.
+
+## [0.146.0] — 2026-10-25
+
+**On an AI Server box, nothing goes to the thClaws cloud unless the box allows it.** 0.145 kept documents and recordings on the box; 0.146 closes the rest and gives the box's hub an on/off switch.
+
+### Added
+
+- **A cloud switch the AI Server hub controls.** The hub turns cloud use on or off by writing `{"allowCloud": true|false}` to `~/.config/thclaws/aiserver.json`; it takes effect on the next tool call, with no restart. `GET /api/egress` reports what is being enforced (and whether a thClaws Cloud login exists, never the key), so the hub can show it. `THCLAWS_ALLOW_CLOUD=1` or `=0` still pins it.
+
+### Fixed
+
+- **Searches, media and scripts no longer leave an AI Server box through a cloud login.** WebSearch (Tavily/Brave), YouTube transcripts and web scraping, image/video/speech generation, and the gateway key handed to scripts all used the thClaws gateway whenever a cloud login was present. On a box they are now off by default; web search falls back to DuckDuckGo. Desktop, thClaws.cloud and Enterprise installs are unchanged.
+
+## [0.145.0] — 2026-10-25
+
+**thClaws on an AI Server box keeps your data on the box.** On a DGX Spark or Station running AI Server, documents and recordings are processed by the box's own services and are never sent to the cloud, and the box's RAG engine is available to the agent with no setup.
+
+### Added
+
+- **AI Server services are found automatically.** thClaws reads the box's discovery document for its document service, speech recognition, RAG engine and studios, and uses the ones that are running.
+- **The box's RAG engine is ready to use.** When AI Server's RAG engine is running, the agent can search and read the documents in your namespaces through it (`search_knowledge`, `read_document`, `list_sources`).
+- **WatchVideo accepts audio-only files.** A phone recording of a meeting (mp3, m4a, wav) returns its transcript instead of failing.
+
+### Fixed
+
+- **Documents and audio stay on an AI Server box.** File conversion, OCR, previews and WatchVideo transcription used to fall back to the thClaws cloud whenever a cloud login was present. On a box they now use its local services, and otherwise stop with an explanation (`THCLAWS_ALLOW_CLOUD_RENDER=1` / `THCLAWS_ALLOW_CLOUD_ASR=1` opt back in).
+- **KMS search in downloaded builds.** Release builds now include the BM25 search index (with Thai matching) that other builds already had; `KmsSearch` no longer falls back to a plain pattern search.
+- **AI buttons in agent-built UI tabs work.** The custom-tab event payloads are now documented and the starter templates read them correctly, so a tab's "ask AI" button shows the answer instead of nothing.
+
+### Changed
+
+- **Clearer note for gateway-routed `auto` models.** When AI Server chooses the model, the message explains why your thinking level is not sent and how to pin a model.
+
+## [0.144.0] — 2026-10-23
+
+**Craft and edit Office documents through the agent, with Thai text handled properly.** Word, Excel and PowerPoint apps now run as engine-managed tools, the agent replies in your language for the whole conversation, and Files previews render Office documents as PDFs instead of dropping tables and charts.
+
+### Added
+
+- **Office documents over MCP.** GridCraft, WordCraft and DeckCraft run as engine-managed servers so spreadsheets, documents and decks can be created and edited, with a Thai fixup applied on save.
+- **Office-apps skill.** One kind of digit per file, no made-up names or numbers, explicit column widths with right-aligned number headers, and single-page-wide printing.
+- **Stable OpenCode sessions.** The OpenCode integration sends a consistent `x-opencode-session` to stop 400 `MissingSessionID` errors ([#228](https://github.com/thClaws/thClaws/issues/228)).
+
+### Fixed
+
+- **Thai DOCX tables and line breaks.** Cell margins are added so tone marks and upper vowels clear the borders, and Thai runs are tagged `th-TH` complex script so Word for Mac breaks lines at words.
+- **PDF exports carry document fixes.** A file saved in Word or Deck is reloaded before export so the PDF includes the corrections.
+- **The Thai fixup runs only on real edits.** Tools that merely open or read a file no longer trigger the fixup.
+- **Replies stay in your language.** The system prompt keeps the model answering in the user's language for the whole conversation ([#227](https://github.com/thClaws/thClaws/issues/227)).
+
+### Changed
+
+- **Files preview renders Office documents as PDFs.** `.docx` and `.xlsx` previews are rendered like `.pptx` rather than extracted as text, so Word tables and charts are kept.
+
+## [0.143.0] — 2026-10-22
+
+**Office documents, honest usage numbers, and a tidier model catalogue.** DocConvert and PdfRead now work in hosted workspaces with OCR proofreading, usage books side calls and stopped turns against a single token definition, and models Alibaba no longer serves are hidden.
+
+### Added
+
+- **Office documents in hosted workspaces.** DocConvert and PdfRead run through the document service with automatic OCR — the model proofreads tesseract against every page image — plus xlsx/read fixes.
+
+### Fixed
+
+- **Thai DOCX documents render correctly.** Sarabun sits at the Latin size, headings use real heading styles, and bullets render instead of dropping.
+- **XlsxEdit writes formulas.** A value starting with `=` is stored as a formula rather than literal text.
+- **PPTX preview and PDF glyphs.** PPTX preview works under a workspace host, and PdfCreate substitutes symbols its fonts lack.
+- **Private marketplace listings stay current.** The private catalogue is refetched before install-by-name and listings, so the organisation's latest entries are offered.
+- **Publishing to the web reports progress.** The files tool now says publishing is running and where the link will land.
+
+### Changed
+
+- **Usage accounting unified.** Side calls, stopped turns and per-session cost are booked, and every place shares one token definition so session and totals views agree.
+- **Model catalogue and pricing refreshed.** Models Alibaba no longer serves, realtime-only rows and unpriced entries are hidden; DashScope's qwen-vl-ocr joins the catalogue; and implicit-cache hits are priced at the provider's bill rates.
+
+## [0.142.0] — 2026-10-20
+
+**`--serve` fixes and tighter Enterprise install controls.** Messages typed while the agent works are no longer stranded, pasted images work in the browser, Browse picks a working folder, and an org policy can now lock out local MCP servers.
+
+### Added
+
+- **Enterprise: private marketplace.** With `policies.marketplace` (EE desktops) or `THCLAWS_INSTALL_SOURCE=marketplace` (hosted workspaces), skills, plugins, subagents and MCP servers install only by name from the organisation's own catalogue; URL, path and `/mcp add` installs are refused, and an unreachable catalogue offers nothing. The catalogue and its downloads carry the cloud sign-in token, sent only to the marketplace's own host.
+
+### Fixed
+
+- **Messages typed during a turn are always answered.** A message sent while the agent was working stayed "QUEUED" for good when the turn ended without another tool call. It is now sent as the next message.
+- **Pasting an image works in `--serve`.** The chat used to hang; the image now goes to the agent like in the desktop app.
+- **Reconnecting clears a stale "working" state**, and pressing Stop on an idle agent no longer leaves the chat waiting.
+- **Permanent provider errors are not retried.** A 400/401/403/404 answer used to be retried three times before you saw it; 408 and 429 still retry.
+- **Qwen thinking at High no longer fails on DashScope.** The thinking budget is kept below the model's output cap.
+- **Plugin allow-list: an `@` in a URL's path or query no longer passes as the allowed host.** `https://evil.example/x@allowed.host/skill.zip` matched `allowed.host` while the download went to evil.example.
+- **Browse works in `--serve`.** The working-directory picker's Browse button sent a request only the desktop window answers, so in a browser it did nothing. `--serve` now opens a folder browser in the page: walk the host's folders, go up or home, and pick one. The desktop app keeps its native dialog, and multi-user servers refuse to list folders.
+
+### Changed
+
+- **Enterprise: `allow_external_mcp: false` now refuses local (stdio) MCP servers** wherever they come from — `/mcp add`, the marketplace, a plugin or a hand-edited `mcp.json` — and HTTP servers must match `allowed_hosts`. The check runs when a server is saved and again when it starts. Skill and plugin downloads re-check every redirect against the list.
+- **Model catalogue and Appendix A refreshed.** Provider test fixtures that leaked into a vendor's model list are no longer offered as models.
+- **Dependencies:** `quinn-proto` updated to 0.11.19 (RUSTSEC-2026-0338/0339/0340/0342); frontend `source-map-js` and `brace-expansion` bumped.
 
 ## [0.141.0] — 2026-10-10
 

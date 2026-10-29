@@ -161,9 +161,43 @@ fn has_audio(video: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// A moving picture to look at. An mp3/m4a's cover art is a video stream
+/// too, flagged `attached_pic`; it is one still, not something to watch.
+fn has_picture(video: &Path) -> bool {
+    let Some(s) = ffprobe_f(video, "stream=codec_type:stream_disposition=attached_pic") else {
+        return false;
+    };
+    let lines: Vec<&str> = s.lines().map(str::trim).collect();
+    lines.contains(&"video") && !lines.contains(&"1")
+}
+
 async fn transcribe(video: &Path, dir: &Path, lang: Option<&str>) -> Transcript {
     if !has_audio(video) {
         return Transcript::NoAudio;
+    }
+    // On an AI Server box the recording stays on the box: its own
+    // asr-studio transcribes, and Groq or the cloud gateway — which would
+    // upload it — are refused unless explicitly allowed (dev-plan/71).
+    if let Some(d) = crate::aiserver::cached() {
+        if let Some(asr) = d.asr.as_ref().filter(|a| a.live()) {
+            return match aiserver_transcript(video, dir, lang, asr).await {
+                Ok(t) => Transcript::Text {
+                    text: t,
+                    model: "AI Server ASR",
+                },
+                Err(e) => Transcript::Failed(e),
+            };
+        }
+        if !std::env::var("THCLAWS_ALLOW_CLOUD_ASR").is_ok_and(|v| v.trim() == "1")
+            && !crate::providers::thclaws_gateway::cloud_allowed_on_aiserver()
+        {
+            return Transcript::Unavailable(
+                "this AI Server box has no speech recognition running (start ASR Studio in the \
+                 hub), and audio is not sent to the cloud from here (THCLAWS_ALLOW_CLOUD_ASR=1 \
+                 allows it)"
+                    .into(),
+            );
+        }
     }
     // A locked install transcribes through its own DashScope segment (SIS:
     // Qwen3-ASR); elsewhere Groq Whisper, BYOK or via the gateway.
@@ -192,6 +226,59 @@ async fn transcribe(video: &Path, dir: &Path, lang: Option<&str>) -> Transcript 
         ),
         Err(e) => Transcript::Failed(e),
     }
+}
+
+/// asr-studio `POST /v1/transcribe` (AISERVER-API-GUIDE §14). Loopback
+/// only, so its self-signed certificate is accepted for that host alone.
+async fn aiserver_transcript(
+    video: &Path,
+    dir: &Path,
+    lang: Option<&str>,
+    asr: &crate::aiserver::Service,
+) -> std::result::Result<String, String> {
+    let wav = dir.join("audio.wav");
+    extract_wav(video, &wav)?;
+    let bytes = std::fs::read(&wav).map_err(|e| e.to_string())?;
+    let loopback = asr.base_url.contains("://127.0.0.1") || asr.base_url.contains("://localhost");
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(asr.tls_selfsigned && loopback)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut form = reqwest::multipart::Form::new()
+        .part(
+            "audio",
+            reqwest::multipart::Part::bytes(bytes)
+                .file_name("audio.wav")
+                .mime_str("audio/wav")
+                .map_err(|e| e.to_string())?,
+        )
+        .text("diarize", "false");
+    if let Some(l) = lang.filter(|l| !l.is_empty() && *l != "auto") {
+        form = form.text("language", l.to_string());
+    }
+    let resp = client
+        .post(format!(
+            "{}/v1/transcribe",
+            asr.base_url.trim_end_matches('/')
+        ))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("asr-studio: {e}"))?;
+    if !resp.status().is_success() {
+        let code = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "asr-studio HTTP {code}: {}",
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| format!("asr-studio: {e}"))?;
+    Ok(v.get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string())
 }
 
 fn extract_wav(video: &Path, wav: &Path) -> std::result::Result<(), String> {
@@ -357,7 +444,8 @@ impl Tool for WatchVideoTool {
          transcript), plus an audio transcript when a speech-recognition route is \
          available (Whisper via GROQ_API_KEY/gateway, or Qwen3-ASR). Use it \
          to review/critique a video, check a generated clip, or answer questions \
-         about what happens on screen. Args: path (required), scene (0-1 \
+         about what happens on screen. Audio-only files (mp3, m4a, wav, a phone \
+         recording of a meeting) are accepted too and return the transcript alone. Args: path (required), scene (0-1 \
          sensitivity, lower=more frames, default 0.3), fps_floor (>=1 frame every \
          N sec, default 1.0), max_frames (default 32), dedup (% pixels changed to \
          count as new, default 8), lang (Whisper language, default auto)."
@@ -367,7 +455,7 @@ impl Tool for WatchVideoTool {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to a local video file"},
+                "path": {"type": "string", "description": "Path to a local video or audio file"},
                 "scene": {"type": "number", "description": "Scene-change sensitivity 0-1 (default 0.3)"},
                 "fps_floor": {"type": "number", "description": "At least one frame every N seconds (default 1.0)"},
                 "max_frames": {"type": "integer", "description": "Cap on frames returned (default 32)"},
@@ -414,6 +502,28 @@ impl Tool for WatchVideoTool {
 
         let dir = tmp_dir();
         let dur = duration_secs(&video);
+        let name = video
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("video");
+
+        // A phone recording of a meeting is audio only: transcribe it
+        // rather than fail on frame extraction.
+        if !has_picture(&video) {
+            let transcript = transcribe(&video, &dir, lang).await;
+            let _ = std::fs::remove_dir_all(&dir);
+            if matches!(transcript, Transcript::NoAudio) {
+                return Err(Error::Tool(format!(
+                    "{name} has neither a video nor an audio stream"
+                )));
+            }
+            return Ok(ToolResultContent::Blocks(vec![ToolResultBlock::Text {
+                text: format!(
+                    "Listened to {name} — {dur:.0}s, audio only (no picture to watch).{}",
+                    transcript.note()
+                ),
+            }]));
+        }
         let every_n = (fps(&video) * fps_floor).round().max(1.0) as u64;
 
         // One chronological pass: scene changes OR a density floor.
@@ -480,10 +590,6 @@ impl Tool for WatchVideoTool {
 
         // Build the result: a summary + each kept frame as an image block.
         let mut blocks: Vec<ToolResultBlock> = Vec::new();
-        let name = video
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("video");
         let mut summary = format!(
             "Watched {name} — {:.0}s, {} key frames (scene-aware, deduped from {} extracted). \
              Frames are in chronological order below.",
@@ -549,6 +655,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn audio_only_and_cover_art_are_not_pictures() {
+        if crate::filmscript::harness::check_av_tools().is_err() {
+            return;
+        }
+        let dir = tmp_dir();
+        let ff = |args: &[&str], out: &str| {
+            let ok = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-y"])
+                .args(args)
+                .arg(dir.join(out))
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "ffmpeg {out}");
+            dir.join(out)
+        };
+        let tone = ["-f", "lavfi", "-i", "sine=d=1"];
+        let m4a = ff(&[&tone[..], &["-c:a", "aac"]].concat(), "a.m4a");
+        let png = ff(
+            &["-f", "lavfi", "-i", "color=red:s=64x64", "-frames:v", "1"],
+            "c.png",
+        );
+        let png = png.to_str().unwrap();
+        let mp3 = ff(
+            &[
+                &tone[..],
+                &[
+                    "-i",
+                    png,
+                    "-map",
+                    "0",
+                    "-map",
+                    "1",
+                    "-c:a",
+                    "libmp3lame",
+                    "-disposition:v",
+                    "attached_pic",
+                ],
+            ]
+            .concat(),
+            "b.mp3",
+        );
+        let mp4 = ff(
+            &[
+                &tone[..],
+                &["-f", "lavfi", "-i", "color=blue:s=64x64:d=1", "-shortest"],
+            ]
+            .concat(),
+            "d.mp4",
+        );
+        assert!(!has_picture(&m4a));
+        assert!(!has_picture(&mp3));
+        assert!(has_picture(&mp4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn pct_diff_bounds() {
         let black = vec![[0u8, 0, 0]; 256];
         let white = vec![[255u8, 255, 255]; 256];
@@ -584,6 +747,10 @@ mod tests {
             })
             .unwrap();
         println!("\n=== {imgs} image blocks ===\n{summary}\n");
-        assert!(imgs > 0, "no frames returned");
+        if summary.contains("audio only") {
+            assert!(summary.contains("--- transcript"), "no transcript");
+        } else {
+            assert!(imgs > 0, "no frames returned");
+        }
     }
 }

@@ -1424,6 +1424,26 @@ mod thinking_off_tests {
         );
         assert_eq!(b["enable_thinking"], true);
         assert_eq!(b["thinking_budget"], 2048);
+        // High (32k) against a 32k output cap: DashScope wants budget < cap.
+        let mut b = json!({"max_completion_tokens": 32_000});
+        apply_thinking(
+            &mut b,
+            "qwen3.8-flash",
+            "https://ws.example/compatible-mode/v1",
+            Some(32_000),
+        );
+        assert_eq!(b["thinking_budget"], 31_999);
+        let mut b = json!({"max_tokens": 8_192});
+        apply_thinking(
+            &mut b,
+            "qwen3.8-flash",
+            "https://ws.example/compatible-mode/v1",
+            Some(2_048),
+        );
+        assert_eq!(
+            b["thinking_budget"], 2048,
+            "a budget under the cap is left alone"
+        );
         let mut b = json!({});
         apply_thinking(
             &mut b,
@@ -1503,7 +1523,16 @@ pub(crate) fn apply_thinking(body: &mut Value, model: &str, base_url: &str, budg
         if hybrid {
             body["enable_thinking"] = json!(level != L::Off);
             if level != L::Off {
-                body["thinking_budget"] = json!(level.to_budget());
+                // DashScope 400s unless the budget is strictly below the
+                // output cap: "max_completion_tokens [32000] must be
+                // greater than thinking_budget [32000]" — High is 32k.
+                let cap = body
+                    .get("max_completion_tokens")
+                    .or_else(|| body.get("max_tokens"))
+                    .and_then(Value::as_u64)
+                    .map(|c| c.saturating_sub(1).max(1) as u32);
+                let budget = level.to_budget();
+                body["thinking_budget"] = json!(cap.map_or(budget, |c| budget.min(c)));
             }
         }
     } else if let Some(accepted) = accepted_efforts(&m) {
@@ -1634,6 +1663,16 @@ fn warn_thinking_unsupported(model: &str) {
     let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
     let Ok(mut set) = seen.lock() else { return };
     if !set.insert(model.to_string()) {
+        return;
+    }
+    // AI Server's `auto` (and any gateway alias like it) picks the model
+    // behind our back, so "ask for support for this family" has no family
+    // to ask about.
+    if model == "auto" || model.ends_with("/auto") {
+        eprintln!(
+            "\x1b[33m[thinking] '{model}' is chosen by the gateway, so thClaws can't tell which \
+             reasoning control applies — the level you set is not being sent. Pin a model id to use it.\x1b[0m"
+        );
         return;
     }
     eprintln!(

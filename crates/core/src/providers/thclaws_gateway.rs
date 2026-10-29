@@ -84,6 +84,12 @@ pub fn provider_segment(kind: ProviderKind) -> Option<&'static str> {
         ProviderKind::ZAi => Some("zai"),
         ProviderKind::DeepSeek => Some("deepseek"),
         ProviderKind::Sis => Some("sis"),
+        // EE Pack on a DGX Station (dev-plan/73): the Suite's LiteLLM behind
+        // the box's own gateway. Deliberately absent from
+        // `segment_for_provider_name`: its prices live in the pack's
+        // model_pricing (seeded per box from what LiteLLM serves), not in
+        // the catalogue, so hiding "unpriced" catalogue rows would hide all.
+        ProviderKind::LiteLlm => Some("litellm"),
         ProviderKind::Minimax => Some("minimax"),
         ProviderKind::XAi => Some("xai"),
         ProviderKind::Moonshot => Some("moonshot"),
@@ -249,6 +255,11 @@ fn native_key_present(kind: ProviderKind) -> bool {
 /// lookup cost.
 pub fn gateway_overlay_for_model(config: &AppConfig, kind: ProviderKind) -> Option<GatewayOverlay> {
     let overlay = for_kind(config, kind)?;
+    // An EE Pack box prices its own LiteLLM models in its gateway; the
+    // catalogue never lists them (dev-plan/73).
+    if kind == ProviderKind::LiteLlm {
+        return Some(overlay);
+    }
     if !model_is_gateway_servable(&config.model) {
         return None;
     }
@@ -295,6 +306,18 @@ pub(crate) fn resolve_access_key() -> Option<String> {
     if crate::shared::policy_gateway_mode() {
         return crate::cloud::token();
     }
+    // An AI Server box is sold as "data stays on the box": every gateway
+    // consumer (WebSearch, HAL, media/TTS, slide-render, Bash subprocesses)
+    // resolves its credential here, so a cloud login lying around must not
+    // quietly turn into egress (dev-plan/71 egress test). Opt back in with
+    // THCLAWS_ALLOW_CLOUD=1.
+    if crate::aiserver::cached().is_some() && !cloud_allowed_on_aiserver() {
+        return None;
+    }
+    raw_access_key()
+}
+
+fn raw_access_key() -> Option<String> {
     if let Ok(v) = std::env::var("THCLAWS_GATEWAY_API_KEY") {
         let trimmed = v.trim().to_string();
         if !trimmed.is_empty() {
@@ -313,9 +336,124 @@ pub(crate) fn resolve_access_key() -> Option<String> {
     crate::cloud::token()
 }
 
+/// Whether an AI Server box may use the thClaws cloud (gateway models,
+/// search, media, cloud rendering/ASR). Default: no.
+///
+/// - `THCLAWS_ALLOW_CLOUD=1` / `=0` in the environment wins (operator pin).
+/// - Otherwise `allowCloud` in `~/.config/thclaws/aiserver.json`, the
+///   box-level switch the AI Server hub writes. It is read on every check,
+///   so flipping it takes effect on the next tool call with no restart.
+pub(crate) fn cloud_allowed_on_aiserver() -> bool {
+    cloud_mode().0
+}
+
+/// `(allowed, source)`, source one of `env`, `file`, `default`.
+pub(crate) fn cloud_mode() -> (bool, &'static str) {
+    mode_from(
+        std::env::var("THCLAWS_ALLOW_CLOUD").ok(),
+        crate::profile::config_dir()
+            .and_then(|d| std::fs::read_to_string(d.join("aiserver.json")).ok()),
+    )
+}
+
+fn mode_from(env: Option<String>, file: Option<String>) -> (bool, &'static str) {
+    match env.as_deref().map(str::trim) {
+        Some("1") => return (true, "env"),
+        Some("0") => return (false, "env"),
+        _ => {}
+    }
+    if let Some(v) = file
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|j| j.get("allowCloud").and_then(|b| b.as_bool()))
+    {
+        return (v, "file");
+    }
+    (false, "default")
+}
+
+/// A gateway credential exists, ignoring the AI Server gate. For status
+/// display only — never returns the key.
+pub(crate) fn has_cloud_credential() -> bool {
+    raw_access_key().is_some()
+}
+
+/// The organisation RAG (dev-plan/72) as an engine-managed MCP server: the
+/// gateway's `/rag/mcp`, authed with this runner's own gateway key so the
+/// gateway names the caller and each user sees only their namespaces. The
+/// api turns it on per runner with `THCLAWS_ORG_RAG=1`.
+pub fn org_rag_mcp_config() -> Option<crate::mcp::McpServerConfig> {
+    org_rag_mcp_config_for(
+        std::env::var("THCLAWS_ORG_RAG").ok(),
+        resolve_base_url(),
+        resolve_access_key(),
+    )
+}
+
+fn org_rag_mcp_config_for(
+    flag: Option<String>,
+    base: String,
+    key: Option<String>,
+) -> Option<crate::mcp::McpServerConfig> {
+    if flag.as_deref().map(str::trim) != Some("1") {
+        return None;
+    }
+    let key = key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())?;
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("Authorization".to_string(), format!("Bearer {key}"));
+    Some(crate::mcp::McpServerConfig {
+        name: "org-rag".into(),
+        transport: "http".into(),
+        command: String::new(),
+        args: Vec::new(),
+        env: std::collections::HashMap::new(),
+        url: format!("{}/rag/mcp", base.trim_end_matches('/')),
+        headers,
+        trusted: false,
+        engine_managed: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn org_rag_needs_the_flag_and_a_key() {
+        let base = "https://gateway.example/".to_string();
+        assert!(org_rag_mcp_config_for(None, base.clone(), Some("gw_v1_x".into())).is_none());
+        assert!(
+            org_rag_mcp_config_for(Some("0".into()), base.clone(), Some("gw_v1_x".into()))
+                .is_none()
+        );
+        assert!(org_rag_mcp_config_for(Some("1".into()), base.clone(), None).is_none());
+        assert!(
+            org_rag_mcp_config_for(Some("1".into()), base.clone(), Some("  ".into())).is_none()
+        );
+        let s = org_rag_mcp_config_for(Some("1".into()), base, Some("gw_v1_x".into())).unwrap();
+        assert_eq!(s.name, "org-rag");
+        assert_eq!(s.transport, "http");
+        assert_eq!(s.url, "https://gateway.example/rag/mcp");
+        assert_eq!(
+            s.headers.get("Authorization").map(String::as_str),
+            Some("Bearer gw_v1_x")
+        );
+        assert!(s.engine_managed && !s.trusted);
+    }
+
+    #[test]
+    fn the_env_pin_beats_the_hub_file_which_beats_the_default() {
+        let on = Some(r#"{"allowCloud": true}"#.to_string());
+        let off = Some(r#"{"allowCloud": false}"#.to_string());
+        assert_eq!(mode_from(None, None), (false, "default"));
+        assert_eq!(mode_from(None, on.clone()), (true, "file"));
+        assert_eq!(mode_from(None, off.clone()), (false, "file"));
+        assert_eq!(mode_from(Some("0".into()), on.clone()), (false, "env"));
+        assert_eq!(mode_from(Some("1".into()), off), (true, "env"));
+        assert_eq!(mode_from(Some("".into()), on), (true, "file"));
+        assert_eq!(mode_from(None, Some("not json".into())), (false, "default"));
+    }
 
     #[test]
     fn a_policy_gateway_url_outranks_the_env_override() {
@@ -347,6 +485,23 @@ mod tests {
     /// correctly and then simply ignored: the request goes to the upstream,
     /// every answer is right, and NOT ONE usage_events row is written.
     /// This pins the segment; the arm that consumes it is exercised live.
+    #[test]
+    fn litellm_routes_through_the_pack_gateway_without_catalogue_prices() {
+        assert_eq!(provider_segment(ProviderKind::LiteLlm), Some("litellm"));
+        // Not in the name map: the pack prices the box's models itself, so
+        // the picker must not hide them as "unpriced".
+        assert_eq!(segment_for_provider_name("litellm"), None);
+        // A gateway-locked pack must accept the box's models although the
+        // catalogue prices none of them.
+        let _guard = crate::kms::test_env_lock();
+        std::env::set_var("THCLAWS_GATEWAY_API_KEY", "gw_v1_test");
+        let mut c = cfg(&["litellm"]);
+        c.model = "litellm/qwen38-27b".into();
+        let o = gateway_overlay_for_model(&c, ProviderKind::LiteLlm);
+        std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+        assert!(o.is_some_and(|o| o.base_url.ends_with("/litellm")));
+    }
+
     #[test]
     fn sis_is_routable_through_the_gateway() {
         let _g = crate::kms::test_env_lock();

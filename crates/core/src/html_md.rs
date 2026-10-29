@@ -191,7 +191,7 @@ fn render(html: &str) -> String {
             let piece = if pre_depth > 0 {
                 decoded
             } else {
-                collapse_ws(&decoded)
+                escape_tag_starts(&collapse_ws(&decoded))
             };
             if piece.is_empty() {
                 continue;
@@ -209,7 +209,7 @@ fn render(html: &str) -> String {
         // A '<' that isn't a tag start (bare "a < b") is literal text.
         let Some(close_rel) = html[i..].find('>') else {
             let text = decode_entities(&html[i..]);
-            push_text(&mut out, &collapse_ws(&text), false);
+            push_text(&mut out, &escape_tag_starts(&collapse_ws(&text)), false);
             break;
         };
         let raw_tag = &html[i + 1..i + close_rel];
@@ -394,6 +394,24 @@ fn render(html: &str) -> String {
             (false, other) if BLOCK.contains(&other) && in_table == 0 => push_block(&mut out, ""),
             (true, other) if BLOCK.contains(&other) && in_table == 0 => push_block(&mut out, ""),
             _ => {}
+        }
+    }
+    out
+}
+
+/// Re-escape a decoded `<` that would open a tag (`&lt;img onerror=…&gt;`
+/// on the page is text, and must not come back as markup once the archive
+/// is rendered as markdown). A bare `a < b` stays readable.
+fn escape_tag_starts(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<'
+            && matches!(chars.peek(), Some(n) if n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?'))
+        {
+            out.push_str("&lt;");
+        } else {
+            out.push(c);
         }
     }
     out
@@ -782,6 +800,17 @@ mod tests {
     fn bare_less_than_is_not_a_tag() {
         let (_, md) = convert("<body><p>if a &lt; b then</p></body>");
         assert!(md.contains("if a < b then"), "{md}");
+    }
+
+    #[test]
+    fn escaped_markup_stays_text() {
+        let (_, md) = convert(
+            "<body><p>x &lt;img src=x onerror=alert(1)&gt; &lt;/p&gt;&lt;script&gt;</p></body>",
+        );
+        assert!(!md.contains("<img"), "{md}");
+        assert!(!md.contains("<script"), "{md}");
+        assert!(!md.contains("</p"), "{md}");
+        assert!(md.contains("&lt;img src=x"), "{md}");
     }
 
     #[test]

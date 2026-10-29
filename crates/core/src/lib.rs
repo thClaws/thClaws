@@ -99,6 +99,7 @@ pub mod model_catalogue;
 pub mod multi_tenant;
 pub mod net_guard;
 pub mod oauth;
+pub mod office;
 pub mod permissions;
 /// Phone-home channel — local engine dials out to thClaws.cloud over the
 /// shared bridge transport (dev-plan/44 Tier 1).

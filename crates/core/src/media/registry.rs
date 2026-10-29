@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::media::provider::{ImageModelInfo, ImageProvider, SpeechProvider, VideoProvider};
 use crate::media::providers::{
     DashScopeSpeechProvider, DashScopeVideoProvider, GeminiImageProvider, GeminiSpeechProvider,
-    IappImageProvider, LtxVideoProvider, OpenAiImageProvider, QwenImageProvider, VeoVideoProvider,
+    IappImageProvider, LtxVideoProvider, OmniVideoProvider, OpenAiImageProvider, QwenImageProvider,
 };
 use std::sync::Arc;
 
@@ -33,9 +33,33 @@ pub fn video_all() -> Vec<Arc<dyn VideoProvider>> {
     reachable(video_registered())
 }
 
+/// The image / video model ids this install can actually call, when an org
+/// gateway narrows the providers; `None` = every provider is open. The tool
+/// schemas append it so the model never picks one it can't reach (SIS asked
+/// for ltx-2-5-pro off the static description and failed, 2026-10-22).
+pub fn reachable_image_models() -> Option<String> {
+    crate::shared::gateway_providers_locked().then(|| {
+        all()
+            .iter()
+            .flat_map(|p| p.models().iter().map(|m| m.id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
+pub fn reachable_video_models() -> Option<String> {
+    crate::shared::gateway_providers_locked().then(|| {
+        video_all()
+            .iter()
+            .flat_map(|p| p.models().iter().map(|m| m.id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
 fn video_registered() -> Vec<Arc<dyn VideoProvider>> {
     vec![
-        Arc::new(VeoVideoProvider),
+        Arc::new(OmniVideoProvider),
         Arc::new(LtxVideoProvider),
         Arc::new(DashScopeVideoProvider),
     ]
@@ -55,7 +79,7 @@ fn reachable<P: ?Sized + HasId>(ps: Vec<Arc<P>>) -> Vec<Arc<P>> {
 /// Gateway segment a media provider's calls go through; `None` = BYOK only.
 fn media_segment(id: &str, locked: bool, routed: &[String]) -> Option<&'static str> {
     match id {
-        "gemini" | "veo" => Some("google"),
+        "gemini" | "omni" => Some("google"),
         "openai" => Some("openai"),
         "ltx" => Some("ltx"),
         "elevenlabs" => Some("elevenlabs"),
@@ -413,7 +437,7 @@ mod tests {
             "openai",
             "qwen",
             "iapp",
-            "veo",
+            "omni",
             "ltx",
             "dashscope",
         ] {
@@ -426,7 +450,7 @@ mod tests {
         let r = routed(&["sis"]);
         assert!(reachable_under("qwen", true, &r));
         assert!(reachable_under("dashscope", true, &r));
-        for id in ["gemini", "openai", "iapp", "veo", "ltx"] {
+        for id in ["gemini", "openai", "iapp", "omni", "ltx"] {
             assert!(!reachable_under(id, true, &r), "{id}");
         }
     }
@@ -435,7 +459,7 @@ mod tests {
     fn lock_on_another_upstream_reaches_its_own_media() {
         let r = routed(&["openai", "google"]);
         assert!(reachable_under("openai", true, &r));
-        assert!(reachable_under("veo", true, &r));
+        assert!(reachable_under("omni", true, &r));
         assert!(!reachable_under("qwen", true, &r));
         assert!(!reachable_under("dashscope", true, &r));
     }
@@ -474,13 +498,13 @@ mod tests {
             gemini.contains("not available") && gemini.contains("qwen"),
             "{gemini}"
         );
-        let veo = resolve_video_in(vid.clone(), "veo", "")
+        let omni = resolve_video_in(vid.clone(), "omni", "")
             .err()
             .unwrap()
             .to_string();
         assert!(
-            veo.contains("not available") && veo.contains("dashscope"),
-            "{veo}"
+            omni.contains("not available") && omni.contains("dashscope"),
+            "{omni}"
         );
         assert!(resolve_in(img, "", "flash").is_err());
         assert!(resolve_video_in(vid, "", "fast").is_err());

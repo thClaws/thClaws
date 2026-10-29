@@ -304,10 +304,17 @@ fn extract_tar_blocking(body: &[u8], dest: &Path) -> std::io::Result<ExtractStat
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         let path_str = path.to_string_lossy().to_string();
-        if !is_safe_rel_path(&path_str) {
+        if !is_safe_rel_path(&path_str) || !is_plain_rel_path(&path) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("tar entry '{path_str}' is unsafe"),
+            ));
+        }
+        let kind = entry.header().entry_type();
+        if !matches!(kind, tar::EntryType::Regular | tar::EntryType::Directory) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("tar entry '{path_str}' is a {kind:?}; only files and directories deploy"),
             ));
         }
         let top = path
@@ -335,9 +342,14 @@ fn extract_tar_blocking(body: &[u8], dest: &Path) -> std::io::Result<ExtractStat
                     ),
                 ));
             }
-            if entry.header().entry_type().is_file() {
+            if kind == tar::EntryType::Regular {
                 let final_path = workspace_root.join(name);
                 let tmp_path = workspace_root.join(format!(".{name}.deploy-tmp"));
+                // A leftover tmp that is a symlink would be written through.
+                match std::fs::remove_file(&tmp_path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
                 entry.unpack(&tmp_path)?;
                 std::fs::rename(&tmp_path, &final_path)?;
                 files += 1;
@@ -356,12 +368,16 @@ fn extract_tar_blocking(body: &[u8], dest: &Path) -> std::io::Result<ExtractStat
                 ),
             ));
         }
-        let abs = dest.join(&path);
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
+        // `unpack_in` refuses any entry whose parent resolves outside
+        // `dest`, so a directory symlink already in the tree cannot carry
+        // a write elsewhere.
+        if !entry.unpack_in(dest)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("tar entry '{path_str}' escapes the deploy directory"),
+            ));
         }
-        entry.unpack(&abs)?;
-        if entry.header().entry_type().is_file() {
+        if kind == tar::EntryType::Regular {
             files += 1;
             bytes += entry.header().size().unwrap_or(0);
         }
@@ -513,6 +529,13 @@ fn is_safe_rel_path(p: &str) -> bool {
     true
 }
 
+/// Every component is a plain name: no root, drive prefix, `.` or `..`.
+fn is_plain_rel_path(p: &Path) -> bool {
+    p.components().count() > 0
+        && p.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 fn file_sha256(path: &Path) -> std::io::Result<Option<String>> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -605,6 +628,94 @@ mod tests {
         assert!(!is_safe_rel_path("memory/private.md"));
         assert!(!is_safe_rel_path(".env"));
         assert!(!is_safe_rel_path(""));
+    }
+
+    fn tar_with(build: impl FnOnce(&mut tar::Builder<Vec<u8>>)) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        build(&mut b);
+        b.into_inner().unwrap()
+    }
+
+    fn file_header(path: &str, len: usize) -> tar::Header {
+        let mut h = tar::Header::new_gnu();
+        h.set_path(path).unwrap();
+        h.set_size(len as u64);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_cksum();
+        h
+    }
+
+    fn scratch_in(dir: &Path) -> PathBuf {
+        let s = dir.join(".thclaws.deploy-test");
+        std::fs::create_dir_all(&s).unwrap();
+        s
+    }
+
+    #[test]
+    fn deploy_extract_accepts_plain_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scratch = scratch_in(tmp.path());
+        let body = tar_with(|b| {
+            let data = b"hi";
+            b.append(&file_header("skills/a/SKILL.md", 2), &data[..])
+                .unwrap();
+            b.append(&file_header("__root__/AGENTS.md", 2), &data[..])
+                .unwrap();
+        });
+        let stats = extract_tar_blocking(&body, &scratch).unwrap();
+        assert_eq!(stats.files, 2);
+        assert_eq!(
+            std::fs::read(scratch.join("skills/a/SKILL.md")).unwrap(),
+            b"hi"
+        );
+        assert_eq!(std::fs::read(tmp.path().join("AGENTS.md")).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn deploy_extract_refuses_links() {
+        for kind in [tar::EntryType::Symlink, tar::EntryType::Link] {
+            let tmp = tempfile::tempdir().unwrap();
+            let scratch = scratch_in(tmp.path());
+            let body = tar_with(|b| {
+                let mut h = tar::Header::new_gnu();
+                h.set_path("skills/evil").unwrap();
+                h.set_link_name("/etc").unwrap();
+                h.set_size(0);
+                h.set_entry_type(kind);
+                h.set_cksum();
+                b.append(&h, std::io::empty()).unwrap();
+            });
+            let Err(err) = extract_tar_blocking(&body, &scratch) else {
+                panic!("{kind:?} entry was extracted");
+            };
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{kind:?}");
+            assert!(std::fs::symlink_metadata(scratch.join("skills/evil")).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deploy_extract_will_not_write_through_existing_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let scratch = scratch_in(tmp.path());
+        std::os::unix::fs::symlink(outside.path(), scratch.join("skills")).unwrap();
+        let body = tar_with(|b| {
+            b.append(&file_header("skills/pwn.txt", 1), &b"x"[..])
+                .unwrap();
+        });
+        assert!(extract_tar_blocking(&body, &scratch).is_err());
+        assert!(!outside.path().join("pwn.txt").exists());
+    }
+
+    #[test]
+    fn deploy_plain_rel_path_rejects_odd_components() {
+        assert!(is_plain_rel_path(Path::new("skills/a/SKILL.md")));
+        assert!(!is_plain_rel_path(Path::new("./skills")));
+        assert!(!is_plain_rel_path(Path::new("/abs")));
+        assert!(!is_plain_rel_path(Path::new("skills/../x")));
+        assert!(!is_plain_rel_path(Path::new("")));
     }
 
     #[test]

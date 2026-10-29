@@ -6,7 +6,7 @@
 //!   paragraph; a naïve cross-run match would miss those (rare in
 //!   docs we author, common in human-authored docs).
 //! - `append_paragraph` — add a new paragraph at the end of the body
-//!   with the same RunFonts (Calibri + Noto Sans Thai) DocxCreate uses.
+//!   with the same RunFonts (Calibri + Sarabun) DocxCreate uses.
 //!
 //! The file's other XML parts (styles, numbering, headers, etc.) are
 //! passed through verbatim. Only `word/document.xml` is mutated.
@@ -23,7 +23,7 @@ use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
 const LATIN_FONT: &str = "Calibri";
-const THAI_FONT: &str = "Noto Sans Thai";
+use super::docx_create::THAI_FONT;
 
 pub struct DocxEditTool;
 

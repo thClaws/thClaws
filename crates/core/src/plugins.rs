@@ -364,6 +364,10 @@ pub async fn install(url: &str, user: bool, force: bool) -> Result<Plugin> {
     // Org-policy gate: when `policies.plugins.enabled: true`, the URL
     // must match `allowed_hosts`. Open-core builds with no policy hit
     // `AllowDecision::NoPolicy` and pass through unchanged.
+    crate::marketplace::ensure_fresh().await;
+    if !crate::marketplace::install_url_allowed(url) {
+        return Err(Error::Config(crate::marketplace::install_refusal("plugin")));
+    }
     if let crate::policy::AllowDecision::Denied { reason } = crate::policy::check_url(url) {
         return Err(Error::Config(format!(
             "plugin install blocked by org policy: {reason}"
@@ -881,12 +885,15 @@ async fn download_zip(url: &str) -> Result<Vec<u8>> {
     // pasted across. A hostile / slow server can no longer hang
     // `/plugin install` indefinitely.
     let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(crate::policy::allowlist::install_redirect_policy())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| Error::Config(format!("http client: {e}")))?;
-    let resp = client
-        .get(url)
+    let mut req = client.get(url);
+    if let Some(token) = crate::marketplace::auth_token_for(url) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| Error::Config(format!("download: {e}")))?;

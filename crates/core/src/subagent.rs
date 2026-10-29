@@ -37,6 +37,7 @@ const WRITE_TOOL_NAMES: &[&str] = &[
     "XlsxEdit",
     "PdfCreate",
     "EpubCreate",
+    "DocConvert",
     "NotebookEdit",
 ];
 const WRITE_PATH_KEYS: &[&str] = &["path", "file_path", "notebook_path", "out", "output_path"];
@@ -798,8 +799,9 @@ impl Tool for SubAgentTool {
                 .map(|k| k.name())
                 .unwrap_or("unknown");
             let role = agent_name.unwrap_or("subagent");
-            crate::usage::UsageTracker::new(crate::usage::UsageTracker::default_path())
-                .record(provider, eff_model, u);
+            // The per-model tracker gets it from the session's next footer
+            // (`take_side_usage`), which knows the session's own usage dir.
+            crate::usage::note_side_usage(eff_model, u);
             if let Ok(cwd) = std::env::current_dir() {
                 crate::usage::append_usage_ledger(&cwd, role, provider, eff_model, u);
             }

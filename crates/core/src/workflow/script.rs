@@ -49,7 +49,12 @@ pub(crate) async fn author(
         }
         .await;
         match attempt_res {
-            Ok(turn) => break turn,
+            Ok(turn) => {
+                if let Some(u) = &turn.usage {
+                    crate::usage::note_side_usage(model, u);
+                }
+                break turn;
+            }
             Err(e) => {
                 if attempt < MAX_ATTEMPTS && super::is_transient_provider_error(&e) {
                     let delay = std::time::Duration::from_secs(1u64 << (attempt - 1));

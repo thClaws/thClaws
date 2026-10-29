@@ -740,6 +740,11 @@ pub struct SharedSessionHandle {
     /// construction so a queue submission survives a session reload
     /// or cwd change.
     pub injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// True while the worker is handling an input (a turn, a slash
+    /// command, a workflow review). Written under the `injection_queue`
+    /// lock so an inject can't land between the worker's last drain and
+    /// it going idle — see `queue_or_submit_injection`.
+    pub worker_busy: Arc<std::sync::atomic::AtomicBool>,
     /// dev-plan/32 Tier 3 workflow approver, shared between the
     /// shared-session worker (`WorkerState.workflow_approver`) and
     /// the IPC dispatch (`IpcContext.workflow_approver`) so both
@@ -770,6 +775,51 @@ impl SharedSessionHandle {
     pub fn request_cancel(&self) {
         self.cancel.cancel();
     }
+
+    pub fn is_worker_busy(&self) -> bool {
+        self.worker_busy.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+type InjectionQueue = std::sync::Mutex<std::collections::VecDeque<String>>;
+
+/// Where a message typed mid-turn went.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InjectRoute {
+    /// Waiting for the running turn's next tool_result boundary, or for
+    /// the worker to finish it; carries the queue length.
+    Queued(usize),
+    /// The worker is idle (the UI only thought a turn was running), so
+    /// the caller should submit the text as a normal line.
+    Submit(String),
+}
+
+pub fn queue_or_submit_injection(
+    queue: &InjectionQueue,
+    busy: &std::sync::atomic::AtomicBool,
+    text: String,
+) -> InjectRoute {
+    let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+    if busy.load(std::sync::atomic::Ordering::SeqCst) {
+        q.push_back(text);
+        InjectRoute::Queued(q.len())
+    } else {
+        InjectRoute::Submit(text)
+    }
+}
+
+/// The worker going idle: clear the busy flag and take what was typed
+/// during the input it just finished but never reached a tool_result
+/// boundary (a reply with no tool call, an error, a cancel). Without this
+/// the message sat in the queue forever and its bubble stayed "queued".
+fn go_idle_taking_injections(
+    queue: &InjectionQueue,
+    busy: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+    busy.store(false, std::sync::atomic::Ordering::SeqCst);
+    let texts: Vec<String> = q.drain(..).collect();
+    (!texts.is_empty()).then(|| texts.join("\n\n"))
 }
 
 /// Bundle of owned state the worker loop passes by `&mut` down into
@@ -906,7 +956,11 @@ pub struct WorkerState {
     /// via `EffectiveCatalogue::compute_cost_usd`; surfaced through the
     /// `/cost` slash command and pushed to the Cardputer display via
     /// `cost_bridge`. Zeroed by `/cost reset` or by a buddy-side reset.
+    /// Belongs to `session_cost_for`: when the active session changes
+    /// (load, new, restart) it restarts from that session's persisted
+    /// turn costs ([`sync_session_cost`]).
     pub session_cost_usd: f64,
+    pub session_cost_for: String,
     /// SHA-fingerprint of the last `.thclaws/settings.json` bytes that
     /// drove a successful `ReloadConfig`. Used to dedup back-to-back
     /// reloads from the slash command that wrote the file plus the
@@ -1197,6 +1251,8 @@ pub fn spawn_with_roots(
     let input_tx_for_poller = input_tx.clone();
     let gate_for_thread = ready_gate.clone();
     let injection_queue_for_worker = injection_queue.clone();
+    let worker_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_busy_for_worker = worker_busy.clone();
     let workflow_approver_for_worker = workflow_approver.clone();
     let session_roots_for_worker = session_roots.clone();
     let browser_mcp_for_worker = browser_mcp.clone();
@@ -1211,6 +1267,7 @@ pub fn spawn_with_roots(
                 approver,
                 gate_for_thread,
                 injection_queue_for_worker,
+                worker_busy_for_worker,
                 workflow_approver_for_worker,
                 session_roots_for_worker,
                 browser_mcp_for_worker,
@@ -1235,6 +1292,7 @@ pub fn spawn_with_roots(
         cancel,
         ready_gate,
         injection_queue,
+        worker_busy,
         workflow_approver,
         session_roots,
         browser_mcp,
@@ -1411,6 +1469,7 @@ async fn run_worker(
     approver: std::sync::Arc<dyn crate::permissions::ApprovalSink>,
     ready_gate: Arc<ReadyGate>,
     injection_queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    worker_busy: Arc<std::sync::atomic::AtomicBool>,
     workflow_approver: std::sync::Arc<crate::workflow::WorkflowApprover>,
     session_roots: Option<crate::multi_tenant::SessionRoots>,
     browser_mcp: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::mcp::McpClient>>>>,
@@ -2171,6 +2230,7 @@ async fn run_worker(
         messenger_pre_mode: None,
         messenger_pre_approver: None,
         session_cost_usd: 0.0,
+        session_cost_for: String::new(),
         last_settings_fingerprint: None,
         #[cfg(feature = "cost_bridge")]
         cost_bridge: Some(crate::cost_bridge::spawn()),
@@ -2267,7 +2327,12 @@ async fn run_worker(
         });
     }
 
-    while let Ok(input) = input_rx.recv() {
+    loop {
+        if let Some(text) = go_idle_taking_injections(&injection_queue, &worker_busy) {
+            let _ = input_tx_self.send(ShellInput::Line(text));
+        }
+        let Ok(input) = input_rx.recv() else { break };
+        worker_busy.store(true, std::sync::atomic::Ordering::SeqCst);
         match input {
             ShellInput::Line(text) => {
                 cancel.reset();
@@ -3399,7 +3464,10 @@ async fn run_worker(
                 // the agent loop uses so a trusted server's widget
                 // can't silently invoke `delete_*`-style tools when
                 // the user has set permission_mode = "ask".
-                let tool = state.tool_registry.get(&qualified_name);
+                let tool = state
+                    .tool_registry
+                    .get(&qualified_name)
+                    .filter(|_| crate::policy::tool_allowed(&qualified_name));
                 let (content, is_error) = match tool {
                     Some(t) => {
                         let mode = crate::permissions::current_mode();
@@ -4278,6 +4346,7 @@ async fn handle_line(
                          `rework: <note>` (or click in the Chat tab)"
                             .to_string(),
                     ));
+                    let _ = events_tx.send(ViewEvent::TurnDone);
                     return;
                 }
             }
@@ -4983,6 +5052,94 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// The inner helper's RAII guards (`_busy`, `_broadcast_on_drop`) drop
 /// normally on the unwind path — `catch_unwind` returns normally from
 /// the future's perspective.
+/// Restart `session_cost_usd` from the active session's persisted turn
+/// costs whenever the session changed under it (load, new, worker
+/// restart), so `$ session` and `/cost` are that session's, not the
+/// worker's.
+pub(crate) fn sync_session_cost(state: &mut WorkerState) {
+    if state.session_cost_for != state.session.id {
+        state.session_cost_usd = state.session.cost_usd();
+        state.session_cost_for = state.session.id.clone();
+    }
+}
+
+/// Book a turn's usage and return its `[tokens: …]` footer: the per-model
+/// tracker (`/usage`), the workspace ledger, the session's cost, and every
+/// side call (subagent, compaction, …) made for this session since the
+/// last footer. Persists with the session, so call it after
+/// `save_history`. `stopped` marks a turn that ended without `Done`.
+fn record_turn_usage(
+    state: &mut WorkerState,
+    usage: &crate::providers::Usage,
+    turn_start: std::time::Instant,
+    stopped: Option<&str>,
+) -> String {
+    let provider_name = state.config.detect_provider().unwrap_or("unknown");
+    let tracker = crate::usage::UsageTracker::new(
+        state
+            .session_roots
+            .as_ref()
+            .map(|r| r.usage_dir.clone())
+            .unwrap_or_else(crate::usage::UsageTracker::default_path),
+    );
+    tracker.record(provider_name, &state.config.model, usage);
+    if let Ok(cwd) = std::env::current_dir() {
+        crate::usage::append_usage_ledger(&cwd, "main", provider_name, &state.config.model, usage);
+    }
+    let side = crate::usage::take_side_usage(&state.session.id);
+    if let Some(side) = &side {
+        side.record(&tracker);
+    }
+
+    sync_session_cost(state);
+    // Drain any pending buddy resets first so a mid-turn Backspace on the
+    // Cardputer takes effect before this turn's contribution lands.
+    #[cfg(feature = "cost_bridge")]
+    if let Some(ref mut bridge) = state.cost_bridge {
+        while bridge.rx_reset.try_recv().is_ok() {
+            state.session_cost_usd = 0.0;
+        }
+    }
+    let token_usage = crate::model_catalogue::TokenUsage::from_usage(usage);
+    let turn_cost = crate::model_catalogue::EffectiveCatalogue::load()
+        .compute_cost_usd(&state.config.model, &token_usage)
+        .unwrap_or(0.0)
+        + side.as_ref().map_or(0.0, |s| s.cost_usd);
+    state.session_cost_usd += turn_cost;
+    #[cfg(feature = "cost_bridge")]
+    if let Some(ref bridge) = state.cost_bridge {
+        let _ = bridge.tx_cost.send(state.session_cost_usd);
+    }
+
+    let cost_str = if state.session_cost_usd > 0.0 {
+        format!(" · ${:.4} session", state.session_cost_usd)
+    } else {
+        String::new()
+    };
+    let line = format!(
+        "[tokens: {}{} · {}{}{}]",
+        usage.tokens_note(),
+        side.as_ref().map(|s| s.footer_note()).unwrap_or_default(),
+        crate::tool_display::format_duration(turn_start.elapsed()),
+        stopped.map(|s| format!(" · {s}")).unwrap_or_default(),
+        cost_str
+    );
+    // Persist alongside the turn so reopening the session shows what each
+    // turn cost, and the session's `$ session` total survives a restart.
+    match &state.session_store {
+        Some(store) => {
+            let path = store.path_for(&state.session.id);
+            let _ = state.session.append_turn_usage_to(&path, &line, turn_cost);
+        }
+        None => state.session.turn_usage.push(crate::session::TurnUsage {
+            after: state.session.messages.len(),
+            text: line.clone(),
+            cost_usd: turn_cost,
+        }),
+    }
+    line
+}
+
 async fn drive_turn_stream(
     stream: std::pin::Pin<
         Box<dyn futures::Stream<Item = Result<AgentEvent, crate::error::Error>> + Send>,
@@ -5006,14 +5163,19 @@ async fn drive_turn_stream(
         .session_roots
         .as_ref()
         .and_then(|r| r.member_id.clone());
-    let inner = drive_turn_stream_inner(
-        stream,
-        state,
-        events_tx,
-        cancel,
-        lead_mb,
-        input_tx,
-        surface_session,
+    let session_id = state.session.id.clone();
+    crate::gateway_turn::set_session(&session_id);
+    let inner = crate::gateway_turn::scope_session(
+        session_id,
+        drive_turn_stream_inner(
+            stream,
+            state,
+            events_tx,
+            cancel,
+            lead_mb,
+            input_tx,
+            surface_session,
+        ),
     );
     let turn_result = if crate::workdir::is_multiuser() {
         match member {
@@ -5149,6 +5311,13 @@ async fn drive_turn_stream_inner(
                 let _ = events_tx.send(ViewEvent::ErrorText("(interrupted)".into()));
                 write_lead_log(&state.lead_log, "\x1b[0m\n\x1b[33m[cancelled]\x1b[0m\n");
                 save_history(&state.agent, &mut state.session, &state.session_store);
+                // The gateway billed the calls this turn finished before the
+                // stop; the footer and `$ session` count them too.
+                let partial = state.agent.partial_turn_usage();
+                if partial.prompt_tokens() > 0 || partial.output_tokens > 0 {
+                    let line = record_turn_usage(state, &partial, turn_start, Some("stopped"));
+                    let _ = events_tx.send(ViewEvent::TurnUsage(line));
+                }
                 let _ = events_tx.send(ViewEvent::SessionListRefresh(build_session_list(
                     &state.session_store,
                     &state.session.id,
@@ -5225,50 +5394,6 @@ async fn drive_turn_stream_inner(
             Ok(AgentEvent::Done { usage, .. }) => {
                 write_lead_log(&state.lead_log, "\x1b[0m\n");
                 let _ = lead_mb.write_status("lead", "active", None);
-                // Record token usage for /usage (parity with the CLI
-                // REPL — option C's chat port missed this, so the
-                // GUI shell silently dropped every turn's usage
-                // regardless of provider).
-                let provider_name = state.config.detect_provider().unwrap_or("unknown");
-                let tracker = crate::usage::UsageTracker::new(
-                    state
-                        .session_roots
-                        .as_ref()
-                        .map(|r| r.usage_dir.clone())
-                        .unwrap_or_else(crate::usage::UsageTracker::default_path),
-                );
-                tracker.record(provider_name, &state.config.model, &usage);
-                if let Ok(cwd) = std::env::current_dir() {
-                    crate::usage::append_usage_ledger(
-                        &cwd,
-                        "main",
-                        provider_name,
-                        &state.config.model,
-                        &usage,
-                    );
-                }
-
-                // Cost accounting (GUI parity with the CLI REPL). Drain
-                // any pending buddy resets first so a mid-turn Backspace
-                // on the Cardputer takes effect before this turn's
-                // contribution lands. Then accumulate, then push the new
-                // total to the buddy if a bridge is attached.
-                #[cfg(feature = "cost_bridge")]
-                if let Some(ref mut bridge) = state.cost_bridge {
-                    while bridge.rx_reset.try_recv().is_ok() {
-                        state.session_cost_usd = 0.0;
-                    }
-                }
-                let token_usage = crate::model_catalogue::TokenUsage::from_usage(&usage);
-                let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
-                if let Some(c) = catalogue.compute_cost_usd(&state.config.model, &token_usage) {
-                    state.session_cost_usd += c;
-                }
-                #[cfg(feature = "cost_bridge")]
-                if let Some(ref bridge) = state.cost_bridge {
-                    let _ = bridge.tx_cost.send(state.session_cost_usd);
-                }
-
                 // If a skill applied a model override this turn, emit
                 // a revert chat note so the user sees the active
                 // model returning to their baseline. The agent itself
@@ -5289,27 +5414,7 @@ async fn drive_turn_stream_inner(
                 )));
 
                 // Per-turn usage footer (GUI parity with the CLI REPL).
-                let cache_info = usage.cache_note();
-                let cost_str = if state.session_cost_usd > 0.0 {
-                    format!(" · ${:.4} session", state.session_cost_usd)
-                } else {
-                    String::new()
-                };
-                let usage_line = format!(
-                    "[tokens: {}in/{}out{} · {}{}]",
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    cache_info,
-                    crate::tool_display::format_duration(turn_start.elapsed()),
-                    cost_str
-                );
-                // Persist alongside the turn so reopening the session
-                // shows what each turn cost, instead of a conversation
-                // with every cost line stripped out.
-                if let Some(store) = &state.session_store {
-                    let path = store.path_for(&state.session.id);
-                    let _ = state.session.append_turn_usage_to(&path, &usage_line);
-                }
+                let usage_line = record_turn_usage(state, &usage, turn_start, None);
                 let _ = events_tx.send(ViewEvent::TurnUsage(usage_line));
 
                 let _ = events_tx.send(ViewEvent::TurnDone);
@@ -5321,6 +5426,11 @@ async fn drive_turn_stream_inner(
                 );
                 let _ = lead_mb.write_status("lead", "active", None);
                 let _ = events_tx.send(ViewEvent::ErrorText(format!("Error: {e}")));
+                let partial = state.agent.partial_turn_usage();
+                if partial.prompt_tokens() > 0 || partial.output_tokens > 0 {
+                    let line = record_turn_usage(state, &partial, turn_start, Some("failed"));
+                    let _ = events_tx.send(ViewEvent::TurnUsage(line));
+                }
                 let _ = events_tx.send(ViewEvent::TurnDone);
             }
             _ => {}
@@ -5880,6 +5990,91 @@ pub(crate) fn maybe_warn_file_size(
 }
 
 #[cfg(test)]
+mod injection_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn queue() -> std::sync::Mutex<std::collections::VecDeque<String>> {
+        std::sync::Mutex::new(std::collections::VecDeque::new())
+    }
+
+    /// A turn that ends without another tool call never reaches the
+    /// tool_result drain; going idle must hand the leftovers back.
+    #[test]
+    fn going_idle_returns_what_the_turn_never_drained() {
+        let q = queue();
+        let busy = AtomicBool::new(true);
+        assert_eq!(
+            queue_or_submit_injection(&q, &busy, "first".into()),
+            InjectRoute::Queued(1)
+        );
+        assert_eq!(
+            queue_or_submit_injection(&q, &busy, "second".into()),
+            InjectRoute::Queued(2)
+        );
+        assert_eq!(
+            go_idle_taking_injections(&q, &busy).as_deref(),
+            Some("first\n\nsecond")
+        );
+        assert!(!busy.load(Ordering::SeqCst));
+        assert!(q.lock().unwrap().is_empty());
+        assert_eq!(go_idle_taking_injections(&q, &busy), None);
+    }
+
+    #[test]
+    fn an_idle_worker_takes_the_message_directly() {
+        let q = queue();
+        let busy = AtomicBool::new(false);
+        assert_eq!(
+            queue_or_submit_injection(&q, &busy, "hello".into()),
+            InjectRoute::Submit("hello".into())
+        );
+        assert!(q.lock().unwrap().is_empty());
+    }
+
+    /// Hammer the hand-off: whatever the interleaving of injects with the
+    /// worker going idle, every message comes out exactly once — through
+    /// the queue drain or as a direct submit, never stranded.
+    #[test]
+    fn no_message_is_stranded_or_duplicated_under_contention() {
+        for _ in 0..200 {
+            let q = Arc::new(queue());
+            let busy = Arc::new(AtomicBool::new(true));
+            let injector = {
+                let (q, busy) = (q.clone(), busy.clone());
+                std::thread::spawn(move || {
+                    let mut direct = Vec::new();
+                    for i in 0..50 {
+                        if let InjectRoute::Submit(t) =
+                            queue_or_submit_injection(&q, &busy, format!("m{i}"))
+                        {
+                            direct.push(t);
+                        }
+                    }
+                    direct
+                })
+            };
+            let mut drained = Vec::new();
+            for _ in 0..20 {
+                if let Some(t) = go_idle_taking_injections(&q, &busy) {
+                    drained.extend(t.split("\n\n").map(str::to_string));
+                }
+                busy.store(true, Ordering::SeqCst);
+                std::thread::yield_now();
+            }
+            let direct = injector.join().unwrap();
+            if let Some(t) = go_idle_taking_injections(&q, &busy) {
+                drained.extend(t.split("\n\n").map(str::to_string));
+            }
+            let mut all: Vec<String> = drained.into_iter().chain(direct).collect();
+            all.sort_by_key(|m| m[1..].parse::<u32>().unwrap());
+            let want: Vec<String> = (0..50).map(|i| format!("m{i}")).collect();
+            assert_eq!(all, want);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -6037,6 +6232,7 @@ mod tests {
             "PptxRead",
             "PdfCreate",
             "PdfRead",
+            "DocConvert",
         ] {
             assert!(
                 section.contains(name),
@@ -6340,10 +6536,12 @@ mod tests {
             crate::session::TurnUsage {
                 after: 2,
                 text: "[tokens: 10in/2out · 1s]".into(),
+                cost_usd: 0.0,
             },
             crate::session::TurnUsage {
                 after: 4,
                 text: "[tokens: 20in/4out · 2s]".into(),
+                cost_usd: 0.0,
             },
         ];
 
@@ -6381,6 +6579,7 @@ mod tests {
         session.turn_usage = vec![crate::session::TurnUsage {
             after: 9,
             text: "[tokens: 1in/1out · 0s]".into(),
+            cost_usd: 0.0,
         }];
         let display = DisplayMessage::from_session(&session);
         assert_eq!(display.len(), 2);

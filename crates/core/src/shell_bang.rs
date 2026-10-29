@@ -53,6 +53,12 @@ pub fn parse_bang(line: &str) -> Option<&str> {
 /// handles the resolution. Callers that want to display the result
 /// should wrap it in their own prefix (e.g. `[!] cmd\n<output>`).
 pub async fn run_bang_command(cmd: &str) -> Result<String, String> {
+    if !crate::policy::tool_allowed("Bash") {
+        return Err(format!(
+            "[!] {}",
+            crate::policy::tool_denied_message("Bash")
+        ));
+    }
     let bash = crate::tools::BashTool::default();
     let input = serde_json::json!({ "command": cmd });
     bash.call(input)

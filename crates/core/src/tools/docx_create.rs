@@ -1,6 +1,6 @@
 //! `DocxCreate` — render a markdown string to a Word document via
 //! `docx-rs`. Per-run font properties carry both Latin (`ascii`/`hi_ansi`
-//! → Calibri) and complex-script (`cs` → Noto Sans Thai) families, so a
+//! → Calibri) and complex-script (`cs` → Sarabun) families, so a
 //! single Run mixing Thai+Latin renders correctly without splitting —
 //! Word's text engine picks the right font per codepoint range from the
 //! same Run's properties.
@@ -14,7 +14,8 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use docx_rs::{
     AbstractNumbering, Docx, IndentLevel, Level, LevelJc, LevelText, NumberFormat, Numbering,
-    NumberingId, Paragraph, Pic, Run, RunFonts, Start, Table, TableCell, TableRow,
+    NumberingId, Paragraph, Pic, Run, RunFonts, SpecialIndentType, Start, Style, StyleType, Table,
+    TableCell, TableRow,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde_json::{json, Value};
@@ -23,21 +24,54 @@ use std::path::Path;
 /// Body font size in half-points (OOXML convention). 22 = 11pt.
 const DEFAULT_BODY_HALF_POINTS: usize = 22;
 /// Latin font name. Calibri is Office's default since 2007 — installed
-/// everywhere Word runs and pairs visually with Noto Sans Thai for the
-/// Thai script range.
+/// everywhere Word runs.
 const LATIN_FONT: &str = "Calibri";
 /// Thai script font (cs = complex script in OOXML run-properties terms).
-/// Modern Win/Mac/Linux ship Noto Sans Thai by default; Word falls back
-/// to Tahoma / Cordia New if absent. No font embedding in v1.
-const THAI_FONT: &str = "Noto Sans Thai";
+/// Sarabun (Google Fonts) draws Thai at the same visual size as Calibri, so
+/// cs keeps the Latin point size; the document service has it installed.
+/// TH Sarabun New was tried (2026-10-21) and dropped: it draws small and
+/// needs a larger cs size, and wherever it is missing the substitute at that
+/// size made Thai twice the height of the Latin beside it.
+pub(crate) const THAI_FONT: &str = "Sarabun";
+
+fn run_fonts(primary: &str) -> RunFonts {
+    RunFonts::new()
+        .ascii(primary)
+        .hi_ansi(primary)
+        .cs(THAI_FONT)
+}
+/// Heading1..Heading4 defined in styles.xml. A `pStyle` naming a style the
+/// document does not define renders as body text in LibreOffice (and so in
+/// every preview and PDF made by the document service), so the styles are
+/// spelled out: bold, sized, dark blue, outline levels for a TOC.
+fn with_heading_styles(docx: Docx) -> Docx {
+    [(1usize, 36usize), (2, 30), (3, 26), (4, 24)]
+        .into_iter()
+        .fold(docx, |d, (level, half_points)| {
+            d.add_style(
+                Style::new(format!("Heading{level}"), StyleType::Paragraph)
+                    .name(format!("heading {level}"))
+                    .based_on("Normal")
+                    .next("Normal")
+                    .q_format(true)
+                    .size(half_points)
+                    .bold()
+                    .color("1F3864")
+                    .fonts(run_fonts(LATIN_FONT))
+                    .outline_lvl(level - 1),
+            )
+        })
+}
+
 /// Monospace font for fenced code blocks and inline code.
 const MONO_FONT: &str = "Consolas";
 
-/// Numbering ids used by our list rendering. We pre-register both at
-/// document setup time so list paragraphs can reference them. id=1 is
-/// bullets, id=2 is decimal.
-const BULLET_ID: usize = 1;
-const DECIMAL_ID: usize = 2;
+/// Numbering ids used by our list rendering, registered at document setup.
+/// docx-rs already writes a default decimal abstractNum/num with id 1, and
+/// LibreOffice takes the first definition of an id — so bullets on id 1
+/// rendered as "1. 2.". Ids above the defaults keep ours unambiguous.
+const BULLET_ID: usize = 101;
+const DECIMAL_ID: usize = 102;
 
 pub struct DocxCreateTool;
 
@@ -53,8 +87,8 @@ impl Tool for DocxCreateTool {
          code blocks, **GFM pipe tables** (header row bolded), inline \
          emphasis, and **inline images** via `![alt](path)` (PNG/JPEG, \
          capped at 5 MB; embedded inline at a default 480×360 px). \
-         Run-level fontTable references set Calibri (Latin) + Noto \
-         Sans Thai (complex script), so mixed Thai+Latin paragraphs \
+         Run-level fontTable references set Calibri (Latin) + TH \
+         Sarabun New (complex script), so mixed Thai+Latin paragraphs \
          render correctly without splitting."
     }
 
@@ -111,21 +145,26 @@ impl Tool for DocxCreateTool {
 }
 
 fn render_docx(path: &Path, content: &str, body_pt: usize) -> Result<usize> {
-    let mut docx = Docx::new()
+    let mut docx = with_heading_styles(Docx::new())
         // Bullet list — level 0 only; nested levels future enhancement.
-        // LevelText is the OOXML "%1." or character-bullet template;
-        // for bullets we use the standard Symbol-font character F0B7
-        // which Word renders as a filled round bullet.
+        // "•" (U+2022), not the Symbol-font F0B7 private-use glyph: that
+        // one is an empty box wherever Symbol is missing (LibreOffice, so
+        // every preview and PDF the document service makes).
         .add_abstract_numbering(
             AbstractNumbering::new(BULLET_ID).add_level(
                 Level::new(
                     0,
                     Start::new(1),
                     NumberFormat::new("bullet"),
-                    LevelText::new("\u{F0B7}"),
+                    LevelText::new("\u{2022}"),
                     LevelJc::new("left"),
                 )
-                .indent(Some(720), None, None, None),
+                .indent(
+                    Some(720),
+                    Some(SpecialIndentType::Hanging(360)),
+                    None,
+                    None,
+                ),
             ),
         )
         .add_numbering(Numbering::new(BULLET_ID, BULLET_ID))
@@ -138,7 +177,12 @@ fn render_docx(path: &Path, content: &str, body_pt: usize) -> Result<usize> {
                     LevelText::new("%1."),
                     LevelJc::new("left"),
                 )
-                .indent(Some(720), None, None, None),
+                .indent(
+                    Some(720),
+                    Some(SpecialIndentType::Hanging(360)),
+                    None,
+                    None,
+                ),
             ),
         )
         .add_numbering(Numbering::new(DECIMAL_ID, DECIMAL_ID));
@@ -190,21 +234,14 @@ fn render_docx(path: &Path, content: &str, body_pt: usize) -> Result<usize> {
         if buf.is_empty() {
             return;
         }
-        // For headings we attach the OOXML built-in `HeadingN` style to
-        // the paragraph and emit the run with fonts only — no manual
-        // bold/size. Word, LibreOffice, and Pages all ship built-in
-        // styles for Heading1..9 with the right sizes + bold, so the
-        // doc renders correctly in every viewer AND DocxRead picks up
-        // the heading semantically via its `<w:pStyle>` detection (so
-        // the Files-tab preview can render `<h1>` etc.). Layering manual
-        // bold/size on top of the style would override the style values.
+        // For headings we attach the `HeadingN` style (defined in
+        // styles.xml by `with_heading_styles`) and emit the run with fonts
+        // only, so DocxRead still sees the heading through `<w:pStyle>`.
+        // Manual bold/size on the run would override the style.
         let run = if heading.is_some() {
-            Run::new().add_text(buf.as_str()).fonts(
-                RunFonts::new()
-                    .ascii(LATIN_FONT)
-                    .hi_ansi(LATIN_FONT)
-                    .cs(THAI_FONT),
-            )
+            Run::new()
+                .add_text(buf.as_str())
+                .fonts(run_fonts(LATIN_FONT))
         } else {
             make_run(buf, pt, bold, italic, mono)
         };
@@ -549,11 +586,11 @@ fn load_image_for_docx(dest_url: &str) -> Option<Pic> {
 
 fn make_run(text: &str, pt_half: usize, bold: bool, italic: bool, mono: bool) -> Run {
     let primary = if mono { MONO_FONT } else { LATIN_FONT };
-    let fonts = RunFonts::new()
-        .ascii(primary)
-        .hi_ansi(primary)
-        .cs(THAI_FONT);
-    let mut run = Run::new().add_text(text).size(pt_half).fonts(fonts);
+    let mut run = Run::new()
+        .add_text(text)
+        .size(pt_half)
+        .fonts(run_fonts(primary));
+    run.run_property.sz_cs = Some(docx_rs::SzCs::new(pt_half));
     if bold {
         run = run.bold();
     }
@@ -629,6 +666,30 @@ mod tests {
         assert!(extracted.contains("Sandwich"), "row missing: {extracted:?}");
     }
 
+    #[tokio::test]
+    async fn thai_runs_carry_the_complex_script_font() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("memo.docx");
+        DocxCreateTool
+            .call(json!({
+                "path": path.to_string_lossy(),
+                "content": "# บันทึก\n\nงบประมาณ 6,000,000 บาท"
+            }))
+            .await
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml)
+            .unwrap();
+        assert!(xml.contains(r#"w:cs="Sarabun""#), "{xml}");
+        assert!(!xml.contains("w:hint"), "no cs hint on mixed runs: {xml}");
+        assert!(xml.contains(r#"w:ascii="Calibri""#), "{xml}");
+        assert!(
+            !xml.contains(r#"<w:szCs w:val="32""#),
+            "Thai keeps the Latin size: {xml}"
+        );
+    }
+
     #[test]
     fn heading_levels_map_correctly() {
         assert_eq!(map_heading_level(HeadingLevel::H1), 1);
@@ -639,5 +700,54 @@ mod tests {
         // are barely distinguishable from body text.
         assert_eq!(map_heading_level(HeadingLevel::H5), 4);
         assert_eq!(map_heading_level(HeadingLevel::H6), 4);
+    }
+
+    #[tokio::test]
+    async fn heading_styles_are_defined() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("h.docx");
+        DocxCreateTool
+            .call(json!({"path": path.to_string_lossy(), "content": "# หัวข้อ\n\n## ย่อย\n\nเนื้อหา"}))
+            .await
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut styles = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/styles.xml").unwrap(), &mut styles)
+            .unwrap();
+        for level in 1..=4 {
+            assert!(
+                styles.contains(&format!(r#"w:styleId="Heading{level}""#)),
+                "{styles}"
+            );
+        }
+        assert!(styles.contains(r#"<w:outlineLvl w:val="0" />"#), "{styles}");
+    }
+
+    #[tokio::test]
+    async fn bullets_do_not_share_an_id_with_docx_rs_defaults() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("b.docx");
+        DocxCreateTool
+            .call(json!({"path": path.to_string_lossy(), "content": "- หนึ่ง\n- สอง"}))
+            .await
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut numbering = String::new();
+        std::io::Read::read_to_string(
+            &mut zip.by_name("word/numbering.xml").unwrap(),
+            &mut numbering,
+        )
+        .unwrap();
+        let defs = numbering
+            .matches(&format!(r#"w:abstractNumId="{BULLET_ID}""#))
+            .count();
+        assert_eq!(defs, 1, "exactly one abstractNum {BULLET_ID}: {numbering}");
+        let mut doc = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut doc)
+            .unwrap();
+        assert!(
+            doc.contains(&format!(r#"<w:numId w:val="{BULLET_ID}" />"#)),
+            "{doc}"
+        );
     }
 }

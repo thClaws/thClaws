@@ -410,7 +410,7 @@ block ของเฟสที่ยังไม่ทำจะถูกยอ�
 | ข้อจำกัด | ในทางปฏิบัติแปลว่าอะไร |
 |---|---|
 | string บางจุดใน React GUI ยังขึ้นว่า "thClaws" | branding ฝั่งหลังบ้าน (REPL banner, ชื่อหน้าต่าง GUI, system prompt) ทำงานเต็มที่ แต่ string บางตัวในหน้าต่าง GUI ยังไม่ผ่าน branding module เป็นเรื่องผิวๆ |
-| MCP server แบบ **stdio** ไม่ถูก allow-list คุม | กรองเฉพาะ MCP แบบ HTTP เนื้อหาใน `mcp.json` เป็นความรับผิดชอบของผู้ดูแลระบบ |
+| plugin allow-list กันที่การติดตั้ง ไม่ใช่ที่ดิสก์ | เมื่อ `allow_external_mcp: false` MCP server แบบ stdio ถูกปฏิเสธ และแบบ HTTP ต้องตรง `allowed_hosts` แต่ไฟล์ที่คัดลอกลงโฟลเดอร์ skills หรือ plugins ตรงๆ (ด้วยมือหรือด้วย `Bash` ของ agent) ยังโหลดอยู่ ให้ใช้คู่กับ `runtime.deny_tools` และ egress filtering |
 | `WebFetch` / `WebSearch` ไม่วิ่งผ่าน gateway | มันคือการเข้าเว็บทั่วไป ให้ใช้ network firewall ดูแล |
 | `gateway.fail_closed` บังคับด้วยโครงสร้างโค้ด | ไม่มีเส้นทางไหนสร้าง provider ตรงได้ขณะ gateway ทำงาน แต่ไม่มี guard แยกที่ชั้น HTTP |
 | audit sink เป็น fail-open | SIEM ที่ติดต่อไม่ได้ไม่เคยบล็อก tool call ของที่หายถูกนับและแสดงใน `/policy status` ถ้าท่าทีด้าน compliance ของคุณต้องการ audit แบบ fail-closed บอกเราได้ — เป็น change request ไม่ใช่ flag |

@@ -32,6 +32,73 @@ const MAX_TEXT_BYTES: u64 = 100 * 1024 * 1024;
 
 pub struct ReadTool;
 
+/// Which tool reads a binary document Read cannot. By extension first, then
+/// by the bytes for a file whose name lies — otherwise the model only ever
+/// saw "stream did not contain valid UTF-8" and guessed at a fix.
+fn document_reader_hint(path: &std::path::Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let by_ext = match ext.as_str() {
+        "pdf" => Some("PdfRead"),
+        "docx" => Some("DocxRead"),
+        "xlsx" | "xls" | "xlsm" | "ods" => Some("XlsxRead"),
+        "pptx" => Some("PptxRead"),
+        "doc" | "ppt" | "odt" | "odp" => Some("DocConvert"),
+        "epub" => Some("epub"),
+        _ => None,
+    };
+    let tool = match by_ext {
+        Some(t) => t,
+        None => sniff_document(path)?,
+    };
+    let name = path.display();
+    Some(match tool {
+        "DocConvert" => format!(
+            "{name} is a legacy/OpenDocument office file that Read cannot open. Convert it \
+             with DocConvert (to docx/pptx/xlsx), then read the result with \
+             DocxRead/PptxRead/XlsxRead."
+        ),
+        "epub" => format!(
+            "{name} is an EPUB (a zip of XHTML chapters) that Read cannot open as text. \
+             List and extract its chapters with Bash (`unzip -l`, `unzip -p`)."
+        ),
+        t => format!("{name} is a binary document that Read cannot open — use {t} instead."),
+    })
+}
+
+fn sniff_document(path: &std::path::Path) -> Option<&'static str> {
+    use std::io::Read as _;
+    let mut head = [0u8; 8];
+    let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
+    let head = &head[..n];
+    if head.starts_with(b"%PDF") {
+        return Some("PdfRead");
+    }
+    if head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        return Some("DocConvert");
+    }
+    if !head.starts_with(b"PK\x03\x04") {
+        return None;
+    }
+    let archive = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
+    let names: Vec<&str> = archive.file_names().collect();
+    let has = |p: &str| names.iter().any(|n| n.starts_with(p));
+    if has("word/") {
+        Some("DocxRead")
+    } else if has("xl/") {
+        Some("XlsxRead")
+    } else if has("ppt/") {
+        Some("PptxRead")
+    } else if has("META-INF/container.xml") {
+        Some("epub")
+    } else {
+        None
+    }
+}
+
 /// Detect a supported image MIME type from the file extension. Returns
 /// `None` for non-image extensions, in which case the Read tool falls
 /// through to the text branch. The extension only gates whether we
@@ -165,7 +232,9 @@ impl Tool for ReadTool {
          Image files (.png/.jpg/.jpeg/.webp/.gif) are returned as inline \
          multimodal content so vision-capable models (Claude, etc.) can \
          see the pixels — the model receives the image alongside a text \
-         summary describing size and MIME type."
+         summary describing size and MIME type. Not for office documents: \
+         use PdfRead (.pdf), DocxRead (.docx), XlsxRead (.xlsx/.xls/.ods), \
+         PptxRead (.pptx), and DocConvert first for .doc/.ppt/.odt."
     }
 
     fn input_schema(&self) -> Value {
@@ -221,6 +290,9 @@ impl Tool for ReadTool {
             )));
         }
 
+        if let Some(hint) = document_reader_hint(&path) {
+            return Err(Error::Tool(hint));
+        }
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
 
@@ -323,6 +395,55 @@ impl Tool for ReadTool {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn office_documents_name_the_tool_that_reads_them() {
+        let dir = tempdir().unwrap();
+        let read = |p: &std::path::Path| {
+            let p = p.to_string_lossy().to_string();
+            async move {
+                ReadTool
+                    .call(json!({"path": p}))
+                    .await
+                    .unwrap_err()
+                    .to_string()
+            }
+        };
+
+        let pdf = dir.path().join("minutes.pdf");
+        std::fs::write(&pdf, b"%PDF-1.7\n\xff\xfe").unwrap();
+        assert!(read(&pdf).await.contains("PdfRead"));
+
+        let mislabeled = dir.path().join("scan.dat");
+        std::fs::write(&mislabeled, b"%PDF-1.4\n\xff").unwrap();
+        assert!(read(&mislabeled).await.contains("PdfRead"));
+
+        let docx = dir.path().join("memo.bin");
+        {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&docx).unwrap());
+            zip.start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            std::io::Write::write_all(&mut zip, b"<w:document/>").unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(read(&docx).await.contains("DocxRead"));
+
+        for (name, tool) in [
+            ("budget.xlsx", "XlsxRead"),
+            ("old.xls", "XlsxRead"),
+            ("deck.pptx", "PptxRead"),
+            ("letter.doc", "DocConvert"),
+        ] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, b"\x00\x01binary").unwrap();
+            let err = read(&p).await;
+            assert!(err.contains(tool), "{name}: {err}");
+            assert!(!err.contains("UTF-8"), "{name}: {err}");
+        }
+    }
 
     #[tokio::test]
     async fn reads_whole_file() {

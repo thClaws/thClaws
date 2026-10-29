@@ -44,4 +44,9 @@ jobs:
         # RUSTSEC-2026-0204 (crossbeam-epoch fmt::Pointer on an invalid raw
         # pointer, low): the engine never Debug-formats a raw Atomic; real fix
         # is crossbeam-epoch >=0.9.20 once the MSRV-aware resolver selects it.
-        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0204
+        # RUSTSEC-2026-0367 / -0368 / -0369 (zip: SUID bits, symlink targets and
+        # permissions through symlinks in ZipArchive::extract / ZipStreamReader):
+        # neither the engine nor rust_xlsxwriter, calamine, docx-rs or
+        # umya-spreadsheet calls those extract APIs — the engine extracts entry
+        # by entry with its own path checks. Fix is zip >=9 (major) via those deps.
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0204 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369

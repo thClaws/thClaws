@@ -90,11 +90,20 @@ Gemini: `flash` (default; gemini-3.1-flash-image) or `pro` (gemini-3-pro-image).
 OpenAI: `flare` (default; gpt-image-2.5-flare — better and faster than gpt-image-2 at the same price) or `sunburst` (gpt-image-2.5-sunburst — premium editing/inpainting, slower). `gpt-image-2` still resolves. Qwen: `qwen-image-3.0` (alias `qwen-3`) or \
 `qwen-image-3.0-pro` — newest, best at dense layouts and small text; `qwen-image-2.0` \
 (alias `qwen`) / `-pro` remain. Strong at multi-image editing + text rendering. \
-Also `qwen-image-max` / `-plus` (text→image), `qwen-image-edit-plus` / `-edit-max` \
-(editing only), `wan2.7-image` / `-pro`, `z-image-turbo` (text→image). \
+Also `wan2.7-image` / `-pro` (text→image and editing — the Alibaba editor), \
+`z-image-turbo` (text→image). \
 iApp: `iapp` (iapp-image-generation) — Thai-first; the only backend that typesets \
 Thai copy correctly, via the `text` + `font` params. Default: flash (where the \
 gateway serves only DashScope: qwen-image-2.0).";
+
+fn model_desc() -> String {
+    match registry::reachable_image_models() {
+        Some(ids) => {
+            format!("{MODEL_DESC} This workspace can only reach: {ids} — pick one of these.")
+        }
+        None => MODEL_DESC.to_string(),
+    }
+}
 const PROVIDER_DESC: &str = "Optional explicit provider (`gemini` | `openai` | `qwen` \
 | `iapp`). Usually omit — it's inferred from `model`.";
 
@@ -151,7 +160,7 @@ impl Tool for TextToImageTool {
                     "type": "string",
                     "description": "Description of the image. Be specific about subject, style, composition, colors. A 2–3 sentence brief beats a one-word tag."
                 },
-                "model": { "type": "string", "description": MODEL_DESC },
+                "model": { "type": "string", "description": model_desc() },
                 "provider": { "type": "string", "description": PROVIDER_DESC, "enum": ["gemini", "openai", "qwen", "iapp"] },
                 "aspect_ratio": {
                     "type": "string",
@@ -240,7 +249,7 @@ impl Tool for ImageToImageTool {
                     "type": "string",
                     "description": "What to change. Be explicit about what should STAY the same — vague prompts produce drift."
                 },
-                "model": { "type": "string", "description": MODEL_DESC },
+                "model": { "type": "string", "description": model_desc() },
                 "provider": { "type": "string", "description": PROVIDER_DESC, "enum": ["gemini", "openai", "qwen", "iapp"] },
                 "aspect_ratio": { "type": "string", "enum": ["1:1", "3:4", "4:3", "9:16", "16:9"] },
                 "size": { "type": "string", "enum": ["512", "1K", "2K"] },
@@ -283,6 +292,7 @@ impl Tool for ImageToImageTool {
             _ => "image/png",
         }
         .to_string();
+        let (in_bytes, in_mime) = crate::media::fit_input_image(in_bytes, in_mime);
 
         let req = ImageRequest {
             model,

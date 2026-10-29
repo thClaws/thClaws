@@ -1338,6 +1338,7 @@ async fn oneshot_with_system(
             Ok(Some(Ok(ProviderEvent::TextDelta(s)))) => text.push_str(&s),
             Ok(Some(Ok(ProviderEvent::MessageStop { usage, .. }))) => {
                 if let Some(u) = usage {
+                    crate::usage::note_side_usage(model, &u);
                     let _ = RUN_USAGE.try_with(|l| {
                         if let Ok(mut g) = l.lock() {
                             g.add(model, &u);

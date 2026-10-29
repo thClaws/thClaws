@@ -456,6 +456,20 @@ pub fn entry_tags<T: MarketplaceEntry>(entry: &T) -> String {
 }
 
 impl Marketplace {
+    /// A catalogue with nothing in it, standing in for an unreachable
+    /// private marketplace.
+    pub fn empty(source: &str) -> Self {
+        Self {
+            schema: CURRENT_SCHEMA,
+            source: source.to_string(),
+            fetched_at: String::new(),
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            plugins: Vec::new(),
+            subagents: Vec::new(),
+        }
+    }
+
     /// Parse a JSON body into a marketplace catalogue, rejecting wrong
     /// schemas. Used for both the embedded baseline and the user cache.
     /// Soft API: returns `Option` to keep `load_cache` and the baseline
@@ -535,11 +549,144 @@ impl Marketplace {
 /// explicit (`refresh_from_remote`), not part of the load path, so the
 /// REPL stays snappy on launch.
 pub fn load() -> Marketplace {
+    if let Some(url) = crate::policy::marketplace_only_url() {
+        // Private marketplace: its own cache, never the thclaws.ai
+        // baseline — an unreachable catalogue offers nothing.
+        return load_cache().unwrap_or_else(|| Marketplace::empty(&url));
+    }
     if let Some(cache) = load_cache() {
         return cache;
     }
     Marketplace::from_json_str(BASELINE_JSON)
         .expect("embedded marketplace baseline must parse — check resources/marketplace.json")
+}
+
+/// The catalogue URL refresh fetches: the org's private marketplace in
+/// marketplace-only mode, else thclaws.ai.
+fn remote_url() -> Result<String, RefreshError> {
+    match crate::policy::marketplace_only_url() {
+        Some(url) if url.is_empty() => Err(RefreshError::Http(
+            "marketplace-only mode has no catalogue URL".to_string(),
+        )),
+        Some(url) => Ok(url),
+        None => Ok(REMOTE_URL.to_string()),
+    }
+}
+
+/// `scheme://host[:port]` of a URL, for same-origin checks.
+fn origin(url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(url).ok()?;
+    Some(
+        format!("{}://{}", u.scheme(), u.host_str()?.to_ascii_lowercase())
+            + &u.port().map(|p| format!(":{p}")).unwrap_or_default(),
+    )
+}
+
+/// Bearer token for a request to the private marketplace's own host
+/// (catalogue and item downloads sit behind the tenant's sign-in).
+/// `None` for any other host, so the token never leaves the tenant.
+pub fn auth_token_for(url: &str) -> Option<String> {
+    let market = crate::policy::marketplace_only_url().filter(|u| !u.is_empty())?;
+    same_origin(url, &market)
+        .then(crate::cloud::token)
+        .flatten()
+}
+
+pub fn same_origin(a: &str, b: &str) -> bool {
+    matches!((origin(a), origin(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// In marketplace-only mode, whether `url` is the `install_url` of a
+/// skill, plugin or subagent in the private catalogue — the only URLs
+/// an install may fetch. Always `true` outside that mode.
+pub fn install_url_allowed(url: &str) -> bool {
+    if crate::policy::marketplace_only_url().is_none() {
+        return true;
+    }
+    install_url_listed(&load(), url)
+}
+
+pub fn install_url_listed(mp: &Marketplace, url: &str) -> bool {
+    let url = url.trim();
+    !url.is_empty()
+        && mp
+            .skills
+            .iter()
+            .filter_map(|e| e.install_url.as_deref())
+            .chain(mp.plugins.iter().map(|e| e.install_url.as_str()))
+            .chain(mp.subagents.iter().filter_map(|e| e.install_url.as_deref()))
+            .any(|u| u.trim() == url)
+}
+
+/// The "not found" hint: outside marketplace-only mode it may point at
+/// URL installs; inside, the only way in is an admin adding the item.
+pub fn not_found_hint(open_hint: &str) -> String {
+    if crate::policy::marketplace_only_url().is_some() {
+        "ask an admin to add it to your organisation's marketplace".to_string()
+    } else {
+        open_hint.to_string()
+    }
+}
+
+/// Refusal text for an install outside the private catalogue.
+pub fn install_refusal(kind: &str) -> String {
+    format!(
+        "{kind} install blocked by org policy: install from your organisation's marketplace by name (/{kind} marketplace to browse)"
+    )
+}
+
+/// In marketplace-only mode, whether an MCP server config is one the
+/// private catalogue lists (same name and endpoint/command) or one an
+/// installed plugin contributes.
+pub fn mcp_server_listed(cfg: &crate::mcp::McpServerConfig) -> bool {
+    mcp_server_listed_in(&load(), &crate::plugins::plugin_mcp_servers(), cfg)
+}
+
+pub fn mcp_server_listed_in(
+    mp: &Marketplace,
+    plugin_servers: &[crate::mcp::McpServerConfig],
+    cfg: &crate::mcp::McpServerConfig,
+) -> bool {
+    let listed = mp.mcp_servers.iter().any(|e| {
+        e.name == cfg.name
+            && if cfg.transport == "http" {
+                e.transport == "sse" && e.url.trim() == cfg.url.trim()
+            } else {
+                e.transport == "stdio" && e.command == cfg.command && e.args == cfg.args
+            }
+    });
+    listed
+        || plugin_servers.iter().any(|p| {
+            p.name == cfg.name
+                && p.transport == cfg.transport
+                && p.url == cfg.url
+                && p.command == cfg.command
+                && p.args == cfg.args
+        })
+}
+
+/// Refresh the private catalogue when its cache is missing or older
+/// than a few minutes, so an install sees what the admin just added.
+/// No-op outside marketplace-only mode; failures keep the old cache.
+pub async fn ensure_fresh() {
+    if crate::policy::marketplace_only_url().is_none() {
+        return;
+    }
+    if cache_age_secs().is_some_and(|s| s < PRIVATE_FRESH_SECS) {
+        return;
+    }
+    let _ = refresh_from_remote().await;
+}
+
+const PRIVATE_FRESH_SECS: u64 = 5 * 60;
+
+/// Marketplace-only mode: refetch before resolving an install by name or
+/// listing the catalogue, so an item the admin added a minute ago shows up
+/// instead of the stale cache answering "no skill named …".
+pub async fn refresh_private() {
+    if crate::policy::marketplace_only_url().is_some() {
+        let _ = refresh_from_remote().await;
+    }
 }
 
 fn load_cache() -> Option<Marketplace> {
@@ -556,10 +703,19 @@ pub fn cache_path() -> Option<PathBuf> {
     } else {
         crate::util::home_dir()?.join(".config")
     };
-    Some(
-        base.join(crate::profile::app_dir_name())
-            .join("marketplace.json"),
-    )
+    let file = match crate::policy::marketplace_only_url() {
+        // One cache per private host, so a desktop that moves between
+        // orgs (or back to open-core) never reads the wrong catalogue.
+        Some(url) => format!(
+            "marketplace-{}.json",
+            origin(&url)
+                .unwrap_or_default()
+                .replace("://", "-")
+                .replace([':', '/'], "-")
+        ),
+        None => "marketplace.json".to_string(),
+    };
+    Some(base.join(crate::profile::app_dir_name()).join(file))
 }
 
 /// Cache-age threshold for the daily auto-refresh. M6.11 fix H1 — the
@@ -637,8 +793,13 @@ fn pretty_age(secs: u64) -> String {
 /// Called once from the GUI worker boot path. Cheap when the cache is
 /// fresh (single fs::metadata call, no network).
 pub fn spawn_daily_auto_refresh() {
+    let max_age = if crate::policy::marketplace_only_url().is_some() {
+        PRIVATE_FRESH_SECS
+    } else {
+        AUTO_REFRESH_AFTER_SECS
+    };
     let needs_refresh = match cache_age_secs() {
-        Some(secs) => secs >= AUTO_REFRESH_AFTER_SECS,
+        Some(secs) => secs >= max_age,
         None => true, // no cache → fetch
     };
     if !needs_refresh {
@@ -690,8 +851,12 @@ fn http_client() -> Option<&'static reqwest::Client> {
 pub async fn refresh_from_remote() -> Result<RefreshOutcome, RefreshError> {
     let client = http_client()
         .ok_or_else(|| RefreshError::Http("failed to build HTTP client (TLS init?)".to_string()))?;
-    let resp = client
-        .get(REMOTE_URL)
+    let url = remote_url()?;
+    let mut req = client.get(&url);
+    if let Some(token) = auth_token_for(&url) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| RefreshError::Http(e.to_string()))?;
@@ -1227,5 +1392,115 @@ mod tests {
         // the new `subagents` field present (default empty is fine).
         let m = Marketplace::from_json_str(BASELINE_JSON).unwrap();
         let _ = m.subagents.len();
+    }
+    fn private_catalogue() -> Marketplace {
+        Marketplace::from_json_str(
+            r#"{"schema":1,"source":"https://sis.thclaws.ai/api/marketplace.json",
+            "skills":[{"name":"report","description":"d","license":"proprietary","license_tier":"open",
+              "install_url":"https://sis.thclaws.ai/api/marketplace/items/1.zip"}],
+            "plugins":[{"name":"kit","description":"d","license":"proprietary","license_tier":"open",
+              "install_url":"https://sis.thclaws.ai/api/marketplace/items/2.zip"}],
+            "subagents":[],
+            "mcp_servers":[
+              {"name":"kb","description":"d","license":"proprietary","license_tier":"open","transport":"sse","url":"https://mcp.sis.example/v1"},
+              {"name":"fs","description":"d","license":"proprietary","license_tier":"open","transport":"stdio","command":"sis-fs","args":["--ro"]}]}"#,
+        )
+        .unwrap()
+    }
+
+    fn mcp_cfg(
+        name: &str,
+        transport: &str,
+        url: &str,
+        command: &str,
+        args: &[&str],
+    ) -> crate::mcp::McpServerConfig {
+        crate::mcp::McpServerConfig {
+            name: name.into(),
+            transport: transport.into(),
+            command: command.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            env: Default::default(),
+            url: url.into(),
+            headers: Default::default(),
+            trusted: false,
+            engine_managed: false,
+        }
+    }
+
+    #[test]
+    fn only_catalogue_install_urls_are_listed() {
+        let mp = private_catalogue();
+        assert!(install_url_listed(
+            &mp,
+            "https://sis.thclaws.ai/api/marketplace/items/1.zip"
+        ));
+        assert!(install_url_listed(
+            &mp,
+            "https://sis.thclaws.ai/api/marketplace/items/2.zip"
+        ));
+        for url in [
+            "https://github.com/anthropics/skills.git",
+            "https://sis.thclaws.ai/api/marketplace/items/3.zip",
+            "./my-skill",
+            "",
+        ] {
+            assert!(!install_url_listed(&mp, url), "{url}");
+        }
+    }
+
+    #[test]
+    fn mcp_must_match_a_catalogue_entry_or_an_installed_plugin() {
+        let mp = private_catalogue();
+        assert!(mcp_server_listed_in(
+            &mp,
+            &[],
+            &mcp_cfg("kb", "http", "https://mcp.sis.example/v1", "", &[])
+        ));
+        assert!(mcp_server_listed_in(
+            &mp,
+            &[],
+            &mcp_cfg("fs", "stdio", "", "sis-fs", &["--ro"])
+        ));
+        // Same name, different endpoint or command: not the vetted server.
+        assert!(!mcp_server_listed_in(
+            &mp,
+            &[],
+            &mcp_cfg("kb", "http", "https://evil.example/v1", "", &[])
+        ));
+        assert!(!mcp_server_listed_in(
+            &mp,
+            &[],
+            &mcp_cfg("fs", "stdio", "", "npx", &["evil-mcp"])
+        ));
+        assert!(!mcp_server_listed_in(
+            &mp,
+            &[],
+            &mcp_cfg("other", "stdio", "", "sis-fs", &["--ro"])
+        ));
+        let from_plugin = mcp_cfg("kit-mcp", "stdio", "", "kit-server", &[]);
+        assert!(mcp_server_listed_in(
+            &mp,
+            std::slice::from_ref(&from_plugin),
+            &from_plugin
+        ));
+    }
+
+    #[test]
+    fn the_token_only_goes_to_the_marketplace_host() {
+        let m = "https://sis.thclaws.ai/api/marketplace.json";
+        assert!(same_origin(
+            "https://sis.thclaws.ai/api/marketplace/items/1.zip",
+            m
+        ));
+        assert!(same_origin("https://SIS.thclaws.ai/x", m));
+        assert!(!same_origin(
+            "https://evil.example/api/marketplace/items/1.zip",
+            m
+        ));
+        assert!(!same_origin("https://sis.thclaws.ai.evil.example/x", m));
+        assert!(!same_origin("http://sis.thclaws.ai/x", m));
+        assert!(!same_origin("https://sis.thclaws.ai:8443/x", m));
+        assert!(!same_origin("not a url", m));
     }
 }

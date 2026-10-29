@@ -291,6 +291,9 @@ pub async fn compact_with_summary(
     match provider.stream(req).await {
         Ok(stream) => {
             let result = crate::providers::collect_turn(crate::providers::assemble(stream)).await;
+            if let Ok(crate::providers::TurnResult { usage: Some(u), .. }) = &result {
+                crate::usage::note_side_usage(model, u);
+            }
             match result {
                 Ok(turn) if !turn.text.is_empty() => {
                     let mut out = Vec::with_capacity(1 + recent.len());

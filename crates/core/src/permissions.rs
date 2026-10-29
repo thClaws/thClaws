@@ -110,6 +110,7 @@ pub fn current_mode() -> PermissionMode {
 /// `/plan` slash command, sidebar Approve / Cancel, and the worker's
 /// startup-from-config init.
 pub fn set_current_mode(mode: PermissionMode) {
+    let mode = crate::policy::clamp_permission_mode(mode);
     if let Ok(mut g) = current_mode_slot().lock() {
         *g = mode;
     }
@@ -176,7 +177,7 @@ fn fire_mode_changed(mode: PermissionMode) {
 /// Convenience: set + broadcast in one call. Most callers want both.
 pub fn set_current_mode_and_broadcast(mode: PermissionMode) {
     set_current_mode(mode);
-    fire_mode_changed(mode);
+    fire_mode_changed(current_mode());
 }
 
 /// Identity of the agent making an approval request. The frontend

@@ -43,10 +43,10 @@ fn opt(input: &Value, key: &str) -> String {
         .to_string()
 }
 
-struct SlideEndpoint {
-    url: String,
-    bearer: Option<String>,
-    via_gateway: bool,
+pub(crate) struct SlideEndpoint {
+    pub(crate) url: String,
+    pub(crate) bearer: Option<String>,
+    pub(crate) via_gateway: bool,
 }
 
 /// Native (`SLIDE_RENDER_API`) wins over the gateway so a self-hosted /
@@ -60,7 +60,7 @@ fn resolve_slide_endpoint() -> Result<SlideEndpoint> {
 /// `pptx`). Split out when `/pptx` landed — the two share every rule
 /// (native URL wins over gateway, gateway is the zero-config fallback)
 /// and only differ in the path.
-fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint> {
+pub(crate) fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint> {
     if let Ok(base) = std::env::var("SLIDE_RENDER_API") {
         let base = base.trim();
         if !base.is_empty() {
@@ -74,6 +74,18 @@ fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint> {
                 via_gateway: false,
             });
         }
+    }
+    // On an AI Server box the document must not leave the machine just
+    // because a cloud login happens to be lying around (dev-plan/71: the
+    // Suite test matrix converted a .docx through gateway.thclaws.cloud).
+    if cloud_fallback_blocked(crate::aiserver::cached().is_some(), cloud_render_allowed()) {
+        return Err(Error::Tool(
+            "this AI Server box has no local document service, and documents are not sent to \
+             the cloud from here. Install slide-render from the AI Server hub (it is announced \
+             in discovery), or set THCLAWS_ALLOW_CLOUD_RENDER=1 to render through the thClaws \
+             Gateway instead."
+                .into(),
+        ));
     }
     if let Some(key) = crate::providers::thclaws_gateway::resolve_access_key() {
         let base = crate::providers::thclaws_gateway::resolve_base_url();
@@ -90,6 +102,15 @@ fn resolve_slide_endpoint_for(endpoint: &str) -> Result<SlideEndpoint> {
          point SLIDE_RENDER_API at it."
             .into(),
     ))
+}
+
+fn cloud_fallback_blocked(on_aiserver_box: bool, allowed: bool) -> bool {
+    on_aiserver_box && !allowed
+}
+
+fn cloud_render_allowed() -> bool {
+    std::env::var("THCLAWS_ALLOW_CLOUD_RENDER").is_ok_and(|v| v.trim() == "1")
+        || crate::providers::thclaws_gateway::cloud_allowed_on_aiserver()
 }
 
 fn mime_of(name: &str) -> &'static str {
@@ -585,6 +606,45 @@ pub async fn render_pptx_preview(workspace: &Path, deck: &Path) -> Result<std::p
     Ok(pdf)
 }
 
+/// Render a Word or Excel file to a PDF for the Files tab, through the
+/// document service's `/convert` (LibreOffice). Same content-hash cache and
+/// failure marker as a deck, so [`pptx_preview_state`] decides for both; a
+/// `.pptx` goes to [`render_pptx_preview`] for its per-slide PNGs. The text
+/// extraction this replaces dropped charts and Word tables.
+pub async fn render_office_preview(workspace: &Path, file: &Path) -> Result<std::path::PathBuf> {
+    let is_pptx = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pptx"));
+    if is_pptx {
+        return render_pptx_preview(workspace, file).await;
+    }
+    let dir = pptx_cache_dir(workspace, file)?;
+    let pdf = dir.join("deck.pdf");
+    if pdf.is_file() {
+        return Ok(pdf);
+    }
+    let ep = resolve_slide_endpoint_for("convert")?;
+    let bytes = match super::doc_render::convert(&ep, file, "pdf").await {
+        Ok(b) => b,
+        Err(e) => {
+            let reason = e.to_string();
+            if reason.contains("http 4") {
+                mark_render_failed(workspace, file, &reason);
+            }
+            return Err(e);
+        }
+    };
+    if !bytes.starts_with(b"%PDF") {
+        return Err(Error::Tool("document service returned no pdf".into()));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| Error::Tool(format!("mkdir cache: {e}")))?;
+    let tmp = dir.join("deck.pdf.part");
+    std::fs::write(&tmp, &bytes).map_err(|e| Error::Tool(format!("write preview: {e}")))?;
+    std::fs::rename(&tmp, &pdf).map_err(|e| Error::Tool(format!("write preview: {e}")))?;
+    Ok(pdf)
+}
+
 /// Ceiling on a deck we'll upload. Rejecting here gives the user a
 /// reason ("deck is 240 MB, over the 200 MB render limit") instead of a
 /// bare 413 from the gateway. Kept just under the two caps behind it —
@@ -594,6 +654,13 @@ const MAX_PPTX_BYTES: u64 = 200 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_aiserver_box_never_falls_back_to_the_cloud_unless_allowed() {
+        assert!(super::cloud_fallback_blocked(true, false));
+        assert!(!super::cloud_fallback_blocked(true, true));
+        assert!(!super::cloud_fallback_blocked(false, false));
+    }
+
     use super::*;
 
     /// The Files tab re-reads an open file on a timer, so this decision
@@ -714,5 +781,25 @@ mod tests {
         assert!(!ep.via_gateway);
         std::env::remove_var("SLIDE_RENDER_API");
         std::env::remove_var("SLIDE_RENDER_TOKEN");
+    }
+
+    /// Live: `SLIDE_RENDER_API=http://… cargo test --lib -- --ignored office_preview_renders`
+    #[tokio::test]
+    #[ignore]
+    async fn office_preview_renders_docx_and_xlsx_to_pdf() {
+        let ws = tempfile::tempdir().unwrap();
+        for f in ["budget.xlsx", "memo.docx"] {
+            let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/office/testdata")
+                .join(f);
+            let file = ws.path().join(f);
+            std::fs::copy(&src, &file).unwrap();
+            let pdf = render_office_preview(ws.path(), &file).await.unwrap();
+            assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF"), "{f}");
+            assert!(matches!(
+                pptx_preview_state(ws.path(), &file),
+                PptxPreview::Ready(_)
+            ));
+        }
     }
 }

@@ -31,15 +31,20 @@
 //!
 //! The cost of that choice is that poppler has to be installed, which a
 //! desktop user has not done and a Windows user has no instructions for.
-//! So when `pdftotext` is missing, extraction falls back to the public
-//! `pdf.thclaws.cloud` service — no account, no key (dev-plan/66). The
-//! file leaves the machine, so that path is approval-gated, names the
-//! destination in the prompt, marks its output, and is switched off by
-//! `"pdfCloudFallback": false` or `THCLAWS_PDF_CLOUD=0`. It is a stopgap
-//! for the install problem, not a change of extractor: when poppler is
-//! present nothing here reaches the network.
+//! So when `pdftotext` is missing, text comes from the document service on
+//! the gateway (`/pdf/text`, dev-plan/69) and, on open-core only, from the
+//! public `pdf.thclaws.cloud` service (dev-plan/66). The file leaves the
+//! machine, so those paths are approval-gated — except on an EE install,
+//! whose gateway is the organisation's own — and the result says where the
+//! text came from. When poppler is present nothing here reaches the network
+//! unless the caller asks for `ocr: "tesseract"` or the install is EE.
+//!
+//! Scans: `ocr: "auto"` OCRs them on the document service (tesseract,
+//! tha+eng) and hands pages under `OCR_MIN_CONFIDENCE` to the vision model
+//! as images; with no service it is the vision path alone, as before.
 
-use super::{req_str, Tool};
+use super::slide_render::SlideEndpoint;
+use super::{doc_render, req_str, Tool};
 use crate::error::{Error, Result};
 use crate::types::{ImageSource, ToolResultBlock, ToolResultContent};
 use async_trait::async_trait;
@@ -106,9 +111,47 @@ mod fallback {
     /// reads 1.0 in both modes, and no spacing rule can help it; it belongs on
     /// the vision path.
     pub const MIN_THAI_RUN: f32 = 2.0;
+    /// Ceiling on a whole-document OCR (Files-tab "Convert to markdown"),
+    /// which pages through the service 20 at a time.
+    pub const MAX_OCR_PAGES: u32 = 200;
 }
 
 pub struct PdfReadTool;
+
+/// How a scanned page is read. `vision: true` predates this and is an alias
+/// for `Vision`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum OcrMode {
+    /// Text layer first; a scan goes to OCR on the document service, and a
+    /// page OCR is unsure of goes to the vision model.
+    Auto,
+    Vision,
+    Tesseract,
+}
+
+fn ocr_mode(input: &Value) -> Result<OcrMode> {
+    if input
+        .get("vision")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(OcrMode::Vision);
+    }
+    let raw = input
+        .get("ocr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match raw.as_str() {
+        "" | "auto" => Ok(OcrMode::Auto),
+        "vision" => Ok(OcrMode::Vision),
+        "tesseract" => Ok(OcrMode::Tesseract),
+        other => Err(Error::Tool(format!(
+            "ocr must be \"auto\", \"vision\" or \"tesseract\", got {other:?}"
+        ))),
+    }
+}
 
 #[async_trait]
 impl Tool for PdfReadTool {
@@ -117,18 +160,16 @@ impl Tool for PdfReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Extract text from a PDF file. Uses `pdftotext` from poppler-utils. \
-         Optional `pages` parameter accepts \"all\" (default), \"3\" \
-         (single page), or \"1-5\" (inclusive range). Returns extracted \
-         text. **Scanned / image-based PDFs** (no embedded text layer) \
-         fall through to a vision-OCR path that renders each requested \
-         page as PNG via `pdftoppm` so the model sees the pages directly \
-         — no separate OCR step needed. poppler-utils gives the best results \
-         and keeps the file local (`brew install poppler` on macOS, \
-         `apt install poppler-utils` on Debian/Ubuntu); without it, text \
-         extraction falls back to a public thClaws service that needs no \
-         account — the user approves that upload, and the scanned-PDF vision \
-         path is unavailable until poppler is installed."
+        "Extract text from a PDF file. Optional `pages` parameter accepts \"all\" \
+         (default), \"3\" (single page), or \"1-5\" (inclusive range). Text comes \
+         from `pdftotext` (poppler-utils) when installed, otherwise from the \
+         document service on the thClaws / organisation gateway. **Scanned / \
+         image-based PDFs** are handled by `ocr`: \"auto\" (default) OCRs the \
+         pages (Thai + English) on the document service and sends pages it is \
+         unsure of to you as images; \"vision\" sends every page as an image \
+         (same as `vision: true`); \"tesseract\" returns OCR text only. The \
+         result says which pages came from OCR (with confidence) and which are \
+         images."
     }
 
     fn input_schema(&self) -> Value {
@@ -137,100 +178,103 @@ impl Tool for PdfReadTool {
             "properties": {
                 "path":  {"type": "string", "description": "PDF file path."},
                 "pages": {"type": "string", "description": "Page range: \"all\", \"N\", or \"M-N\". Default: all."},
-                "vision": {"type": "boolean", "description": "Force the vision-OCR path (render pages to images for the model to read) instead of text extraction. Use when the text layer is garbled — e.g. a PDF whose font has a broken Thai ToUnicode map that swaps า/ำ. Default false."}
+                "ocr": {"type": "string", "enum": ["auto", "vision", "tesseract"], "description": "How scanned pages are read. auto (default): OCR, with low-confidence pages sent as images; vision: render every page as an image for you to read; tesseract: OCR text only, skipping the text layer."},
+                "vision": {"type": "boolean", "description": "Same as ocr: \"vision\" — render pages to images instead of extracting text. Use when the text layer is garbled, e.g. a broken Thai ToUnicode map that swaps า/ำ. Default false."}
             },
             "required": ["path"]
         })
     }
 
-    /// Reading a local file needs no approval — but with no poppler the file
-    /// is about to be uploaded to the public extraction service, and that
-    /// does (dev-plan/66). Nothing else about the call changes, so the gate
-    /// tracks exactly the condition that sends bytes off the machine.
-    fn requires_approval(&self, _input: &Value) -> bool {
-        poppler_missing() && cloud_endpoint().is_some()
+    /// Reading a local file needs no approval — sending it somewhere does,
+    /// except to an EE organisation's own gateway (owner decision,
+    /// dev-plan/69). The gate tracks exactly the condition that sends bytes
+    /// off the machine.
+    fn requires_approval(&self, input: &Value) -> bool {
+        upload_destination(input).is_some()
     }
 
     fn approval_summary(&self, input: &Value) -> Option<String> {
-        if !self.requires_approval(input) {
-            return None;
-        }
+        let (dest, why) = upload_destination(input)?;
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-        let url = cloud_endpoint()?;
-        Some(format!(
-            "no poppler on this machine — UPLOADS {path} to {url} to extract its text"
-        ))
+        Some(format!("{why} — UPLOADS {path} to {dest}"))
     }
 
     async fn call(&self, input: Value) -> Result<String> {
         let validated = crate::sandbox::Sandbox::check(req_str(&input, "path")?)?;
         let pages_spec = input.get("pages").and_then(|v| v.as_str()).unwrap_or("all");
         let (first, last) = parse_page_range(pages_spec)?;
-        extract_text(&validated, first, last).await
+        let uploads = self.uploads_for(&input);
+        let (raw, source) = extract_text_raw(&validated, first, last, uploads).await?;
+        Ok(with_note(normalize_thai_spacing(&raw), &source))
     }
 
-    /// Multimodal entry: text-first, vision-OCR fallback for scanned PDFs.
-    /// When the model invokes PdfRead via the agent loop (not a direct
-    /// `call`), this path runs. If pdftotext returns enough text for
-    /// the requested pages it returns a Text block as before. If the
-    /// text is empty / sparse (typical scanned PDF) it renders each
-    /// page to PNG and returns an Image block per page plus a summary
-    /// Text block so the model has both the visual and a textual
-    /// handle on what it saw.
+    /// Multimodal entry: text first; a scan or a garbled text layer goes to
+    /// OCR and/or the vision path per `ocr`.
     async fn call_multimodal(&self, input: Value) -> Result<ToolResultContent> {
         let validated = crate::sandbox::Sandbox::check(req_str(&input, "path")?)?;
         let pages_spec = input.get("pages").and_then(|v| v.as_str()).unwrap_or("all");
         let (first, last) = parse_page_range(pages_spec)?;
+        let mode = ocr_mode(&input)?;
+        let uploads = self.uploads_for(&input);
 
-        // Caller forced vision (text layer known-garbled, e.g. broken Thai
-        // ToUnicode): skip extraction entirely and read the rendered glyphs.
-        if input
-            .get("vision")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            return render_pages_as_image_blocks(&validated, first, last)
-                .await
-                .map(ToolResultContent::Blocks);
-        }
-
-        let raw = extract_text_raw(&validated, first, last, CloudFallback::Allowed).await?;
-
-        // Take the text layer when it's both present (not scanned) and
-        // trustworthy (not a garbled Thai font). "Looks scanned" splits on
-        // form-feed and averages chars per page; "looks garbled" counts
-        // Thai combining marks orphaned behind spaces. Either one routes to
-        // vision-OCR, which reads the rendered glyphs directly.
-        if !text_is_too_sparse(&raw) && !thai_looks_garbled(&raw) {
-            let mut text = normalize_thai_spacing(&raw);
-            if poppler_missing() {
-                text.push_str(CLOUD_NOTE);
+        let services = Services::resolve(uploads);
+        match mode {
+            OcrMode::Vision => {
+                return vision_blocks(&validated, first, last, &services, "")
+                    .await
+                    .map(ToolResultContent::Blocks)
             }
-            return Ok(ToolResultContent::Text(text));
+            OcrMode::Tesseract => {
+                return read_scanned(&validated, first, last, mode, &services, "").await
+            }
+            OcrMode::Auto => {}
         }
 
-        // The text layer is unusable — but rendering needs `pdftoppm`, which
-        // is the same package as `pdftotext`. With no poppler at all there is
-        // no vision path to fall through TO (the service returns text only),
-        // so say that rather than failing on a missing binary the user was
-        // never told about.
-        if poppler_missing() {
-            return Ok(ToolResultContent::Text(format!(
-                "{}\n\n[this PDF's text layer is empty or unreliable — it is probably a \
-                 scan. Reading it needs the vision path, which renders pages with \
-                 `pdftoppm`: install poppler-utils (`brew install poppler`, \
-                 `apt install poppler-utils`, `winget install oschwartz10612.Poppler`). \
-                 The no-install extraction service returns text only.]",
-                normalize_thai_spacing(&raw)
+        let (raw, source) = extract_text_raw(&validated, first, last, uploads).await?;
+        // "Looks scanned" averages chars per form-feed page; "looks garbled"
+        // counts Thai marks orphaned behind spaces. Either one means the
+        // text layer cannot be trusted and the glyphs must be read instead.
+        if !text_is_too_sparse(&raw) && !thai_looks_garbled(&raw) {
+            return Ok(ToolResultContent::Text(with_note(
+                normalize_thai_spacing(&raw),
+                &source,
             )));
         }
-
-        // Fall through to vision-OCR (scanned, or a text layer too garbled
-        // to trust).
-        render_pages_as_image_blocks(&validated, first, last)
-            .await
-            .map(|blocks| ToolResultContent::Blocks(blocks))
+        read_scanned(&validated, first, last, mode, &services, &raw).await
     }
+}
+
+impl PdfReadTool {
+    /// An approved call may upload; one that never asked may not.
+    fn uploads_for(&self, input: &Value) -> CloudFallback {
+        if self.requires_approval(input) {
+            CloudFallback::Allowed
+        } else {
+            CloudFallback::Refused
+        }
+    }
+}
+
+/// Where an approved call would send the file and why; `None` when the call
+/// stays local or the destination is the EE organisation's own gateway.
+/// With poppler installed an `auto` read stays local — a scan goes to the
+/// local vision path, as before — so only an explicit `tesseract` asks.
+fn upload_destination(input: &Value) -> Option<(String, &'static str)> {
+    if doc_render::uploads_preapproved() {
+        return None;
+    }
+    let service = doc_render::endpoint("pdf/text")
+        .ok()
+        .map(|ep| doc_render::describe(&ep));
+    if poppler_missing() {
+        return service
+            .or_else(cloud_endpoint)
+            .map(|d| (d, "no poppler on this machine"));
+    }
+    if ocr_mode(input).ok() == Some(OcrMode::Tesseract) {
+        return service.map(|d| (d, "OCR runs on the document service"));
+    }
+    None
 }
 
 /// True when the extracted text is so thin it almost certainly came
@@ -421,11 +465,10 @@ fn thai_looks_garbled(text: &str) -> bool {
     mean_thai_run(text) < fallback::MIN_THAI_RUN
 }
 
-/// Text-first extraction with Thai post-processing applied. Used by the
-/// direct `call` path. The multimodal path calls `extract_text_raw`
-/// itself so its garble check can see the unrepaired output, then
-/// normalizes only when it keeps the text.
-/// Extracted text with the Thai marks put back together.
+/// Extracted text with the Thai marks put back together, and a note when it
+/// did not come from this machine. Never asks, so it never uploads without
+/// consent: only an EE install's own document service may take the file
+/// (dev-plan/69 B6 — KMS ingest used to reach pdf.thclaws.cloud unasked).
 ///
 /// `pub(crate)` so callers outside the tool can ask for a whole
 /// document with `(path, None, None)`. `kms::ingest_pdf` grew its own
@@ -434,18 +477,6 @@ fn thai_looks_garbled(text: &str) -> bool {
 /// fragmentation `-layout` introduces while the same PDF read through
 /// this tool came out clean.
 pub(crate) async fn extract_text(
-    validated: &std::path::Path,
-    first: Option<u32>,
-    last: Option<u32>,
-) -> Result<String> {
-    extract_text_inner(validated, first, last, CloudFallback::Allowed).await
-}
-
-/// Same, but the public service is never used — for callers that cannot ask
-/// the user first. The Files tab's one-click "Convert to markdown" runs as an
-/// IPC arm, which does not pass through `Tool::requires_approval`, so it must
-/// not be able to put a file on the network (dev-plan/66).
-pub(crate) async fn extract_text_local(
     validated: &std::path::Path,
     first: Option<u32>,
     last: Option<u32>,
@@ -459,15 +490,89 @@ async fn extract_text_inner(
     last: Option<u32>,
     cloud: CloudFallback,
 ) -> Result<String> {
-    let raw = extract_text_raw(validated, first, last, cloud).await?;
-    let mut out = normalize_thai_spacing(&raw);
-    if poppler_missing() {
-        out.push_str(CLOUD_NOTE);
+    let (raw, source) = extract_text_raw(validated, first, last, cloud).await?;
+    Ok(with_note(normalize_thai_spacing(&raw), &source))
+}
+
+/// The Files tab's "Convert to markdown": the text layer when it is usable,
+/// otherwise the whole document OCR'd — on an EE install only, where the
+/// document service needs no consent. No model runs here, so a page OCR is
+/// unsure of is kept and flagged rather than sent to vision.
+pub(crate) async fn markdown_text(validated: &std::path::Path) -> Result<String> {
+    let (raw, _) = extract_text_raw(validated, None, None, CloudFallback::Refused).await?;
+    if !text_is_too_sparse(&raw) && !thai_looks_garbled(&raw) {
+        return Ok(normalize_thai_spacing(&raw));
+    }
+    let Some(ep) = doc_render_endpoint("ocr", CloudFallback::Refused) else {
+        return Err(Error::Tool(
+            "no usable text layer in this PDF — it is probably scanned. Ask the agent to \
+             read it instead: PdfRead OCRs scanned pages"
+                .into(),
+        ));
+    };
+    let mut out = String::new();
+    let mut first = 1u32;
+    loop {
+        let last = first + fallback::MAX_PAGES_TO_RENDER - 1;
+        let got = doc_render::ocr(&ep, validated, Some(first), Some(last)).await?;
+        for p in &got.pages {
+            let conf = p.confidence.unwrap_or(0.0);
+            let text = normalize_thai_spacing(&doc_render::join_ocr_thai_spaces(&p.text));
+            if conf < doc_render::OCR_MIN_CONFIDENCE || doc_render::ocr_looks_damaged(&text) {
+                out.push_str(&format!(
+                    "<!-- page {}: OCR confidence {conf:.0}, check it against the scan -->\n",
+                    p.n
+                ));
+            } else {
+                out.push_str(&format!("<!-- page {}: OCR -->\n", p.n));
+            }
+            out.push_str(text.trim());
+            out.push_str("\n\n");
+        }
+        if last >= got.page_count || last >= fallback::MAX_OCR_PAGES {
+            break;
+        }
+        first = last + 1;
     }
     Ok(out)
 }
 
-// ── No-poppler fallback: the public extraction service (dev-plan/66) ──
+/// Where the text came from, so the result can say so.
+#[derive(Debug)]
+enum Source {
+    Local,
+    DocRender(String),
+    PublicService,
+}
+
+fn with_note(mut text: String, source: &Source) -> String {
+    match source {
+        Source::Local => {}
+        Source::DocRender(dest) => text.push_str(&format!(
+            "\n\n[extracted by {dest}: poppler is not installed on this machine, so the \
+             file was sent there to read its text.]"
+        )),
+        Source::PublicService => text.push_str(CLOUD_NOTE),
+    }
+    text
+}
+
+/// Whether this call may put the file on the document service: when the
+/// user approved the upload, or on an EE install where the service is the
+/// organisation's own.
+fn doc_render_endpoint(path: &str, uploads: CloudFallback) -> Option<SlideEndpoint> {
+    if may_upload(uploads, doc_render::uploads_preapproved()) {
+        doc_render::endpoint(path).ok()
+    } else {
+        None
+    }
+}
+
+fn may_upload(uploads: CloudFallback, preapproved: bool) -> bool {
+    uploads == CloudFallback::Allowed || preapproved
+}
+
+// ── No-poppler fallbacks: the document service, then the public one ──
 
 /// The public, keyless endpoint. Overridable, so an enterprise can run
 /// `thclaws-cloud/pdf-text/` inside its own network and keep the files there.
@@ -483,6 +588,10 @@ const CLOUD_NOTE: &str = "\n\n[extracted by pdf.thclaws.cloud: poppler is not in
      on this machine, so this file was uploaded to the public thClaws extraction service. \
      Install poppler-utils to keep PDFs local, or set \"pdfCloudFallback\": false to \
      disable the fallback.]";
+
+const POPPLER_INSTALL: &str = "install poppler-utils: `brew install poppler` (macOS), \
+     `apt install poppler-utils` (Debian/Ubuntu), `winget install oschwartz10612.Poppler` \
+     or `scoop install poppler` (Windows)";
 
 /// `Some(url)` when the fallback may be used, `None` when it is switched off.
 fn cloud_endpoint() -> Option<String> {
@@ -501,49 +610,77 @@ fn cloud_endpoint() -> Option<String> {
     )
 }
 
-/// Is poppler absent? Then any text that came back came from the service, and
-/// neither the vision path nor a page render is available at all. Checked at
-/// the call sites instead of threading a "came from the cloud" flag through
-/// every signature.
 fn poppler_missing() -> bool {
     !crate::config::command_on_path("pdftotext")
 }
 
-/// What to do when `pdftotext` is not installed: use the public service, or
-/// name every way to install it. Split out from `extract_text_raw` so both
-/// branches are reachable in a test without emptying `PATH` — doing that in a
-/// parallel test run breaks the sibling test that spawns the real binary.
 /// Whether a caller is in a position to send the file off the machine: the
 /// tool path is approval-gated and may, a UI-initiated IPC arm is not and
-/// may not.
+/// may not — except to an EE organisation's own document service.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum CloudFallback {
     Allowed,
     Refused,
 }
 
+/// What to do when `pdftotext` is not installed: the document service on
+/// the gateway, then the public service (open-core only), else name every
+/// way to install poppler. Split out from `extract_text_raw` so each branch
+/// is reachable in a test without emptying `PATH`.
 async fn without_poppler(
     validated: &std::path::Path,
     first: Option<u32>,
     last: Option<u32>,
     cloud: CloudFallback,
-) -> Result<String> {
+) -> Result<(String, Source)> {
+    let mut service_err = String::new();
+    if let Some(ep) = doc_render_endpoint("pdf/text", cloud) {
+        match doc_render_text(&ep, validated, first, last).await {
+            Ok(text) => return Ok((text, Source::DocRender(doc_render::describe(&ep)))),
+            Err(e) => service_err = format!(" The document service failed: {e}."),
+        }
+    }
     if cloud == CloudFallback::Refused {
-        return Err(Error::Tool(
-            "pdftotext not found — install poppler-utils: `brew install poppler` (macOS), `apt install poppler-utils` (Debian/Ubuntu), `winget install oschwartz10612.Poppler` or `scoop install poppler` (Windows). Or ask the agent to read the PDF — that path can extract it through the public thClaws service, with your approval and no account"
-                .into(),
-        ));
+        return Err(Error::Tool(format!(
+            "pdftotext not found — {POPPLER_INSTALL}. Or ask the agent to read the PDF — \
+             PdfRead can extract it on the document service, with your approval.{service_err}"
+        )));
     }
     match cloud_endpoint() {
-        Some(url) => extract_via_cloud(&url, validated, first, last).await,
-        None => Err(Error::Tool(
-            "pdftotext not found — install poppler-utils (`brew install poppler` on \
-             macOS, `apt install poppler-utils` on Debian/Ubuntu, `winget install \
-             oschwartz10612.Poppler` or `scoop install poppler` on Windows). The \
-             no-install fallback to pdf.thclaws.cloud is switched off here \
-             (`pdfCloudFallback` / THCLAWS_PDF_CLOUD)"
-                .into(),
-        )),
+        Some(url) => extract_via_cloud(&url, validated, first, last)
+            .await
+            .map(|t| (t, Source::PublicService)),
+        None => Err(Error::Tool(format!(
+            "pdftotext not found — {POPPLER_INSTALL}. The no-install fallback to \
+             pdf.thclaws.cloud is switched off here (`pdfCloudFallback` / \
+             THCLAWS_PDF_CLOUD).{service_err}"
+        ))),
+    }
+}
+
+/// `/pdf/text`, pages joined with form feeds the way `pdftotext` separates
+/// them, and the same `-raw` retry for Thai that `-layout` shreds.
+async fn doc_render_text(
+    ep: &SlideEndpoint,
+    validated: &std::path::Path,
+    first: Option<u32>,
+    last: Option<u32>,
+) -> Result<String> {
+    let join = |pages: doc_render::Pages<doc_render::PageText>| {
+        pages
+            .pages
+            .into_iter()
+            .map(|p| p.text)
+            .collect::<Vec<_>>()
+            .join("\u{000C}")
+    };
+    let laid_out = join(doc_render::pdf_text(ep, validated, first, last, "layout").await?);
+    if !thai_is_shredded(&laid_out) {
+        return Ok(laid_out);
+    }
+    match doc_render::pdf_text(ep, validated, first, last, "raw").await {
+        Ok(raw) => Ok(join(raw)),
+        Err(_) => Ok(laid_out),
     }
 }
 
@@ -612,15 +749,18 @@ async fn extract_via_cloud(
     Ok(body)
 }
 
-/// Run pdftotext and return the raw extracted text. Shared between
-/// `extract_text` and the multimodal entry's text-first path.
+/// Raw extracted text (no Thai repair yet, so the garble check sees the
+/// evidence) and where it came from.
 async fn extract_text_raw(
     validated: &std::path::Path,
     first: Option<u32>,
     last: Option<u32>,
     cloud: CloudFallback,
-) -> Result<String> {
-    let laid_out = run_pdftotext(validated, first, last, "-layout", cloud).await?;
+) -> Result<(String, Source)> {
+    if poppler_missing() {
+        return without_poppler(validated, first, last, cloud).await;
+    }
+    let laid_out = run_pdftotext(validated, first, last, "-layout").await?;
     // `-layout` reproduces the page by padding with spaces, and it puts one at
     // every glyph gap. Thai does not space its words, so those land INSIDE
     // them: `บริษัท` comes out as `บริ ษ ทั`. Measured over 24 Thai PDFs, the
@@ -629,18 +769,18 @@ async fn extract_text_raw(
     // lengthens the average Thai run by 1.3x-3.7x while changing the Thai
     // character count by 0.00% (docs/pdf-thai-extraction-modes.md).
     if !thai_is_shredded(&laid_out) {
-        return Ok(laid_out);
+        return Ok((laid_out, Source::Local));
     }
-    match run_pdftotext(validated, first, last, "-raw", cloud).await {
+    match run_pdftotext(validated, first, last, "-raw").await {
         Ok(raw) => {
             eprintln!(
                 "\x1b[2m[pdf] -layout shredded this Thai text ({:.0} breaks per 1k) — re-read with -raw\x1b[0m",
                 shred_per_1k(&laid_out)
             );
-            Ok(raw)
+            Ok((raw, Source::Local))
         }
         // The second read is an improvement, never a requirement.
-        Err(_) => Ok(laid_out),
+        Err(_) => Ok((laid_out, Source::Local)),
     }
 }
 
@@ -650,7 +790,6 @@ async fn run_pdftotext(
     first: Option<u32>,
     last: Option<u32>,
     mode: &str,
-    cloud: CloudFallback,
 ) -> Result<String> {
     let mut cmd = Command::new("pdftotext");
     cmd.arg(mode);
@@ -663,16 +802,13 @@ async fn run_pdftotext(
     cmd.arg(validated.as_os_str()).arg("-"); // stdout
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let spawned = cmd.spawn();
-    let mut child = match spawned {
-        Ok(c) => c,
-        // No poppler: borrow one from the public service, or say exactly what
-        // to install — never both, and never silently.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return without_poppler(validated, first, last, cloud).await;
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::Tool(format!("pdftotext not found — {POPPLER_INSTALL}"))
+        } else {
+            Error::Tool(format!("spawn pdftotext: {e}"))
         }
-        Err(e) => return Err(Error::Tool(format!("spawn pdftotext: {e}"))),
-    };
+    })?;
 
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -714,43 +850,309 @@ async fn run_pdftotext(
     Ok(String::from_utf8_lossy(&out_buf).to_string())
 }
 
-/// Render the requested page range to PNG via `pdftoppm` and wrap each
-/// page as a `ToolResultBlock::Image`. Caps at `MAX_PAGES_TO_RENDER`
-/// pages — anything beyond that returns the rendered prefix plus a
-/// trailing `Text` block telling the user how to fetch the rest via a
-/// narrower `pages` argument.
-async fn render_pages_as_image_blocks(
-    validated: &std::path::Path,
-    first: Option<u32>,
-    last: Option<u32>,
-) -> Result<Vec<ToolResultBlock>> {
-    // pdftoppm needs a concrete page range. "all" → 1..=∞ is fine in
-    // CLI semantics but we want to enforce our own MAX_PAGES_TO_RENDER
-    // cap, so when last is None we substitute first + cap and tell
-    // the user about the truncation in the trailing text block.
+// ── Scanned pages: OCR, then vision ──
+
+/// What can read a scan for this call, resolved once.
+struct Services {
+    ocr: Option<SlideEndpoint>,
+    pages: Option<SlideEndpoint>,
+    local_render: bool,
+}
+
+impl Services {
+    fn resolve(uploads: CloudFallback) -> Self {
+        Services {
+            ocr: doc_render_endpoint("ocr", uploads),
+            pages: doc_render_endpoint("pdf/pages", uploads),
+            local_render: crate::config::command_on_path("pdftoppm"),
+        }
+    }
+}
+
+/// The page range a render or OCR call covers, capped at
+/// `MAX_PAGES_TO_RENDER`, plus `(requested, rendered)` when it was cut.
+/// "all" has no known end, so it becomes the first page + cap and the
+/// renderer clips to what the PDF has.
+fn capped_range(first: Option<u32>, last: Option<u32>) -> (u32, u32, Option<(u32, u32)>) {
     let render_first = first.unwrap_or(1);
-    let (render_last, truncated) = match last {
+    match last {
         Some(l) if l >= render_first => {
             let span = l - render_first + 1;
             if span > fallback::MAX_PAGES_TO_RENDER {
                 (
+                    render_first,
                     render_first + fallback::MAX_PAGES_TO_RENDER - 1,
                     Some((span, fallback::MAX_PAGES_TO_RENDER)),
                 )
             } else {
-                (l, None)
+                (render_first, l, None)
             }
         }
-        _ => {
-            // first set, last unbounded ("3" already collapsed to
-            // (3,3) by parse_page_range so this only triggers on the
-            // "all" path where both are None — still substitute a
-            // capped end and let pdftoppm clip naturally if the PDF
-            // has fewer pages).
-            (render_first + fallback::MAX_PAGES_TO_RENDER - 1, None)
+        _ => (
+            render_first,
+            render_first + fallback::MAX_PAGES_TO_RENDER - 1,
+            None,
+        ),
+    }
+}
+
+/// Read pages whose text layer is unusable. `auto`: OCR on the document
+/// service, with each page under `OCR_MIN_CONFIDENCE` sent to the vision
+/// model instead; no service → vision for everything, as before.
+/// `tesseract`: OCR text only. `layer` is whatever text extraction found,
+/// shown when there is no way to read the glyphs at all.
+async fn read_scanned(
+    validated: &std::path::Path,
+    first: Option<u32>,
+    last: Option<u32>,
+    mode: OcrMode,
+    services: &Services,
+    layer: &str,
+) -> Result<ToolResultContent> {
+    let Some(ep) = services.ocr.as_ref() else {
+        if mode == OcrMode::Tesseract {
+            return Err(Error::Tool(
+                "OCR runs on the document service, which is not reachable from here — sign in \
+                 to the thClaws Gateway or set SLIDE_RENDER_API. `ocr: \"vision\"` reads the \
+                 pages as images instead."
+                    .into(),
+            ));
         }
+        return vision_or_explain(validated, first, last, services, layer, "").await;
+    };
+    let (ocr_first, ocr_last, truncated) = capped_range(first, last);
+    let got = match doc_render::ocr(ep, validated, Some(ocr_first), Some(ocr_last)).await {
+        Ok(got) => got,
+        Err(e) if mode == OcrMode::Auto => {
+            let why = format!("OCR failed ({e}), so the pages are read as images instead. ");
+            return vision_or_explain(validated, first, last, services, layer, &why).await;
+        }
+        Err(e) => return Err(e),
     };
 
+    let mut text = String::new();
+    let mut by_ocr: Vec<String> = Vec::new();
+    let mut damaged: Vec<String> = Vec::new();
+    let mut pages_read: Vec<u32> = Vec::new();
+    for p in got.pages {
+        let conf = p.confidence.unwrap_or(0.0);
+        let page_text = normalize_thai_spacing(&doc_render::join_ocr_thai_spaces(&p.text));
+        let bad = conf < doc_render::OCR_MIN_CONFIDENCE
+            || page_text.trim().is_empty()
+            || doc_render::ocr_looks_damaged(&page_text);
+        if bad {
+            damaged.push(p.n.to_string());
+        }
+        pages_read.push(p.n);
+        by_ocr.push(format!("{} ({conf:.0})", p.n));
+        let label = if mode == OcrMode::Auto {
+            if bad {
+                "OCR draft, unreliable"
+            } else {
+                "OCR draft"
+            }
+        } else {
+            "OCR"
+        };
+        text.push_str(&format!(
+            "[page {} — {label}, confidence {conf:.0}]\n{}\n\n",
+            p.n,
+            page_text.trim()
+        ));
+    }
+
+    let mut summary = format!(
+        "Scanned PDF, read by OCR (tesseract, Thai + English) on {}.",
+        doc_render::describe(ep)
+    );
+    if !by_ocr.is_empty() {
+        summary.push_str(&format!(
+            " Pages from OCR (confidence 0-100): {}.",
+            by_ocr.join(", ")
+        ));
+    }
+    if let Some((requested, done)) = truncated {
+        summary.push_str(&format!(
+            " Only the first {done} of the {requested} requested pages were read; call again \
+             with a narrower `pages` range for the rest."
+        ));
+    } else if last.is_none() && got.page_count > ocr_last {
+        summary.push_str(&format!(
+            " The PDF has {} pages; pages {}-{} were read. Call again with `pages` for the rest.",
+            got.page_count, ocr_first, ocr_last
+        ));
+    }
+
+    // `tesseract` asked for text only. `auto` hands the model every page
+    // image with the OCR text as a draft to check: Thai tesseract output is
+    // rarely clean enough to use as is (owner, 2026-10-21), and its
+    // confidence does not say when it isn't.
+    if mode != OcrMode::Auto || pages_read.is_empty() {
+        return Ok(ToolResultContent::Text(format!("{summary}\n\n{text}")));
+    }
+    let lo = *pages_read.iter().min().unwrap_or(&ocr_first);
+    let hi = *pages_read.iter().max().unwrap_or(&ocr_last);
+    match page_images(validated, Some(lo), Some(hi), services).await {
+        Ok((images, via)) => {
+            summary.push_str(&format!(
+                " Each page's image is attached (rendered by {via}). The OCR text is a DRAFT: \
+                 read every page from its image, use the draft only as a hint, and correct \
+                 misread words, numbers, missing vowels and tone marks, and junk lines. The \
+                 image is authoritative."
+            ));
+            if !damaged.is_empty() {
+                summary.push_str(&format!(
+                    " The draft is visibly damaged on page(s) {}.",
+                    damaged.join(", ")
+                ));
+            }
+            let mut blocks = vec![ToolResultBlock::Text {
+                text: format!("{summary}\n\n{text}"),
+            }];
+            blocks.extend(image_blocks(images).0);
+            Ok(ToolResultContent::Blocks(blocks))
+        }
+        Err(e) => {
+            summary.push_str(&format!(
+                " The pages could not be rendered as images ({e}), so only the OCR text \
+                 follows; it may contain errors."
+            ));
+            if !damaged.is_empty() {
+                summary.push_str(&format!(
+                    " It is visibly damaged on page(s) {}.",
+                    damaged.join(", ")
+                ));
+            }
+            Ok(ToolResultContent::Text(format!("{summary}\n\n{text}")))
+        }
+    }
+}
+
+/// The vision path when it can run; otherwise the text layer with a note
+/// naming what would make the scan readable.
+async fn vision_or_explain(
+    validated: &std::path::Path,
+    first: Option<u32>,
+    last: Option<u32>,
+    services: &Services,
+    layer: &str,
+    why: &str,
+) -> Result<ToolResultContent> {
+    if !services.local_render && services.pages.is_none() {
+        return Ok(ToolResultContent::Text(format!(
+            "{}\n\n[{why}this PDF's text layer is empty or unreliable — it is probably a scan. \
+             Reading it needs OCR or page images, and neither is available here: \
+             {POPPLER_INSTALL} to render pages locally, or sign in to the thClaws Gateway \
+             so the document service can OCR them.]",
+            normalize_thai_spacing(layer)
+        )));
+    }
+    vision_blocks(validated, first, last, services, why)
+        .await
+        .map(ToolResultContent::Blocks)
+}
+
+/// Every requested page as an image block, plus a summary text block.
+async fn vision_blocks(
+    validated: &std::path::Path,
+    first: Option<u32>,
+    last: Option<u32>,
+    services: &Services,
+    why: &str,
+) -> Result<Vec<ToolResultBlock>> {
+    let (_, _, truncated) = capped_range(first, last);
+    let (pages, via) = page_images(validated, first, last, services).await?;
+    let (mut blocks, total_bytes) = image_blocks(pages);
+    let mut summary = format!(
+        "{why}PDF read by vision: rendered {} page(s) at {} DPI via {via} — total {} KB \
+         before base64.",
+        blocks
+            .iter()
+            .filter(|b| matches!(b, ToolResultBlock::Image { .. }))
+            .count(),
+        fallback::RENDER_DPI,
+        (total_bytes + 512) / 1024
+    );
+    if let Some((requested, capped)) = truncated {
+        summary.push_str(&format!(
+            " Truncated: requested {} pages but only the first {} were rendered \
+             (cap: MAX_PAGES_TO_RENDER). Re-invoke with a narrower `pages` range \
+             to see the rest.",
+            requested, capped
+        ));
+    }
+    blocks.push(ToolResultBlock::Text { text: summary });
+    Ok(blocks)
+}
+
+/// PNGs for the (capped) range with their page numbers, and what rendered
+/// them: local `pdftoppm`, else the document service's `/pdf/pages`.
+async fn page_images(
+    validated: &std::path::Path,
+    first: Option<u32>,
+    last: Option<u32>,
+    services: &Services,
+) -> Result<(Vec<(u32, Vec<u8>)>, String)> {
+    let (render_first, render_last, _) = capped_range(first, last);
+    if !services.local_render {
+        if let Some(ep) = services.pages.as_ref() {
+            let got = doc_render::pdf_pages(
+                ep,
+                validated,
+                Some(render_first),
+                Some(render_last),
+                fallback::RENDER_DPI,
+            )
+            .await?;
+            let pages = got
+                .pages
+                .into_iter()
+                .map(|p| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(p.png_base64.as_bytes())
+                        .map(|b| (p.n, b))
+                        .map_err(|e| Error::Tool(format!("page {} image: {e}", p.n)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok((pages, doc_render::describe(ep)));
+        }
+    }
+    let pages = render_local(validated, render_first, render_last).await?;
+    Ok((pages, "pdftoppm".into()))
+}
+
+fn image_blocks(pages: Vec<(u32, Vec<u8>)>) -> (Vec<ToolResultBlock>, usize) {
+    let mut blocks = Vec::with_capacity(pages.len());
+    let mut total_bytes = 0usize;
+    for (n, bytes) in pages {
+        if bytes.len() > fallback::MAX_IMAGE_BYTES {
+            blocks.push(ToolResultBlock::Text {
+                text: format!(
+                    "(page {n} skipped — rendered PNG is {} bytes, over the {}-byte cap; \
+                     try a narrower `pages` range or downscale via the source PDF.)",
+                    bytes.len(),
+                    fallback::MAX_IMAGE_BYTES
+                ),
+            });
+            continue;
+        }
+        total_bytes += bytes.len();
+        blocks.push(ToolResultBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            },
+        });
+    }
+    (blocks, total_bytes)
+}
+
+/// Render `render_first..=render_last` to PNG with `pdftoppm`.
+async fn render_local(
+    validated: &std::path::Path,
+    render_first: u32,
+    render_last: u32,
+) -> Result<Vec<(u32, Vec<u8>)>> {
     let tmp = tempfile::tempdir().map_err(|e| Error::Tool(format!("tempdir: {e}")))?;
     let prefix = tmp.path().join("page");
     let prefix_str = prefix.to_string_lossy().into_owned();
@@ -769,12 +1171,10 @@ async fn render_pages_as_image_blocks(
 
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            Error::Tool(
-                "pdftoppm not found — install poppler-utils for the vision-OCR \
-                 fallback (`brew install poppler` on macOS, `apt install \
-                 poppler-utils` on Debian/Ubuntu)"
-                    .into(),
-            )
+            Error::Tool(format!(
+                "pdftoppm not found — {POPPLER_INSTALL} for the vision path. Or sign in \
+                 to the thClaws Gateway so the document service can render the pages."
+            ))
         } else {
             Error::Tool(format!("spawn pdftoppm: {e}"))
         }
@@ -825,55 +1225,15 @@ async fn render_pages_as_image_blocks(
         .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("png"))
         .collect();
     entries.sort();
-
-    let mut blocks: Vec<ToolResultBlock> = Vec::with_capacity(entries.len() + 1);
-    let mut total_bytes: usize = 0;
-    for (idx, path) in entries.iter().enumerate() {
-        let bytes = std::fs::read(path).map_err(|e| Error::Tool(format!("read png: {e}")))?;
-        if bytes.len() > fallback::MAX_IMAGE_BYTES {
-            blocks.push(ToolResultBlock::Text {
-                text: format!(
-                    "(page {} skipped — rendered PNG is {} bytes, over the {}-byte cap; \
-                     try a narrower `pages` range or downscale via the source PDF.)",
-                    render_first + idx as u32,
-                    bytes.len(),
-                    fallback::MAX_IMAGE_BYTES
-                ),
-            });
-            continue;
-        }
-        total_bytes += bytes.len();
-        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        blocks.push(ToolResultBlock::Image {
-            source: ImageSource::Base64 {
-                media_type: "image/png".to_string(),
-                data,
-            },
-        });
-    }
-
-    let mut summary = format!(
-        "PDF appears to be scanned / image-based (no extractable text layer). \
-         Rendered {} page(s) at {} DPI for vision OCR — total {} KB before \
-         base64.",
-        blocks
-            .iter()
-            .filter(|b| matches!(b, ToolResultBlock::Image { .. }))
-            .count(),
-        fallback::RENDER_DPI,
-        (total_bytes + 512) / 1024
-    );
-    if let Some((requested, capped)) = truncated {
-        summary.push_str(&format!(
-            " Truncated: requested {} pages but only the first {} were rendered \
-             (cap: MAX_PAGES_TO_RENDER). Re-invoke with a narrower `pages` range \
-             to see the rest.",
-            requested, capped
-        ));
-    }
-    blocks.push(ToolResultBlock::Text { text: summary });
-
-    Ok(blocks)
+    entries
+        .iter()
+        .enumerate()
+        .map(|(idx, path)| {
+            std::fs::read(path)
+                .map(|b| (render_first + idx as u32, b))
+                .map_err(|e| Error::Tool(format!("read png: {e}")))
+        })
+        .collect()
 }
 
 /// Parse a `pages` string into (first, last) page numbers (1-indexed,
@@ -1289,5 +1649,204 @@ mod tests {
         ] {
             assert!(msg.contains(hint), "missing {hint} in: {msg}");
         }
+    }
+
+    #[test]
+    fn ocr_mode_parses_and_vision_flag_is_an_alias() {
+        assert_eq!(ocr_mode(&json!({})).unwrap(), OcrMode::Auto);
+        assert_eq!(
+            ocr_mode(&json!({"ocr": "Tesseract"})).unwrap(),
+            OcrMode::Tesseract
+        );
+        assert_eq!(
+            ocr_mode(&json!({"ocr": "vision"})).unwrap(),
+            OcrMode::Vision
+        );
+        assert_eq!(ocr_mode(&json!({"vision": true})).unwrap(), OcrMode::Vision);
+        assert!(ocr_mode(&json!({"ocr": "magic"})).is_err());
+    }
+
+    fn services(base: &str, ocr: bool) -> Services {
+        use crate::tools::doc_render::tests::ep;
+        Services {
+            ocr: ocr.then(|| ep(base, "ocr")),
+            pages: Some(ep(base, "pdf/pages")),
+            local_render: false,
+        }
+    }
+
+    /// dev-plan/69 `auto`: OCR, then every page image goes to the model with
+    /// the OCR text as a draft to correct; the unsure page (41) is flagged.
+    #[tokio::test]
+    async fn auto_ocr_attaches_every_page_with_the_ocr_draft() {
+        let (base, seen) = crate::tools::doc_render::tests::mock_doc_render().await;
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4 scan").unwrap();
+
+        let got = read_scanned(&pdf, None, None, OcrMode::Auto, &services(&base, true), "")
+            .await
+            .unwrap();
+        let ToolResultContent::Blocks(blocks) = got else {
+            panic!("auto must attach page images");
+        };
+        let images = blocks
+            .iter()
+            .filter(|b| matches!(b, ToolResultBlock::Image { .. }))
+            .count();
+        let ToolResultBlock::Text { text } = &blocks[0] else {
+            panic!("summary first");
+        };
+        assert!(
+            text.contains("[page 1 — OCR draft, confidence 92]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[page 2 — OCR draft, unreliable, confidence 41]"),
+            "{text}"
+        );
+        assert!(text.contains("DRAFT"), "{text}");
+        assert!(text.contains("บันทึกข้อความเรื่องขออนุมัติ"), "{text}");
+
+        let seen = seen.lock().unwrap();
+        let pages_call = seen.iter().find(|(p, _)| p == "/pdf/pages").unwrap();
+        let first = pages_call.1["first"].as_str().parse::<usize>().unwrap();
+        let last = pages_call.1["last"].as_str().parse::<usize>().unwrap();
+        assert_eq!(first, 1, "every OCR'd page is rendered");
+        assert_eq!(images, last - first + 1, "one image per page");
+    }
+
+    #[tokio::test]
+    async fn tesseract_mode_returns_every_page_as_text() {
+        let (base, _) = crate::tools::doc_render::tests::mock_doc_render().await;
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4 scan").unwrap();
+        let got = read_scanned(
+            &pdf,
+            Some(1),
+            Some(3),
+            OcrMode::Tesseract,
+            &services(&base, true),
+            "",
+        )
+        .await
+        .unwrap();
+        let ToolResultContent::Text(text) = got else {
+            panic!("tesseract mode is text only");
+        };
+        assert!(
+            text.contains("[page 2 — OCR, confidence 41]\nลายมือ"),
+            "{text}"
+        );
+        assert!(text.contains("งบ ประมาณ 6,000,000 บาท"), "{text}");
+    }
+
+    /// No OCR service (open-core without consent): the vision path, as before.
+    #[tokio::test]
+    async fn without_an_ocr_service_auto_falls_back_to_vision() {
+        let (base, _) = crate::tools::doc_render::tests::mock_doc_render().await;
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4 scan").unwrap();
+        let got = read_scanned(
+            &pdf,
+            Some(1),
+            Some(2),
+            OcrMode::Auto,
+            &services(&base, false),
+            "",
+        )
+        .await
+        .unwrap();
+        let ToolResultContent::Blocks(blocks) = got else {
+            panic!("vision path returns blocks");
+        };
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b, ToolResultBlock::Image { .. }))
+                .count(),
+            2
+        );
+
+        let nothing = Services {
+            ocr: None,
+            pages: None,
+            local_render: false,
+        };
+        let got = read_scanned(&pdf, None, None, OcrMode::Auto, &nothing, "x")
+            .await
+            .unwrap();
+        let ToolResultContent::Text(text) = got else {
+            panic!("explained as text")
+        };
+        assert!(
+            text.contains("winget install oschwartz10612.Poppler"),
+            "{text}"
+        );
+        let err = read_scanned(&pdf, None, None, OcrMode::Tesseract, &nothing, "")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("document service"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn document_service_text_is_paged_like_pdftotext() {
+        let (base, _) = crate::tools::doc_render::tests::mock_doc_render().await;
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("minutes.pdf");
+        std::fs::write(&pdf, b"%PDF-1.7").unwrap();
+        let ep = crate::tools::doc_render::tests::ep(&base, "pdf/text");
+        let text = doc_render_text(&ep, &pdf, None, None).await.unwrap();
+        assert_eq!(text.matches('\u{000C}').count(), 1, "{text:?}");
+        assert!(!text_is_too_sparse(&text));
+        let noted = with_note(
+            text,
+            &Source::DocRender(crate::tools::doc_render::describe(&ep)),
+        );
+        assert!(
+            noted.contains("extracted by the thClaws document service (127.0.0.1)")
+                || noted.contains("extracted by your organisation's document service (127.0.0.1)"),
+            "{noted}"
+        );
+        assert!(!noted.contains("pdf.thclaws.cloud"), "{noted}");
+    }
+
+    /// B6: the consent-less entry points (KMS ingest, the Files tab) upload
+    /// only to an EE organisation's own service; open-core needs approval.
+    #[test]
+    fn consentless_callers_upload_only_on_ee() {
+        assert!(
+            may_upload(CloudFallback::Refused, true),
+            "EE: own gateway, no prompt"
+        );
+        assert!(
+            !may_upload(CloudFallback::Refused, false),
+            "open-core: never unasked"
+        );
+        assert!(
+            may_upload(CloudFallback::Allowed, false),
+            "approved tool call"
+        );
+    }
+
+    #[tokio::test]
+    async fn consentless_extraction_without_poppler_points_at_pdfread() {
+        if doc_render::uploads_preapproved() {
+            return;
+        }
+        let err = without_poppler(
+            std::path::Path::new("/tmp/none.pdf"),
+            None,
+            None,
+            CloudFallback::Refused,
+        )
+        .await
+        .expect_err("no poppler and no consent is an error");
+        let msg = err.to_string();
+        assert!(msg.contains("PdfRead"), "{msg}");
+        assert!(msg.contains("winget"), "{msg}");
+        assert!(!msg.contains("pdf.thclaws.cloud"), "{msg}");
     }
 }
