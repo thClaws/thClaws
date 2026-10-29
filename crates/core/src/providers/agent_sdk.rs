@@ -306,7 +306,7 @@ impl Provider for AgentSdkProvider {
         // already pass; this spawn was simply missed.
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
+            // tokio's Command has `creation_flags` itself; no trait import.
             cmd.creation_flags(0x08000000);
         }
 

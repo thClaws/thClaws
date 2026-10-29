@@ -174,7 +174,7 @@ fn write_phase(workspace: &Path, phase: Phase) -> Result<()> {
     // #226: rewriting the marker on every attempt must not reset the count,
     // or a step that can never succeed looks like a first try forever.
     if let Some(old) = read_marker(workspace) {
-        for key in ["attempts", "last_error"] {
+        for key in ["attempts", "last_error", "failed_on"] {
             if let Some(v) = old.get(key) {
                 body[key] = v.clone();
             }
@@ -192,9 +192,18 @@ fn record_failure(workspace: &Path, error: &str) {
     let Some(mut body) = read_marker(workspace) else {
         return;
     };
-    let n = body.get("attempts").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
-    body["attempts"] = n.into();
+    // A new release may have fixed the cause (#226: v0.148.0 gave up on a
+    // lock that v0.149.0 no longer holds), so it starts counting again.
+    let same_build =
+        body.get("failed_on").and_then(|v| v.as_str()) == Some(env!("CARGO_PKG_VERSION"));
+    let before = if same_build {
+        body.get("attempts").and_then(|v| v.as_u64()).unwrap_or(0)
+    } else {
+        0
+    };
+    body["attempts"] = (before + 1).into();
     body["last_error"] = error.into();
+    body["failed_on"] = env!("CARGO_PKG_VERSION").into();
     if let Ok(s) = serde_json::to_string_pretty(&body) {
         let _ = std::fs::write(marker_path(workspace), s);
     }
@@ -204,6 +213,9 @@ fn record_failure(workspace: &Path, error: &str) {
 /// times: `(attempts, last error)`.
 pub fn stuck_migration(workspace: &Path) -> Option<(u64, String)> {
     let body = read_marker(workspace)?;
+    if body.get("failed_on")?.as_str()? != env!("CARGO_PKG_VERSION") {
+        return None;
+    }
     let n = body.get("attempts")?.as_u64()?;
     (n >= AUTO_ATTEMPTS).then(|| {
         let e = body
@@ -1881,6 +1893,14 @@ mod tests {
             other => panic!("expected GaveUp, got {other:?}"),
         }
         assert!(ws.join(".thclaws/settings.json").exists());
+
+        // A newer build tries again: the cause may be what it fixed.
+        let mut m = read_marker(&ws).unwrap();
+        m["failed_on"] = "0.0.1".into();
+        std::fs::write(marker_path(&ws), m.to_string()).unwrap();
+        assert!(stuck_migration(&ws).is_none());
+        record_failure(&ws, "still failing");
+        assert_eq!(read_marker(&ws).unwrap()["attempts"], 1);
 
         // The manual command still finishes it.
         apply(&plan(&ws).unwrap()).unwrap();

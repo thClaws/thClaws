@@ -249,9 +249,9 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.15 | — | $0.30 |
 | `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.27 | — | $0.81 |
 | `deepseek/deepseek-v4-pro` | 1.04858M | $1.19 | — | $2.39 |
-| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $0.83 | — | $2.48 |
+| `deepseek/deepseek-v4-pro-0813` | 1.04858M | $1.65 | — | $4.95 |
 | `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.06 | — | $0.62 |
-| `deepseek/deepseek-v4.1-flash-1017` | 1.04858M | $0.19 | — | $0.75 |
+| `deepseek/deepseek-v4.1-flash-1017` | 1.04858M | $0.38 | — | $1.50 |
 | `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
 | `elorian/glimpse` | 262k | $0.75 | — | $3.75 |
 | `fireworks/ember-1` | 1.04858M | $3.75 | — | $18.75 |
@@ -278,7 +278,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `google/gemma-3-12b-it` | 131k | $0.06 | — | $0.19 |
 | `google/gemma-3-27b-it` | 131k | $0.10 | — | $0.44 |
 | `google/gemma-3-4b-it` | 131k | $0.06 | — | $0.12 |
-| `google/gemma-4-26b-a4b-it` | 262k | $0.10 | — | $0.32 |
+| `google/gemma-4-26b-a4b-it` | 262k | $0.11 | — | $0.38 |
 | `google/gemma-4-26b-a4b-it:free` | 262k | free | — | free |
 | `google/gemma-4-31b-it` | 262k | $0.25 | — | $0.50 |
 | `google/gemma-4-31b-it:free` | 262k | free | — | free |
@@ -351,7 +351,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `moonshotai/kimi-k2.5` | 262k | $0.62 | $0.12 | $3.12 |
 | `moonshotai/kimi-k2.6` | 256k | $0.81 | — | $4.26 |
 | `moonshotai/kimi-k2.7-code` | 262k | $0.70 | — | $3.88 |
-| `moonshotai/kimi-k3` | 1.04858M | $0.24 | — | $25.00 |
+| `moonshotai/kimi-k3` | 1.04858M | $0.24 | — | $18.75 |
 | `moonshotai/kimi-k3.1-pro` | 1.04858M | $2.50 | — | $12.50 |
 | `morph/morph-v3-fast` | 82k | $1.00 | — | $1.50 |
 | `morph/morph-v3-large` | 262k | $1.12 | — | $2.38 |
@@ -552,7 +552,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `~anthropic/claude-sonnet-latest` | 1M | $2.50 | — | $12.50 |
 | `~google/gemini-flash-latest` | 1.04858M | $0.94 | $0.04 | $4.69 |
 | `~google/gemini-pro-latest` | 1.04858M | $2.50 | $0.16 | $12.50 |
-| `~moonshotai/kimi-latest` | 256k | $0.20 | — | $12.18 |
+| `~moonshotai/kimi-latest` | 256k | $0.23 | — | $11.67 |
 | `~openai/gpt-mini-latest` | 400k | $0.94 | — | $5.62 |
 
 ### DashScope (Alibaba)

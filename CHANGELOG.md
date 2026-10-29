@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.149.0] — 2026-10-29
+
+**Windows workspaces upgrade again.** The fix for #226 in 0.148 addressed the wrong cause. This release removes the real one, and was tested on Windows 11.
+
+### Fixed
+
+- **Upgrading a single-agent workspace works on Windows** (#226). During the upgrade, thClaws held its own lock file inside `.thclaws` while moving that folder. Windows refuses to move a folder with an open file inside, so every upgrade failed with error 5, both on launch and with `thclaws bots migrate`. The lock now lives outside the workspace, in `~/.config/thclaws/locks/`. A workspace left half-upgraded finishes the next time you open it, even if 0.148 had given up on it after three tries.
+
 ## [0.148.0] — 2026-10-29
 
 **Deeper reasoning where models offer it, a new provider, and a fix for Windows workspaces stuck mid-upgrade.**

@@ -4373,11 +4373,11 @@
         "deepseek/deepseek-v4-pro-0813": {
           "context": 1048576,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-19",
+          "verified_at": "2026-10-29",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.66,
-          "output_per_mtok": 1.98
+          "input_per_mtok": 1.32,
+          "output_per_mtok": 3.96
         },
         "deepseek/deepseek-v4.1-flash": {
           "context": 1048576,
@@ -4393,11 +4393,11 @@
           "context": 1048576,
           "max_output": 393216,
           "source": "https://openrouter.ai/api/v1/models + api:openrouter",
-          "verified_at": "2026-10-22",
+          "verified_at": "2026-10-29",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.15,
-          "output_per_mtok": 0.6
+          "input_per_mtok": 0.3,
+          "output_per_mtok": 1.2
         },
         "dots-studio/dots-3-note-preview:free": {
           "context": 512000,
@@ -4701,8 +4701,8 @@
           "verified_at": "2026-10-29",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.0765,
-          "output_per_mtok": 0.255
+          "input_per_mtok": 0.09,
+          "output_per_mtok": 0.3
         },
         "google/gemma-4-26b-a4b-it:free": {
           "context": 262144,
@@ -5429,7 +5429,7 @@
           "free": false,
           "chat": true,
           "input_per_mtok": 0.192,
-          "output_per_mtok": 20.0
+          "output_per_mtok": 15.0
         },
         "moonshotai/kimi-k3.1-pro": {
           "context": 1048576,
@@ -7491,8 +7491,8 @@
           "verified_at": "2026-10-29",
           "free": false,
           "chat": true,
-          "input_per_mtok": 0.1624,
-          "output_per_mtok": 9.7471
+          "input_per_mtok": 0.1824,
+          "output_per_mtok": 9.3388
         },
         "~openai/gpt-mini-latest": {
           "context": 400000,

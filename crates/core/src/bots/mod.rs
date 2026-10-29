@@ -143,11 +143,43 @@ pub struct HostLock {
     _file: std::fs::File,
 }
 
+/// #226: the lock lives OUTSIDE the workspace. It used to be
+/// `.thclaws/state/host.lock`, and the migration held it open while moving
+/// `.thclaws` — Windows refuses to rename a directory with an open file
+/// inside, so every upgrade on Windows failed with error 5, and the
+/// manual `thclaws bots migrate` with it. Keyed by the folder's canonical
+/// path, so every spelling of one folder meets the same lock.
+fn host_lock_path(workspace: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let canonical = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let mut key = canonical.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        key = key.to_lowercase();
+    }
+    let digest = Sha256::digest(key.as_bytes());
+    let name: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let dir = crate::util::home_dir()
+        .map(|h| h.join(".config/thclaws/locks"))
+        .unwrap_or_else(|| std::env::temp_dir().join("thclaws-locks"));
+    dir.join(format!("{name}.lock"))
+}
+
+/// Where hosts before #226 kept the lock.
+const LEGACY_HOST_LOCK: &str = ".thclaws/state/host.lock";
+
 pub fn lock_workspace(workspace: &Path, who: &str) -> Result<HostLock> {
     use fs2::FileExt;
-    let dir = workspace.join(".thclaws/state");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("host.lock");
+    let busy = || {
+        Error::Config(format!(
+            "{} is already open by another thClaws host — {who} cannot run alongside it. Close \
+             that window or `--serve` first.",
+            workspace.display()
+        ))
+    };
+    let path = host_lock_path(workspace);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -155,11 +187,22 @@ pub fn lock_workspace(workspace: &Path, who: &str) -> Result<HostLock> {
         .truncate(false)
         .open(&path)?;
     if file.try_lock_exclusive().is_err() {
-        return Err(Error::Config(format!(
-            "{} is already open by another thClaws host — {who} cannot run alongside it. Close \
-             that window or `--serve` first.",
-            workspace.display()
-        )));
+        return Err(busy());
+    }
+    // An older thClaws serving this folder holds the old lock. Ask it, then
+    // let go at once: holding it is exactly what broke the Windows upgrade.
+    let legacy = workspace.join(LEGACY_HOST_LOCK);
+    if legacy.exists() {
+        if let Ok(old) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&legacy)
+        {
+            if old.try_lock_exclusive().is_err() {
+                return Err(busy());
+            }
+            let _ = FileExt::unlock(&old);
+        }
     }
     Ok(HostLock { _file: file })
 }
@@ -322,6 +365,35 @@ mod tests {
         assert!(err.contains("already open"), "{err}");
         drop(first);
         assert!(lock_workspace(dir.path(), "a host").is_ok());
+    }
+
+    /// #226: a migration moves `.thclaws`, and Windows will not rename a
+    /// directory with an open file inside — so the lock it holds while
+    /// moving must not be in the workspace at all.
+    #[test]
+    fn the_host_lock_is_not_inside_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = lock_workspace(dir.path(), "a migration").unwrap();
+        assert!(!host_lock_path(dir.path()).starts_with(dir.path()));
+        assert!(!dir.path().join(LEGACY_HOST_LOCK).exists());
+        // Another spelling of the same folder meets the same lock.
+        let other = dir.path().join(".").join("");
+        assert_eq!(host_lock_path(&other), host_lock_path(dir.path()));
+    }
+
+    /// A host from before the move still holds the old lock; a migration
+    /// must still see it.
+    #[test]
+    fn an_older_hosts_lock_is_still_honoured() {
+        use fs2::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join(LEGACY_HOST_LOCK);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let old = std::fs::File::create(&legacy).unwrap();
+        old.lock_exclusive().unwrap();
+        assert!(lock_workspace(dir.path(), "a migration").is_err());
+        FileExt::unlock(&old).unwrap();
+        assert!(lock_workspace(dir.path(), "a migration").is_ok());
     }
 
     /// The message a user sees when they have not written the file yet is
