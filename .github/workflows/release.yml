@@ -45,14 +45,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
             os: macos
             archive: tar.gz
           # macos-13 (Intel runner) was retired. Cross-compile Intel macOS
           # from the arm64 runner using `--target x86_64-apple-darwin` — the
           # Apple SDK is universal, so wry's `-framework WebKit` links fine.
-          - runner: macos-14
+          - runner: macos-15
             target: x86_64-apple-darwin
             os: macos
             archive: tar.gz
@@ -340,7 +340,7 @@ jobs:
   macos-dmg:
     name: macos-universal-dmg
     needs: build
-    runs-on: macos-14
+    runs-on: macos-15
     environment: release
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
