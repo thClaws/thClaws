@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.151.0] — 2026-11-01
+
+**Fixes for Anthropic sessions and for gui-shells on a server that uses a token.**
+
+### Added
+
+- **Anthropic API keys that aren't scoped to a workspace** (#232). Set `ANTHROPIC_WORKSPACE_ID`, and thClaws sends it as `anthropic-workspace-id` on messages and on the model list. Workspace-scoped keys need nothing.
+
+### Fixed
+
+- **Continuing an Anthropic session that holds thinking no longer fails** with `thinking.thinking: Field required` (#233). Earlier turns' thinking now goes out in the shape Anthropic expects, with its signature. Thinking that came from another provider, which has no signature, is left out, and Gemini's `thought_signature` is no longer sent on tool calls.
+- **gui-shells load their CSS and scripts on a `--serve` that requires a token.** A page opened with `?token=` fetched `style.css` and `main.js` without it and got 401. The token is now kept in an HttpOnly cookie for that port, so the page's other requests pass too.
+
 ## [0.150.0] — 2026-11-01
 
 **A security release: tighter sandboxing on every platform, a "trust this folder" prompt, and `/cloud push`/`pull` fixes for agent workspaces.** Some defaults are stricter; read *Changed* before upgrading a server.

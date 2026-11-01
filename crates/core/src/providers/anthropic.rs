@@ -90,7 +90,7 @@ impl AnthropicProvider {
                         Role::Assistant => "assistant",
                         Role::System => unreachable!(),
                     },
-                    "content": m.content,
+                    "content": anthropic_blocks(&m.content),
                 })
             })
             .collect();
@@ -184,20 +184,30 @@ impl AnthropicProvider {
         body
     }
 
+    /// An API key that isn't scoped to a workspace must name one (#232).
+    fn with_workspace(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match workspace_id() {
+            Some(w) if self.api_key_header.is_none() => rb.header("anthropic-workspace-id", w),
+            _ => rb,
+        }
+    }
+
     /// POST `body` to `base_url` with the standard Anthropic headers.
     /// Used by `stream` for both the cache-enabled first attempt and
     /// the cache-disabled retry. Returns the raw `reqwest::Response`
     /// — caller is responsible for status checking and body draining.
     async fn send_request(&self, body: &Value) -> Result<reqwest::Response> {
-        crate::multi_tenant::attach_member(self.client.post(&self.base_url))
-            .header(self.auth_header_name(), &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(body)
-            .send()
-            .await
-            .inspect(crate::desktop_update::observe)
-            .map_err(|e| Error::Provider(format!("http: {e}")))
+        self.with_workspace(crate::multi_tenant::attach_member(
+            self.client.post(&self.base_url),
+        ))
+        .header(self.auth_header_name(), &self.api_key)
+        .header("anthropic-version", API_VERSION)
+        .header("content-type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .inspect(crate::desktop_update::observe)
+        .map_err(|e| Error::Provider(format!("http: {e}")))
     }
 }
 
@@ -213,8 +223,7 @@ impl Provider for AnthropicProvider {
             .unwrap_or_else(|| format!("{}/models", self.base_url.trim_end_matches('/')));
 
         let resp = self
-            .client
-            .get(&models_url)
+            .with_workspace(self.client.get(&models_url))
             .header(self.auth_header_name(), &self.api_key)
             .header("anthropic-version", API_VERSION)
             .send()
@@ -540,6 +549,42 @@ fn merge_usage(start: Option<Usage>, end: Option<Usage>) -> Option<Usage> {
 /// Refreshed by re-running `scripts/probe/reasoning-effort-probe.py`;
 /// the measurements live in `docs/reasoning-effort-measured.json` and the
 /// result in `model_catalogue.json`.
+fn workspace_id() -> Option<String> {
+    std::env::var("ANTHROPIC_WORKSPACE_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// History blocks in Anthropic's wire shape (#233). Our `Thinking` stores
+/// its text as `content`; Anthropic wants `thinking` plus the signature it
+/// issued, so unsigned thinking (from another provider) is dropped. Gemini's
+/// `thought_signature` on tool calls is not an Anthropic field.
+fn anthropic_blocks(blocks: &[crate::types::ContentBlock]) -> Value {
+    use crate::types::ContentBlock;
+    let mut out: Vec<Value> = Vec::with_capacity(blocks.len());
+    for b in blocks {
+        match b {
+            ContentBlock::Thinking { content, signature } => {
+                if let Some(sig) = signature.as_deref().filter(|s| !s.is_empty()) {
+                    out.push(json!({"type": "thinking", "thinking": content, "signature": sig}));
+                }
+            }
+            other => {
+                let mut v = serde_json::to_value(other).unwrap_or(Value::Null);
+                if let (ContentBlock::ToolUse { .. }, Some(obj)) = (other, v.as_object_mut()) {
+                    obj.remove("thought_signature");
+                }
+                out.push(v);
+            }
+        }
+    }
+    if out.is_empty() && !blocks.is_empty() {
+        out.push(json!({"type": "text", "text": "…"}));
+    }
+    Value::Array(out)
+}
+
 enum ThinkingShape {
     /// `thinking:{type:adaptive}` + `output_config:{effort}`.
     Adaptive,
@@ -581,6 +626,39 @@ pub(crate) fn budget_below_max_tokens(budget: u32, max_tokens: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn history_thinking_goes_out_in_anthropic_shape() {
+        use crate::types::ContentBlock;
+        let v = super::anthropic_blocks(&[
+            ContentBlock::Thinking {
+                content: "why".into(),
+                signature: Some("sig".into()),
+            },
+            ContentBlock::Thinking {
+                content: "from deepseek".into(),
+                signature: None,
+            },
+            ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "Read".into(),
+                input: serde_json::json!({}),
+                thought_signature: Some("gemini".into()),
+            },
+        ]);
+        let a = v.as_array().unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(
+            a[0],
+            serde_json::json!({"type": "thinking", "thinking": "why", "signature": "sig"})
+        );
+        assert!(a[1].get("thought_signature").is_none() && a[1]["type"] == "tool_use");
+        let only = super::anthropic_blocks(&[ContentBlock::Thinking {
+            content: "x".into(),
+            signature: None,
+        }]);
+        assert_eq!(only[0]["type"], "text");
+    }
 
     #[test]
     fn the_flagship_models_get_the_shape_they_accept() {

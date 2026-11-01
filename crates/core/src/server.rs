@@ -1884,7 +1884,49 @@ async fn serve_token_gate(State(single_user): State<bool>, req: Request, next: N
         );
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    next.run(req).await
+    // A page opened with `?token=` loads its relative assets (a gui-shell's
+    // style.css / main.js, images) without the query; remember the token in
+    // a cookie so those requests pass too.
+    let set_cookie = match (single_user, serve_token()) {
+        (true, Some(t))
+            if query_token(req.uri().query()).is_some_and(|q| token_matches(&t, &q)) =>
+        {
+            Some(format!(
+                "{}={t}; HttpOnly; SameSite=Strict; Path=/",
+                serve_cookie_name(req.headers())
+            ))
+        }
+        _ => None,
+    };
+    let mut resp = next.run(req).await;
+    if let Some(c) = set_cookie.and_then(|c| axum::http::HeaderValue::from_str(&c).ok()) {
+        resp.headers_mut().append(axum::http::header::SET_COOKIE, c);
+    }
+    resp
+}
+
+/// Cookies are scoped by host, not port, so two `--serve` on one machine
+/// (e.g. :8460 and :8470) each need their own name.
+fn serve_cookie_name(headers: &axum::http::HeaderMap) -> String {
+    let port = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.rsplit_once(':').map(|(_, p)| p.to_string()))
+        .filter(|p| p.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or_else(|| "0".into());
+    format!("thclaws_serve_{port}")
+}
+
+fn query_token(query: Option<&str>) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        pair.strip_prefix("token=").map(|t| {
+            urlencoding::decode(t)
+                .map(|d| d.into_owned())
+                .unwrap_or_else(|_| t.to_string())
+                .trim()
+                .to_string()
+        })
+    })
 }
 
 /// Build the Mode B Axum router. Mounts the bound shell at
@@ -2948,18 +2990,17 @@ fn serve_token_ok(headers: &axum::http::HeaderMap, query: Option<&str>) -> bool 
             }
         }
     }
-    if let Some(q) = query {
-        for pair in q.split('&') {
-            if let Some(t) = pair.strip_prefix("token=") {
-                // The value arrives percent-encoded from a browser.
-                let decoded = urlencoding::decode(t).unwrap_or(std::borrow::Cow::Borrowed(t));
-                if token_matches(&expected, decoded.trim()) {
-                    return true;
-                }
-            }
-        }
+    if query_token(query).is_some_and(|t| token_matches(&expected, &t)) {
+        return true;
     }
-    false
+    let name = serve_cookie_name(headers);
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().split_once('='))
+        .any(|(k, v)| k == name && token_matches(&expected, v))
 }
 
 fn resolve_session_handle(
@@ -4517,6 +4558,23 @@ mod tests {
             "Bearer s3cret-valuf".parse().unwrap(),
         );
         assert!(!serve_token_ok(&bad, None));
+
+        // Cookie form — set after `?token=` so a gui-shell's relative assets
+        // load; named per port so two servers on one host don't collide.
+        let mut ck = axum::http::HeaderMap::new();
+        ck.insert(axum::http::header::HOST, "box:8460".parse().unwrap());
+        ck.insert(
+            axum::http::header::COOKIE,
+            "a=1; thclaws_serve_8460=s3cret-value".parse().unwrap(),
+        );
+        assert!(serve_token_ok(&ck, None));
+        ck.insert(axum::http::header::HOST, "box:8470".parse().unwrap());
+        assert!(!serve_token_ok(&ck, None));
+        ck.insert(
+            axum::http::header::COOKIE,
+            "thclaws_serve_8470=nope".parse().unwrap(),
+        );
+        assert!(!serve_token_ok(&ck, None));
 
         // Query form — a browser WebSocket cannot set headers.
         assert!(serve_token_ok(
