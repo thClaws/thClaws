@@ -168,18 +168,18 @@ fn strip_wrapping_quotes(s: &str) -> &str {
     }
 }
 
-/// Whether the installed shell `shell_id` declares `perm` in its
-/// manifest. Used to enforce the `model.read` / `model.write` flags on
-/// the `gui_shell_model_*` arms (a shell can't switch the app model
-/// without explicitly asking for it).
+/// Whether the installed shell `shell_id` holds `perm`: declared in its
+/// manifest, and not a project shell from an untrusted folder. Used to
+/// enforce the `model.read` / `model.write` flags on the
+/// `gui_shell_model_*` arms (a shell can't switch the app model without
+/// explicitly asking for it).
 fn shell_has_permission(shell_id: &str, perm: &str) -> bool {
     if shell_id.is_empty() {
         return false;
     }
     crate::gui_shell::ShellRegistry::new()
-        .resolve(shell_id)
-        .map(|s| s.manifest().permissions.iter().any(|p| p == perm))
-        .unwrap_or(false)
+        .granted_permissions(shell_id)
+        .is_some_and(|perms| perms.iter().any(|p| p == perm))
 }
 
 /// Serialize a session's messages into the flat `{role, text}` shape a
@@ -422,15 +422,27 @@ fn shell_tool_invoke_allowed(shell_id: &str, tool_name: &str) -> std::result::Re
     let perms = if shell_id.is_empty() {
         None
     } else {
-        crate::gui_shell::ShellRegistry::new()
-            .resolve(shell_id)
-            .map(|s| s.manifest().permissions.clone())
+        let registry = crate::gui_shell::ShellRegistry::new();
+        match registry.resolve(shell_id) {
+            // Holding nothing would read as legacy/unfettered below.
+            Some(s) if !registry.holds_manifest_grants(&s) => {
+                return Err(untrusted_shell_message(shell_id));
+            }
+            s => s.map(|s| s.manifest().permissions.clone()),
+        }
     };
     shell_tool_invoke_check(
         shell_id,
         perms.as_deref(),
         &crate::policy::denied_tools(),
         tool_name,
+    )
+}
+
+fn untrusted_shell_message(shell_id: &str) -> String {
+    format!(
+        "GUI shell '{shell_id}' comes with this project folder, which isn't trusted; \
+         trust the folder to let it act"
     )
 }
 
@@ -479,8 +491,8 @@ fn shell_upload_into(
     }
     let dir = crate::uploads::ensure_uploads_dir(base)
         .map_err(|e| format!("cannot use uploads dir: {e}"))?;
-    let dest = crate::uploads::unique_path(&dir, name);
-    std::fs::write(&dest, &bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
+    let dest = crate::uploads::write_unique(&dir, name, &bytes)
+        .map_err(|e| format!("write {}: {e}", dir.join(name).display()))?;
     let rel = dest
         .strip_prefix(base)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -828,7 +840,7 @@ fn parse_attachments(msg: &Value) -> Vec<(String, String)> {
 /// keeps `check`, as before.
 fn ipc_check_mut(path: &str) -> crate::error::Result<std::path::PathBuf> {
     if crate::workdir::is_multiuser() {
-        crate::sandbox::Sandbox::check_write(path)
+        crate::sandbox::Sandbox::check_write_approved(path)
     } else {
         crate::sandbox::Sandbox::check(path)
     }
@@ -850,6 +862,8 @@ const SHARED_SHELL_REFUSAL: &str =
     "The shell tab isn't available in shared workspaces — a pod shell can read every member's folder.";
 const SHARED_SETTING_REFUSAL: &str =
     "This setting is shared by every member of this workspace and can't be changed from here.";
+const SHARED_INSTALL_REFUSAL: &str =
+    "Installing plugins or skills isn't available in shared workspaces — an install can start programs outside your folder.";
 
 /// C2: IPC arms that act on pod-global state (a shell, secrets, settings,
 /// the owner's connectors) and so must not run for one member of a
@@ -892,9 +906,145 @@ fn multiuser_refusal(ty: &str) -> Option<&'static str> {
         | "phone_home_pair"
         | "gui_shell_key_set"
         | "gui_shell_mode_set"
-        | "gui_shell_set_default" => Some(SHARED_SETTING_REFUSAL),
+        | "gui_shell_set_default"
+        | "workspace_trust"
+        | "workspace_trust_apply" => Some(SHARED_SETTING_REFUSAL),
+        "gui_shell_plugin_install" | "gui_shell_skill_install" => Some(SHARED_INSTALL_REFUSAL),
         _ => None,
     }
+}
+
+const NON_BROWSER_SHELL_REFUSAL: &str =
+    "The shell tab opens only from a browser tab or the desktop window.";
+
+/// #3: what a WebSocket client that is not a browser may not do — open a
+/// shell outside the Bash sandbox, or turn the shell tab on.
+pub(crate) fn browser_only_refusal(ty: &str) -> Option<&'static str> {
+    match ty {
+        "pty_open" | "pty_input" | "pty_resize" | "pty_close" | "shell_tab_enabled_set" => {
+            Some(NON_BROWSER_SHELL_REFUSAL)
+        }
+        "workspace_trust" => Some(NON_BROWSER_TRUST_REFUSAL),
+        _ => None,
+    }
+}
+
+const NON_BROWSER_TRUST_REFUSAL: &str =
+    "A folder is trusted only from a browser tab or the desktop window.";
+
+/// Whether a desktop IPC message came from the window's own page rather than
+/// an iframe in it. wry passes the sending frame's URL: the app is served at
+/// the root, a gui-shell under `/gui-shell/`, a srcdoc frame as `about:`.
+pub(crate) fn is_top_frame_uri(uri: &str) -> bool {
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return false;
+    };
+    let path = rest
+        .find('/')
+        .map(|i| &rest[i..])
+        .unwrap_or("/")
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("");
+    matches!(scheme, "thclaws" | "http" | "https") && matches!(path, "/" | "" | "/index.html")
+}
+
+/// Frames only the user may send, never a page inside the window.
+pub(crate) fn top_frame_only(ty: &str) -> bool {
+    ty == "workspace_trust"
+}
+
+/// Read once per process (Bash confinement) or per window open (the
+/// default tab), so trusting doesn't change them live.
+const TRUST_RESTART_KEYS: &[&str] = &[
+    "bash.sandbox",
+    "bash.sandbox_write_paths",
+    "guiShell.tabDefault",
+];
+
+/// `{"type":"workspace_trust_status",…}`: what trusting `dir` would enable.
+pub(crate) fn trust_status_frame(dir: &std::path::Path) -> Value {
+    let shells = crate::gui_shell::registry::project_shells_with_permissions(dir);
+    serde_json::json!({
+        "type": "workspace_trust_status",
+        "path": dir.to_string_lossy(),
+        "withheld": crate::config::trust::withheld(dir, shells),
+    })
+}
+
+/// Trust `dir`, have the worker apply it, and tell the page.
+pub(crate) fn trust_and_apply(ctx: &IpcContext, dir: &std::path::Path) {
+    let (ok, frame) = trust_workspace(dir);
+    if ok {
+        let _ = ctx.shared.input_tx.send(ShellInput::FolderTrusted);
+    }
+    (ctx.dispatch)(frame.to_string());
+    (ctx.dispatch)(trust_status_frame(dir).to_string());
+}
+
+/// Text for the desktop's native trust dialog.
+pub(crate) fn trust_prompt_text(dir: &std::path::Path) -> String {
+    let shells = crate::gui_shell::registry::project_shells_with_permissions(dir);
+    let items: Vec<String> = crate::config::trust::withheld(dir, shells)
+        .map(|w| w.items)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|i| match i.detail {
+            Some(d) => format!("{} ({d})", i.key),
+            None => i.key,
+        })
+        .collect();
+    let mut text = format!("ไว้ใจโฟลเดอร์ {}?", dir.display());
+    if !items.is_empty() {
+        text.push_str(&format!("\n\nจะเปิดใช้: {}", items.join(", ")));
+    }
+    text
+}
+
+/// `workspace_trust_result` for a trust the user declined.
+pub(crate) fn trust_declined_frame() -> String {
+    serde_json::json!({ "type": "workspace_trust_result", "ok": false, "declined": true })
+        .to_string()
+}
+
+/// Trust `dir` for the `workspace_trust` frame. The caller has already
+/// checked the frame came from the user; the bool is whether it took.
+pub(crate) fn trust_workspace(dir: &std::path::Path) -> (bool, Value) {
+    let fail = |e: String| {
+        let frame =
+            serde_json::json!({ "type": "workspace_trust_result", "ok": false, "error": e });
+        (false, frame)
+    };
+    if crate::workdir::is_multiuser() {
+        return fail(SHARED_SETTING_REFUSAL.into());
+    }
+    if crate::config::trust::hosted() {
+        return fail("This runtime already trusts its workspace.".into());
+    }
+    let shells = crate::gui_shell::registry::project_shells_with_permissions(dir);
+    let restart: Vec<String> = crate::config::trust::withheld(dir, shells)
+        .map(|w| w.items)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|i| i.key)
+        .filter(|k| TRUST_RESTART_KEYS.contains(&k.as_str()))
+        .collect();
+    match crate::config::trust::trust_folder(dir) {
+        Ok(()) => (
+            true,
+            serde_json::json!({
+                "type": "workspace_trust_result",
+                "ok": true,
+                "path": dir.to_string_lossy(),
+                "restart_needed": restart,
+            }),
+        ),
+        Err(e) => fail(e.to_string()),
+    }
+}
+
+pub(crate) fn refusal_frame(ty: &str, msg: &Value, reason: &str) -> String {
+    multiuser_refusal_frame(ty, msg, reason)
 }
 
 fn multiuser_refusal_frame(ty: &str, msg: &Value, reason: &str) -> String {
@@ -1003,6 +1153,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             // Every ready, not once: BotShell remounts App per bot and a
             // frame sent before the new App subscribes is lost.
             (ctx.dispatch)(crate::branding::payload().to_string());
+            (ctx.dispatch)(crate::confine::status_frame().to_string());
             // Same for a pending approval: the WS connect replays it once,
             // before the remounted App's modal subscribes, and the turn then
             // waits forever. The modal drops ids it already holds.
@@ -1040,6 +1191,38 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
 
         "branding_get" => {
             (ctx.dispatch)(crate::branding::payload().to_string());
+        }
+
+        "workspace_trust_status" => {
+            let dir = std::env::current_dir().unwrap_or_default();
+            (ctx.dispatch)(trust_status_frame(&dir).to_string());
+        }
+
+        // The desktop window trusts only behind a native dialog (gui.rs),
+        // which script in the webview can't press; it never reaches here.
+        "workspace_trust" if !ctx.is_serve_mode => {
+            (ctx.dispatch)(
+                serde_json::json!({
+                    "type": "workspace_trust_result", "ok": false,
+                    "error": "The desktop window trusts a folder through its own dialog.",
+                })
+                .to_string(),
+            );
+        }
+        "workspace_trust" => {
+            trust_and_apply(ctx, &std::env::current_dir().unwrap_or_default());
+        }
+
+        // The desktop window trusted this agent's folder itself (host mode);
+        // apply it here. Applies only what the trust store now allows.
+        "workspace_trust_apply" => {
+            let _ = ctx.shared.input_tx.send(ShellInput::FolderTrusted);
+            let dir = std::env::current_dir().unwrap_or_default();
+            (ctx.dispatch)(trust_status_frame(&dir).to_string());
+        }
+
+        "confinement_status" => {
+            (ctx.dispatch)(crate::confine::status_frame().to_string());
         }
 
         "approval_response" => {
@@ -1119,6 +1302,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            if !shell_has_permission(shell_id, "agent.run") {
+                (ctx.dispatch)(
+                    serde_json::json!({
+                        "type": "gui_shell_event",
+                        "sessionId": session_id,
+                        "replyTo": request_id,
+                        "error": "permission 'agent.run' not declared",
+                    })
+                    .to_string(),
+                );
+                return true;
+            }
             if !prompt.is_empty() {
                 // `isolated: true` (from `streamTurn(prompt, {isolated:true})`)
                 // runs the turn on a throwaway child agent with empty history
@@ -2651,6 +2847,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let dispatch = ctx.dispatch.clone();
             let approver = ctx.approver.clone();
             let inline_session = session_id.clone();
+            let scope = crate::workdir::Scope::capture();
             std::thread::spawn(move || {
                 let outcome: std::result::Result<String, String> = (|| {
                     if tool_name.is_empty() {
@@ -2681,7 +2878,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         .enable_all()
                         .build()
                         .map_err(|e| format!("tokio runtime build: {e}"))?;
-                    rt.block_on(async {
+                    rt.block_on(scope.run(async {
                         if tool.requires_approval(&args) {
                             let decision = if prefer_inline {
                                 // Inline path: dispatch an approval_request
@@ -2725,7 +2922,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             }
                         }
                         tool.call(args).await.map_err(|e| e.to_string())
-                    })
+                    }))
                 })();
                 let reply = match outcome {
                     Ok(output) => serde_json::json!({
@@ -2978,8 +3175,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let session_id = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
             let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
             let perms = crate::gui_shell::ShellRegistry::new()
-                .resolve(shell_id)
-                .map(|s| s.manifest().permissions.clone())
+                .granted_permissions(shell_id)
                 .unwrap_or_default();
             (ctx.dispatch)(
                 serde_json::json!({
@@ -6331,13 +6527,13 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             if is_url {
                 // No sandbox check: a URL is not a path, and the fetch
                 // is the engine's own, the same one `/kms ingest` uses.
-                tokio::spawn(async move {
+                tokio::spawn(crate::workdir::Scope::capture().run(async move {
                     let out = match crate::kms::ingest_url(&kref, &raw_path, None, force).await {
                         Ok(r) => IngestOutcome::from(r),
                         Err(e) => IngestOutcome::failed(e.to_string()),
                     };
                     job.finish(out);
-                });
+                }));
                 return true;
             }
 
@@ -6373,13 +6569,13 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .map(|e| e.eq_ignore_ascii_case("pdf"))
                 .unwrap_or(false);
             if is_pdf {
-                tokio::spawn(async move {
+                tokio::spawn(crate::workdir::Scope::capture().run(async move {
                     let out = match crate::kms::ingest_pdf(&kref, &path, None, force, None).await {
                         Ok(r) => IngestOutcome::from(r),
                         Err(e) => IngestOutcome::failed(e.to_string()),
                     };
                     job.finish(out);
-                });
+                }));
                 return true;
             }
 
@@ -6611,14 +6807,14 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     format!("{text} ({page_title})")
                 };
                 let dispatch = ctx.dispatch.clone();
-                tokio::spawn(async move {
+                tokio::spawn(crate::workdir::Scope::capture().run(async move {
                     match crate::research::start(query, rcfg, provider, model, None).await {
                         Ok(id) => dispatch(
                             serde_json::json!({"type": "research_focus", "id": id}).to_string(),
                         ),
                         Err(e) => eprintln!("[kms_create_page] research failed to start: {e}"),
                     }
-                });
+                }));
                 started = true;
                 Ok(())
             })();
@@ -8342,6 +8538,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_the_window_page_counts_as_the_top_frame() {
+        for uri in [
+            "thclaws://localhost/",
+            "thclaws://localhost",
+            "http://thclaws.localhost/",
+            "thclaws://localhost/index.html?x=1",
+        ] {
+            assert!(is_top_frame_uri(uri), "{uri}");
+        }
+        for uri in [
+            "thclaws://localhost/gui-shell/studio/index.html",
+            "thclaws://localhost/file-asset/x.html",
+            "about:srcdoc",
+            "about:blank",
+            "",
+        ] {
+            assert!(!is_top_frame_uri(uri), "{uri}");
+        }
+        assert!(top_frame_only("workspace_trust"));
+        assert!(browser_only_refusal("workspace_trust").is_some());
+    }
+
+    /// A gui-shell's frames reach the backend as `gui_shell_<type>`, so the
+    /// nearest it gets is an arm that doesn't exist.
+    #[test]
+    fn a_shell_frame_cannot_trust_the_folder() {
+        let (shared, input_rx, _ev) = stub_shared();
+        let dispatched = Arc::new(Mutex::new(Vec::new()));
+        let ctx = stub_ctx(shared, dispatched.clone());
+        handle_ipc(
+            serde_json::json!({"type": "gui_shell_workspace_trust", "shellId": "x", "id": 1}),
+            &ctx,
+        );
+        assert!(input_rx.try_recv().is_err());
+        assert!(!dispatched
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|f| f.contains("workspace_trust_result")));
+    }
+
+    /// The desktop's trust goes through gui.rs's native dialog; the shared
+    /// dispatch must not offer a way around it.
+    #[test]
+    fn desktop_ipc_never_trusts_without_the_native_dialog() {
+        let (shared, input_rx, _ev) = stub_shared();
+        let dispatched = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = stub_ctx(shared, dispatched.clone());
+        ctx.is_serve_mode = false;
+        assert!(handle_ipc(
+            serde_json::json!({"type": "workspace_trust"}),
+            &ctx
+        ));
+        assert!(input_rx.try_recv().is_err());
+        let frames = dispatched.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains(r#""ok":false"#), "{frames:?}");
+    }
+
+    #[test]
+    fn multiuser_refuses_to_trust_a_folder() {
+        crate::workdir::set_multiuser(true);
+        let (shared, input_rx, _ev) = stub_shared();
+        let dispatched = Arc::new(Mutex::new(Vec::new()));
+        let ctx = stub_ctx(shared, dispatched.clone());
+        for ty in ["workspace_trust", "workspace_trust_apply"] {
+            handle_ipc(serde_json::json!({ "type": ty }), &ctx);
+        }
+        let (ok, _) = trust_workspace(std::path::Path::new("/nonexistent"));
+        crate::workdir::set_multiuser(false);
+        assert!(!ok);
+        assert!(input_rx.try_recv().is_err(), "nothing reached the worker");
+        let frames = dispatched.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert!(
+            frames.iter().all(|f| f.contains("ipc_refused")),
+            "{frames:?}"
+        );
+    }
+
     /// C2: pod-global arms are refused for a multiuser member; file arms
     /// are not (they run under the member's scoped root instead).
     #[test]
@@ -8352,6 +8629,8 @@ mod tests {
             "shell_tab_enabled_set",
             "api_key_set",
             "gui_shell_mode_set",
+            "gui_shell_plugin_install",
+            "gui_shell_skill_install",
         ] {
             assert!(multiuser_refusal(ty).is_some(), "{ty}");
         }

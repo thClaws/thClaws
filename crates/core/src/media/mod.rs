@@ -61,7 +61,7 @@ pub fn save_image(bytes: &[u8], ext: &str) -> Result<PathBuf> {
 /// root → falls back to cwd-relative `output/`, unchanged.
 fn save_under_output(name: &str, bytes: &[u8]) -> Result<PathBuf> {
     let rel = std::path::Path::new("output").join(name);
-    let dir = match crate::sandbox::Sandbox::root() {
+    let dir = match crate::sandbox::Sandbox::try_root()? {
         Some(root) => root.join("output"),
         None => std::path::PathBuf::from("output"),
     };

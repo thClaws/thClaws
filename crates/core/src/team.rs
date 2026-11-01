@@ -1786,7 +1786,7 @@ impl Tool for SpawnTeammateTool {
 
             // Ensure project_root is a git repo — otherwise `git worktree add` fails
             // and the teammate silently ends up running in the same (empty) cwd as lead.
-            let is_git_repo = std::process::Command::new("git")
+            let is_git_repo = crate::util::engine_git()
                 .args(["rev-parse", "--is-inside-work-tree"])
                 .current_dir(&project_root)
                 .output()
@@ -1796,7 +1796,7 @@ impl Tool for SpawnTeammateTool {
                 eprintln!(
                     "\x1b[33m[team] project is not a git repo — running 'git init' so worktree isolation works\x1b[0m"
                 );
-                let _ = std::process::Command::new("git")
+                let _ = crate::util::engine_git()
                     .args(["init", "-q"])
                     .current_dir(&project_root)
                     .output();
@@ -1808,7 +1808,7 @@ impl Tool for SpawnTeammateTool {
             // This covers two cases the original gate missed:
             //   (1) a pre-existing repo with zero commits (e.g. user wiped history)
             //   (2) any other path where init ran but HEAD didn't get created
-            let has_head = std::process::Command::new("git")
+            let has_head = crate::util::engine_git()
                 .args(["rev-parse", "--verify", "HEAD"])
                 .current_dir(&project_root)
                 .output()
@@ -1818,7 +1818,7 @@ impl Tool for SpawnTeammateTool {
                 eprintln!(
                     "\x1b[33m[team] repo has no HEAD — creating empty initial commit so worktree can branch off\x1b[0m"
                 );
-                let _ = std::process::Command::new("git")
+                let _ = crate::util::engine_git()
                     .args([
                         "-c",
                         "user.name=thclaws",
@@ -1837,17 +1837,17 @@ impl Tool for SpawnTeammateTool {
             // Clear any stale `.git/worktrees/<name>` registration left by a
             // crash / manual `rm -rf .worktrees/<name>` / prior run, else
             // `git worktree add` dies with "missing but already registered".
-            let _ = std::process::Command::new("git")
+            let _ = crate::util::engine_git()
                 .args(["worktree", "prune"])
                 .current_dir(&project_root)
                 .output();
             // Create branch from current HEAD if it doesn't exist (no-op if it does).
-            let _ = std::process::Command::new("git")
+            let _ = crate::util::engine_git()
                 .args(["branch", &branch])
                 .current_dir(&project_root)
                 .output();
             // Force-add so a leftover-but-stale dir doesn't block creation.
-            let result = std::process::Command::new("git")
+            let result = crate::util::engine_git()
                 .args(["worktree", "add", "-f", &wt_dir.to_string_lossy(), &branch])
                 .current_dir(&project_root)
                 .output();
@@ -2351,7 +2351,7 @@ impl Tool for TeamMergeTool {
         let into = if let Some(b) = input.get("into").and_then(Value::as_str) {
             b.to_string()
         } else {
-            let out = std::process::Command::new("git")
+            let out = crate::util::engine_git()
                 .args(["rev-parse", "--abbrev-ref", "HEAD"])
                 .current_dir(&project_root)
                 .output()
@@ -2378,7 +2378,7 @@ impl Tool for TeamMergeTool {
             .unwrap_or(false);
 
         // List team/* branches.
-        let branches_out = std::process::Command::new("git")
+        let branches_out = crate::util::engine_git()
             .args([
                 "for-each-ref",
                 "--format=%(refname:short)",
@@ -2408,7 +2408,7 @@ impl Tool for TeamMergeTool {
         // path below would otherwise misreport as a teammate conflict and
         // bounce to a teammate who has nothing to fix. Refuse up front.
         if !dry_run {
-            let status_out = std::process::Command::new("git")
+            let status_out = crate::util::engine_git()
                 .args(["status", "--porcelain"])
                 .current_dir(&project_root)
                 .output()
@@ -2430,7 +2430,7 @@ impl Tool for TeamMergeTool {
         }
 
         for (name, branch) in &candidates {
-            let ahead_out = std::process::Command::new("git")
+            let ahead_out = crate::util::engine_git()
                 .args(["rev-list", "--count", &format!("{into}..{branch}")])
                 .current_dir(&project_root)
                 .output();
@@ -2455,11 +2455,11 @@ impl Tool for TeamMergeTool {
                         .map(|s| s.status == "stopped")
                         .unwrap_or(false);
                     if stopped {
-                        let _ = std::process::Command::new("git")
+                        let _ = crate::util::engine_git()
                             .args(["worktree", "remove", &format!(".worktrees/{name}")])
                             .current_dir(&project_root)
                             .output();
-                        let _ = std::process::Command::new("git")
+                        let _ = crate::util::engine_git()
                             .args(["branch", "-D", branch])
                             .current_dir(&project_root)
                             .output();
@@ -2480,7 +2480,7 @@ impl Tool for TeamMergeTool {
                 continue;
             }
 
-            let merge_out = std::process::Command::new("git")
+            let merge_out = crate::util::engine_git()
                 .args(["merge", "--no-ff", "--no-edit", branch])
                 .current_dir(&project_root)
                 .output()
@@ -2488,7 +2488,7 @@ impl Tool for TeamMergeTool {
             if merge_out.status.success() {
                 report.push(format!("  {name} ({branch}): merged {ahead} commit(s) ✓"));
                 if cleanup {
-                    let wt_remove = std::process::Command::new("git")
+                    let wt_remove = crate::util::engine_git()
                         .args([
                             "worktree",
                             "remove",
@@ -2497,7 +2497,7 @@ impl Tool for TeamMergeTool {
                         ])
                         .current_dir(&project_root)
                         .output();
-                    let br_delete = std::process::Command::new("git")
+                    let br_delete = crate::util::engine_git()
                         .args(["branch", "-d", branch])
                         .current_dir(&project_root)
                         .output();
@@ -2518,7 +2518,7 @@ impl Tool for TeamMergeTool {
             } else {
                 let stderr = String::from_utf8_lossy(&merge_out.stderr);
                 // Collect conflicted files before aborting.
-                let diff_out = std::process::Command::new("git")
+                let diff_out = crate::util::engine_git()
                     .args(["diff", "--name-only", "--diff-filter=U"])
                     .current_dir(&project_root)
                     .output();
@@ -2533,7 +2533,7 @@ impl Tool for TeamMergeTool {
                 // Only abort if a merge actually started, else `git merge
                 // --abort` errors spuriously and masks the real cause.
                 if project_root.join(".git/MERGE_HEAD").exists() {
-                    let _ = std::process::Command::new("git")
+                    let _ = crate::util::engine_git()
                         .args(["merge", "--abort"])
                         .current_dir(&project_root)
                         .output();

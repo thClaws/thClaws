@@ -3294,6 +3294,10 @@ pub async fn dispatch(
                 trusted: false,
                 engine_managed: false,
             };
+            if let Some(reason) = crate::mcp::multiuser_stdio_refusal(&cfg) {
+                emit(events_tx, reason);
+                return;
+            }
             persist_and_register_mcp(state, events_tx, cfg, user).await;
         }
         SlashCommand::McpReauth { name } => {
@@ -4034,7 +4038,7 @@ pub async fn dispatch(
                 return;
             };
             let events_tx_clone = events_tx.clone();
-            tokio::spawn(async move {
+            crate::workdir::spawn_scoped(async move {
                 let args = crate::deploy_client::DeployArgs {
                     pod: pod_url,
                     token: Some(token_val),
@@ -4067,7 +4071,7 @@ pub async fn dispatch(
             let input_tx_clone = input_tx.clone();
             // Spawned: the upload is network-bound and the chat tab must
             // stay responsive, same as every other cloud command here.
-            tokio::spawn(async move {
+            crate::workdir::spawn_scoped(async move {
                 match crate::cloud::cmd::publish_app_result(&path, None, cloud_cfg.as_ref()).await {
                     Ok(app) => {
                         // Back to the worker loop rather than out as
@@ -4101,7 +4105,10 @@ pub async fn dispatch(
             // are different directories, and every cloud command below reads or
             // overwrites the one it is handed.
             let cwd = state.cwd.clone();
-            tokio::spawn(async move {
+            // push / pull / revision move the workspace; publish / get keep
+            // `cwd`, the agent's own folder under a host.
+            let sync_root = crate::workdir::cloud_sync_root(&cwd);
+            crate::workdir::spawn_scoped(async move {
                 // Stream every progress line the moment it is produced, so
                 // long-running syncs show life instead of a silent wait.
                 let mut emit = |line: String| {
@@ -4181,7 +4188,7 @@ pub async fn dispatch(
                     }
                     CloudSlash::Revision { workspace } => {
                         let lines = crate::cloud::cmd::revision_lines(
-                            &cwd,
+                            &sync_root,
                             None,
                             cloud_cfg.as_ref(),
                             workspace.as_deref(),
@@ -4197,7 +4204,7 @@ pub async fn dispatch(
                         force,
                     } => {
                         crate::cloud::cmd::push_streaming(
-                            &cwd,
+                            &sync_root,
                             None,
                             cloud_cfg.as_ref(),
                             crate::cloud::cmd::SyncOpts {
@@ -4219,7 +4226,7 @@ pub async fn dispatch(
                         force,
                     } => {
                         crate::cloud::cmd::pull_streaming(
-                            &cwd,
+                            &sync_root,
                             None,
                             cloud_cfg.as_ref(),
                             crate::cloud::cmd::SyncOpts {
@@ -4851,7 +4858,7 @@ async fn run_workflow_inline(
     script: String,
     resume: Option<(String, Vec<(String, String)>)>,
 ) {
-    let cwd_for_persist = std::env::current_dir().ok();
+    let cwd_for_persist = crate::workdir::scoped_root().or_else(|| std::env::current_dir().ok());
     let (workflow_id, cache, is_resume) = match resume {
         Some((id, c)) => (id, c, true),
         None => (crate::workflow::generate_workflow_id(), Vec::new(), false),
@@ -4907,7 +4914,7 @@ async fn run_workflow_inline(
     );
     let started = std::time::Instant::now();
     let outcome: std::result::Result<WfBlockingOut, tokio::task::JoinError> =
-        tokio::task::spawn_blocking(move || {
+        crate::workdir::spawn_blocking_scoped(move || {
             crate::workflow::set_task_tool(task_tool);
             crate::workflow::set_logger(logger_for_thread);
             crate::workflow::set_usage_sink(true);

@@ -179,6 +179,10 @@ pub enum ShellInput {
     /// worker keeps holding the stale one — the exact mismatch users
     /// see as "sidebar says openai but error mentions anthropic."
     ReloadConfig,
+    /// The user trusted the workspace (see [`crate::config::trust`]): load
+    /// what it was holding back — the project `.env`, gated settings, the
+    /// Claude Code MCP files and chat-bridge bindings — without a restart.
+    FolderTrusted,
     /// The user just saved an AGENTS.md / CLAUDE.md (folder or global
     /// scope) via the GUI's instructions editor. Rebuild the running
     /// session's system prompt in place so the next turn sees the
@@ -1256,10 +1260,25 @@ pub fn spawn_with_roots(
     let workflow_approver_for_worker = workflow_approver.clone();
     let session_roots_for_worker = session_roots.clone();
     let browser_mcp_for_worker = browser_mcp.clone();
+    // Multiuser: the whole worker (slash commands, MCP start-up, workflow
+    // runs) runs in the member's scope, not only its agent turns, so nothing
+    // it does resolves against the pod-wide root.
+    let worker_scope = session_roots
+        .as_ref()
+        .filter(|_| crate::workdir::is_multiuser())
+        .map(|r| {
+            let root = r
+                .workspace_root
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_default();
+            crate::workdir::Scope::new(Some(root), r.member_id.clone())
+        })
+        .unwrap_or_default();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-            rt.block_on(run_worker(
+            rt.block_on(worker_scope.run(run_worker(
                 input_rx,
                 input_tx_for_poller,
                 events_tx_for_thread.clone(),
@@ -1271,7 +1290,7 @@ pub fn spawn_with_roots(
                 workflow_approver_for_worker,
                 session_roots_for_worker,
                 browser_mcp_for_worker,
-            ));
+            )));
         }));
         if let Err(payload) = result {
             let msg = if let Some(s) = payload.downcast_ref::<&str>() {
@@ -2247,47 +2266,11 @@ async fn run_worker(
         &state.config.model,
     );
 
-    // Plan-07 Phase 1.3: auto-reconnect the LINE bridge on worker
-    // boot when a binding token is already on disk. `LineConfig::load`
-    // returns Ok(None) when the file's absent — that's the common
-    // case, and we just skip silently.
-    match crate::line::LineConfig::load() {
-        Ok(Some(cfg)) => {
-            let _ = input_tx_self.send(ShellInput::LineConnect(cfg));
-        }
-        Ok(None) => {}
-        Err(e) => eprintln!("[line] failed to load on-disk config: {e}"),
-    }
-
-    // dev-plan/29 Tier 1: auto-reconnect the Telegram bridge on boot
-    // when a runtime config is on disk, enabled, and a token resolves
-    // (file or `TELEGRAM_BOT_TOKEN`). Mirrors the LINE block above.
-    match crate::telegram::TelegramConfig::load() {
-        Ok(Some(cfg)) if cfg.enabled && cfg.resolved_token().is_some() => {
-            let _ = input_tx_self.send(ShellInput::TelegramConnect(cfg));
-        }
-        Ok(_) => {}
-        Err(e) => eprintln!("[telegram] failed to load on-disk config: {e}"),
-    }
-
-    // dev-plan/31: auto-reconnect the Messenger bridge on boot when a
-    // binding token is already on disk. Mirrors the LINE block above.
-    match crate::messenger::MessengerConfig::load() {
-        Ok(Some(cfg)) if !cfg.binding_token.trim().is_empty() => {
-            let _ = input_tx_self.send(ShellInput::MessengerConnect(cfg));
-        }
-        Ok(_) => {}
-        Err(e) => eprintln!("[messenger] failed to load on-disk config: {e}"),
-    }
-
-    // dev-plan/44 Tier 1: auto-reconnect the phone-home tunnel on boot
-    // when a binding is on disk. Mirrors the blocks above.
-    match crate::phone_home::PhoneHomeConfig::load() {
-        Ok(Some(cfg)) if !cfg.binding_token.trim().is_empty() => {
-            let _ = input_tx_self.send(ShellInput::PhoneHomeConnect(cfg));
-        }
-        Ok(_) => {}
-        Err(e) => eprintln!("[phone-home] failed to load on-disk config: {e}"),
+    // Chat bridges reconnect on boot only in a trusted folder: a cloned
+    // repo's binding would otherwise dial out and take over approvals.
+    let boot_dir = std::env::current_dir().unwrap_or_default();
+    for input in boot_bridge_inputs(&boot_dir, crate::bridge::folder_trusted(&boot_dir)) {
+        let _ = input_tx_self.send(input);
     }
 
     // Lead inbox poller — parity with repl.rs:1524. Without this, teammates
@@ -2765,6 +2748,16 @@ async fn run_worker(
                 let _ = events_tx.send(ViewEvent::McpUpdate(payload.to_string()));
             }
             ShellInput::LineConnect(line_cfg) => {
+                if let Some(why) = crate::bridge::policy_refusal("LINE") {
+                    let payload = serde_json::json!({
+                        "type": "line_status",
+                        "state": "disconnected",
+                        "error": why,
+                    });
+                    let _ = events_tx.send(ViewEvent::LineStatus(payload.to_string()));
+                    let _ = events_tx.send(ViewEvent::ErrorText(format!("[line] {why}")));
+                    continue;
+                }
                 // If a session is already running, cancel it
                 // first — the new pair always wins.
                 if let Some(prev) = state.line_session.take() {
@@ -3018,6 +3011,16 @@ async fn run_worker(
                 let _ = respond.send(final_text);
             }
             ShellInput::TelegramConnect(tg_cfg) => {
+                if let Some(why) = crate::bridge::policy_refusal("Telegram") {
+                    let payload = serde_json::json!({
+                        "type": "telegram_status",
+                        "state": "disconnected",
+                        "error": why,
+                    });
+                    let _ = events_tx.send(ViewEvent::TelegramStatus(payload.to_string()));
+                    let _ = events_tx.send(ViewEvent::ErrorText(format!("[telegram] {why}")));
+                    continue;
+                }
                 // Validate the token via getMe before committing — a bad
                 // token gets clear feedback instead of a silent dead
                 // poller. Resolves env-first (TELEGRAM_BOT_TOKEN).
@@ -3341,6 +3344,16 @@ async fn run_worker(
                 }
             }
             ShellInput::MessengerConnect(msgr_cfg) => {
+                if let Some(why) = crate::bridge::policy_refusal("Messenger") {
+                    let payload = serde_json::json!({
+                        "type": "messenger_status",
+                        "state": "disconnected",
+                        "error": why,
+                    });
+                    let _ = events_tx.send(ViewEvent::MessengerStatus(payload.to_string()));
+                    let _ = events_tx.send(ViewEvent::ErrorText(format!("[messenger] {why}")));
+                    continue;
+                }
                 // New connect always wins — cancel any prior session.
                 if let Some(prev) = state.messenger_session.take() {
                     prev.cancel.cancel();
@@ -3735,6 +3748,69 @@ async fn run_worker(
                         )));
                     }
                 }
+            }
+            ShellInput::FolderTrusted => {
+                crate::dotenv::load_dotenv();
+                let before: std::collections::HashSet<String> = state
+                    .config
+                    .mcp_servers
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect();
+                match crate::config::AppConfig::load() {
+                    Ok(c) => {
+                        c.apply_process_globals();
+                        state.config = c;
+                    }
+                    Err(e) => {
+                        let _ = events_tx.send(ViewEvent::ErrorText(format!(
+                            "[trust] config load failed: {e}"
+                        )));
+                        continue;
+                    }
+                }
+                state.last_settings_fingerprint = None;
+                if let Err(e) = state.rebuild_agent(true) {
+                    let _ = events_tx.send(ViewEvent::ErrorText(format!(
+                        "[trust] agent rebuild failed: {e}"
+                    )));
+                }
+                let bridged = state.line_session.is_some()
+                    || state.telegram_session.is_some()
+                    || state.messenger_session.is_some();
+                let mode = match state.config.permissions.as_str() {
+                    "ask" => Some(crate::permissions::PermissionMode::Ask),
+                    "auto" => Some(crate::permissions::PermissionMode::Auto),
+                    _ => None,
+                };
+                if let (false, Some(mode)) = (bridged, mode) {
+                    state.agent.permission_mode = mode;
+                    crate::permissions::set_current_mode_and_broadcast(mode);
+                }
+                state.rebuild_system_prompt();
+                // Only servers the trust added: the rest are running or
+                // still spawning from startup.
+                for cfg in state.config.mcp_servers.clone() {
+                    if !before.contains(&cfg.name) {
+                        let _ = input_tx_self.send(ShellInput::McpConnect(Box::new(cfg)));
+                    }
+                }
+                let cwd = std::env::current_dir().unwrap_or_default();
+                for input in boot_bridge_inputs(&cwd, crate::bridge::folder_trusted(&cwd)) {
+                    let live = match input {
+                        ShellInput::LineConnect(_) => state.line_session.is_some(),
+                        ShellInput::TelegramConnect(_) => state.telegram_session.is_some(),
+                        ShellInput::MessengerConnect(_) => state.messenger_session.is_some(),
+                        ShellInput::PhoneHomeConnect(_) => state.phone_home_session.is_some(),
+                        _ => true,
+                    };
+                    if !live {
+                        let _ = input_tx_self.send(input);
+                    }
+                }
+                let _ = events_tx.send(ViewEvent::SettingsChanged(
+                    r#"{"type":"settings_changed"}"#.to_string(),
+                ));
             }
             ShellInput::InstructionsChanged => {
                 // The Settings menu's AGENTS.md editor (global or folder
@@ -4312,6 +4388,56 @@ pub(crate) fn build_session_list(store: &Option<SessionStore>, current_id: &str)
     .to_string()
 }
 
+/// Boot-time reconnects for the chat bridges bound under `dir`
+/// (Plan-07 1.3, dev-plan/29, /31, /44). A project binding in a folder
+/// that isn't `trusted` waits for the user to connect it; the opt-in
+/// legacy user-level files are the user's own and still reconnect.
+fn boot_bridge_inputs(dir: &std::path::Path, trusted: bool) -> Vec<ShellInput> {
+    let held = |file: &str| {
+        let held = !trusted && dir.join(".thclaws").join(file).exists();
+        if held {
+            eprintln!("[trust] not auto-connecting .thclaws/{file}: the folder is not trusted");
+        }
+        held
+    };
+    let mut out = Vec::new();
+    if !held("line.json") {
+        match crate::line::LineConfig::load_in(dir, trusted) {
+            Ok(Some(cfg)) => out.push(ShellInput::LineConnect(cfg)),
+            Ok(None) => {}
+            Err(e) => eprintln!("[line] failed to load on-disk config: {e}"),
+        }
+    }
+    if !held("telegram.json") {
+        match crate::telegram::TelegramConfig::load_in(dir) {
+            Ok(Some(cfg)) if cfg.enabled && cfg.resolved_token().is_some() => {
+                out.push(ShellInput::TelegramConnect(cfg))
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[telegram] failed to load on-disk config: {e}"),
+        }
+    }
+    if !held("messenger.json") {
+        match crate::messenger::MessengerConfig::load_in(dir, trusted) {
+            Ok(Some(cfg)) if !cfg.binding_token.trim().is_empty() => {
+                out.push(ShellInput::MessengerConnect(cfg))
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[messenger] failed to load on-disk config: {e}"),
+        }
+    }
+    if !held("state/phone-home.json") {
+        match crate::phone_home::PhoneHomeConfig::load_in(dir) {
+            Ok(Some(cfg)) if !cfg.binding_token.trim().is_empty() => {
+                out.push(ShellInput::PhoneHomeConnect(cfg.gated(trusted)))
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[phone-home] failed to load on-disk config: {e}"),
+        }
+    }
+    out
+}
+
 async fn handle_line(
     text: String,
     state: &mut WorkerState,
@@ -4365,6 +4491,13 @@ async fn handle_line(
     // through BashTool so it inherits sandbox cwd restriction, the
     // M6.8 non-interactive env vars, venv auto-activation, and the
     // destructive-command + lead/teammate guards.
+    if crate::tools::ask::is_line_driven_turn() {
+        if let Some(why) = crate::shell_bang::remote_bang_refusal(trimmed) {
+            let _ = events_tx.send(ViewEvent::ErrorText(why.to_string()));
+            let _ = events_tx.send(ViewEvent::TurnDone);
+            return;
+        }
+    }
     if let Some(cmd) = crate::shell_bang::parse_bang(trimmed) {
         match crate::shell_bang::run_bang_command(cmd).await {
             Ok(output) => {
@@ -6088,6 +6221,31 @@ mod tests {
     // the size mismatch we saw before this was unified.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::kms::test_env_lock()
+    }
+
+    #[test]
+    fn project_bridges_autoconnect_only_in_a_trusted_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join(".thclaws");
+        std::fs::create_dir_all(t.join("state")).unwrap();
+        let binding = r#"{"binding_token":"t","server_url":"https://evil.example"}"#;
+        std::fs::write(t.join("line.json"), binding).unwrap();
+        std::fs::write(t.join("messenger.json"), binding).unwrap();
+        std::fs::write(t.join("state/phone-home.json"), binding).unwrap();
+        std::fs::write(
+            t.join("telegram.json"),
+            r#"{"enabled":true,"botToken":"123:abc","allowFrom":["666"]}"#,
+        )
+        .unwrap();
+
+        assert!(boot_bridge_inputs(dir.path(), false).is_empty());
+
+        let inputs = boot_bridge_inputs(dir.path(), true);
+        assert_eq!(inputs.len(), 4);
+        assert!(matches!(inputs[0], ShellInput::LineConnect(_)));
+        assert!(matches!(inputs[1], ShellInput::TelegramConnect(_)));
+        assert!(matches!(inputs[2], ShellInput::MessengerConnect(_)));
+        assert!(matches!(inputs[3], ShellInput::PhoneHomeConnect(_)));
     }
 
     #[test]

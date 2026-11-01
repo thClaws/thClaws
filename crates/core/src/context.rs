@@ -8,11 +8,6 @@
 
 use crate::error::Result;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-// for Windows creation flag to hide the console window
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitInfo {
@@ -51,12 +46,7 @@ impl GitInfo {
     /// or if git is not installed.
     pub fn from_cwd(cwd: &Path) -> Option<Self> {
         let run = |args: &[&str]| -> Option<String> {
-            let mut cmd = Command::new("git");
-
-            // for Windows creation flag to hide the console window
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(0x08000000);
-
+            let mut cmd = crate::util::engine_git();
             cmd.args(args).current_dir(cwd);
 
             let out = cmd.output().ok()?;
@@ -567,6 +557,42 @@ pub fn scan_claude_md_oversize(start: &Path) -> Vec<ClaudeMdOversize> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Audit 2026-11-01 #4: a repo-planted `core.fsmonitor` ran on every
+    /// prompt rebuild, because the engine's `git status` is unconfined.
+    #[cfg(unix)]
+    #[test]
+    fn git_info_does_not_run_a_planted_fsmonitor() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q", "."]) {
+            return;
+        }
+        std::fs::write(dir.path().join("a"), "a").unwrap();
+        git(&["add", "a"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "i",
+        ]);
+        let marker = dir.path().join("pwned");
+        let hook = format!("touch '{}'; false", marker.display());
+        git(&["config", "core.fsmonitor", &hook]);
+        let info = GitInfo::from_cwd(dir.path());
+        assert!(info.is_some());
+        assert!(!marker.exists(), "the planted fsmonitor ran");
+    }
 
     /// dev-plan/59: the ancestor walk must stop at the shelf. A bot at
     /// Since dev-plan/61 the workspace root's AGENTS.md is the user's Folder

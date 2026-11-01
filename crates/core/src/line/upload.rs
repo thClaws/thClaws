@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
-use crate::uploads::{ensure_uploads_dir, unique_path, UploadedFile, UPLOADS_DIRNAME};
+use crate::uploads::{ensure_uploads_dir, write_unique, UploadedFile, UPLOADS_DIRNAME};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SaveUploadError {
@@ -47,8 +47,8 @@ pub fn save_upload(
         });
     }
     let uploads_dir = ensure_uploads_dir(workspace).map_err(SaveUploadError::Mkdir)?;
-    let dest = unique_path(&uploads_dir, filename);
-    std::fs::write(&dest, &bytes).map_err(|e| SaveUploadError::Write(dest.clone(), e))?;
+    let dest = write_unique(&uploads_dir, filename, &bytes)
+        .map_err(|e| SaveUploadError::Write(uploads_dir.join(filename), e))?;
     let relative_path = dest
         .strip_prefix(workspace)
         .map(|p| p.to_string_lossy().replace('\\', "/"))

@@ -141,9 +141,11 @@ impl Tool for XlsxEditTool {
         };
 
         let path_clone = validated.clone();
-        tokio::task::spawn_blocking(move || apply_edit(&path_clone, sheet_name.as_deref(), &edit))
-            .await
-            .map_err(|e| Error::Tool(format!("XLSX edit worker: {e}")))?
+        crate::workdir::spawn_blocking_scoped(move || {
+            apply_edit(&path_clone, sheet_name.as_deref(), &edit)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("XLSX edit worker: {e}")))?
     }
 }
 

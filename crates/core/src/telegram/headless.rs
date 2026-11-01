@@ -213,6 +213,10 @@ fn resolve_perm_mode(permissions: &str) -> PermissionMode {
 /// Run the headless Telegram bot until Ctrl-C or a fatal error (bad
 /// token). Blocks for the process lifetime.
 pub async fn run(config: AppConfig) -> Result<()> {
+    if let Some(why) = crate::bridge::policy_refusal("Telegram") {
+        eprintln!("\x1b[31m[telegram] refused: {why}\x1b[0m");
+        std::process::exit(1);
+    }
     // 1. Resolve the Telegram config + token (env beats file).
     let mut tg_cfg = TelegramConfig::load().ok().flatten().unwrap_or_default();
     let Some(token) = tg_cfg.resolved_token() else {

@@ -812,7 +812,7 @@ pub async fn start(
 ) -> Result<JobId> {
     let (id, cancel) = manager().register(query.clone(), &config);
     let id_for_task = id.clone();
-    tokio::spawn(async move {
+    tokio::spawn(crate::workdir::Scope::capture().run(async move {
         run_job(
             id_for_task,
             cancel,
@@ -824,7 +824,7 @@ pub async fn start(
             None,
         )
         .await;
-    });
+    }));
     Ok(id)
 }
 
@@ -852,7 +852,7 @@ pub async fn start_ingest(
     cfg.legacy = false;
     let (id, cancel) = manager().register(title.clone(), &cfg);
     let id_for_task = id.clone();
-    tokio::spawn(async move {
+    tokio::spawn(crate::workdir::Scope::capture().run(async move {
         run_job(
             id_for_task,
             cancel,
@@ -864,7 +864,7 @@ pub async fn start_ingest(
             None,
         )
         .await;
-    });
+    }));
     Ok(id)
 }
 
@@ -1033,7 +1033,7 @@ pub async fn start_refresh(
         .iter()
         .map(|(id, _, _, _, s)| (id.clone(), s.clone()))
         .collect();
-    tokio::spawn(async move {
+    tokio::spawn(crate::workdir::Scope::capture().run(async move {
         for (id, cancel, query, cfg, _) in queue {
             run_job(
                 id,
@@ -1047,7 +1047,7 @@ pub async fn start_refresh(
             )
             .await;
         }
-    });
+    }));
     Ok(ids)
 }
 

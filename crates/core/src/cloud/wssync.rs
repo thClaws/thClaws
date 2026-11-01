@@ -109,6 +109,8 @@ pub struct UntarResult {
     pub written: usize,
     pub deleted: usize,
     pub trash_dir: Option<PathBuf>,
+    /// Repo-controlled code a pull declined to write (see [`git_guard`]).
+    pub notes: Vec<String>,
 }
 
 fn norm(rel: &Path) -> String {
@@ -454,6 +456,23 @@ fn guard_within_root(root: &Path, dir: &Path, what: &Path) -> Result<(), String>
     Ok(())
 }
 
+/// `create_dir_all(dir)`, guarded: the deepest part of `dir` that already
+/// exists is resolved and checked first, so a symlinked folder in the
+/// workspace can't have directories created through it before the guard
+/// notices, and the created tree is checked again.
+fn mkdir_within_root(root: &Path, dir: &Path, what: &Path) -> Result<(), String> {
+    let mut existing = dir;
+    while !existing.exists() {
+        match existing.parent() {
+            Some(p) => existing = p,
+            None => break,
+        }
+    }
+    guard_within_root(root, existing, what)?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {}", what.display(), e))?;
+    guard_within_root(root, dir, what)
+}
+
 /// Extract a `.tar.gz` into the (canonical) `root`, overwriting in place.
 /// Traversal-safe. Returns (files written, set of incoming relative paths).
 ///
@@ -461,11 +480,88 @@ fn guard_within_root(root: &Path, dir: &Path, what: &Path) -> Result<(), String>
 /// what arrives (`MAX_SYNC_BYTES` as the HTTP body limit) and the sender caps
 /// what it collects, but neither bounds what a gzip expands to — a modest
 /// upload can inflate without limit and fill the volume.
+/// `.git/` teleports (history, branches, objects), but a desktop pull must
+/// not bring in code that the user's own `git` would then run: hooks are
+/// skipped, and a `.git/config` that changes an exec-capable key keeps the
+/// local file (or, with none, lands without those keys). The cloud side
+/// applies a push verbatim — that content is the user's own.
+fn git_guard(rel: &Path) -> Option<GitEntry> {
+    let s = norm(rel);
+    let segs: Vec<&str> = s.split('/').collect();
+    let g = segs.iter().position(|p| p.eq_ignore_ascii_case(".git"))?;
+    match segs.get(g + 1).map(|p| p.to_ascii_lowercase()) {
+        Some(h) if h == "hooks" && segs.len() > g + 2 => Some(GitEntry::Hook),
+        Some(c) if c == "config" && segs.len() == g + 2 => Some(GitEntry::Config),
+        _ => None,
+    }
+}
+
+enum GitEntry {
+    Hook,
+    Config,
+}
+
+fn git_key_runs_code(section: &str, key: &str, value: &str) -> bool {
+    let sec = section.to_ascii_lowercase();
+    let key = key.to_ascii_lowercase();
+    let base = sec.split_whitespace().next().unwrap_or("");
+    match base {
+        "core" => matches!(
+            key.as_str(),
+            "fsmonitor" | "hookspath" | "sshcommand" | "pager" | "editor" | "askpass" | "gitproxy"
+        ),
+        "alias" => value.trim_start().starts_with('!'),
+        "filter" => matches!(key.as_str(), "clean" | "smudge" | "process"),
+        "diff" => matches!(key.as_str(), "external" | "textconv" | "command"),
+        "merge" | "mergetool" | "difftool" => matches!(key.as_str(), "driver" | "cmd" | "path"),
+        "credential" => key == "helper",
+        "gpg" => key == "program",
+        "sequence" => key == "editor",
+        "include" | "includeif" => key == "path",
+        "uploadpack" => key == "packobjectshook",
+        _ => false,
+    }
+}
+
+/// Exec-capable `(section, key, value)` entries of a git config, and the
+/// text with those lines removed.
+fn git_config_exec_keys(text: &str) -> (Vec<(String, String, String)>, String) {
+    let mut section = String::new();
+    let mut found = Vec::new();
+    let mut kept = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            section = t
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .to_string();
+        } else if !t.is_empty() && !t.starts_with('#') && !t.starts_with(';') {
+            let (k, v) = t.split_once('=').unwrap_or((t, ""));
+            let (k, v) = (k.trim(), v.trim());
+            if git_key_runs_code(&section, k, v) {
+                found.push((
+                    section.to_ascii_lowercase(),
+                    k.to_ascii_lowercase(),
+                    v.to_string(),
+                ));
+                continue;
+            }
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    (found, kept)
+}
+
 fn extract_tarball<R: Read>(
     reader: R,
     root: &Path,
     max_bytes: u64,
-) -> Result<(usize, BTreeSet<PathBuf>), String> {
+) -> Result<(usize, BTreeSet<PathBuf>, Vec<String>), String> {
+    let guard_git = !crate::config::trust::hosted();
+    let mut notes = Vec::new();
     let mut written = 0usize;
     let mut total: u64 = 0;
     let mut incoming: BTreeSet<PathBuf> = BTreeSet::new();
@@ -475,27 +571,71 @@ fn extract_tarball<R: Read>(
         .map_err(|e| format!("read archive: {}", e))?
     {
         let mut entry = entry.map_err(|e| format!("read entry: {}", e))?;
+        let raw = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
+        if crate::sandbox::is_unsafe_archive_entry(&raw, cfg!(windows)) {
+            return Err(format!("refused unsafe entry path: {raw}"));
+        }
         let path = entry
             .path()
             .map_err(|e| format!("entry path: {}", e))?
             .into_owned();
-        if is_unsafe_entry(&path) {
-            return Err(format!("refused unsafe entry path: {}", path.display()));
-        }
         if entry.header().entry_type().is_dir() {
             // Empty-dir preservation: materialize directory entries so
             // scaffold folders (media/screenshots/, output/, …) survive.
-            let dir = root.join(&path);
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("mkdir {}: {}", path.display(), e))?;
-            guard_within_root(root, &dir, &path)?;
+            mkdir_within_root(root, &root.join(&path), &path)?;
             continue;
         }
         let out = root.join(&path);
+        let git = if guard_git { git_guard(&path) } else { None };
+        if let Some(GitEntry::Hook) = git {
+            notes.push(format!("skipped git hook {}", norm(&path)));
+            incoming.insert(path);
+            continue;
+        }
+        if let Some(GitEntry::Config) = git {
+            let mut buf = Vec::new();
+            entry
+                .by_ref()
+                .take(1_048_576)
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("read {}: {}", path.display(), e))?;
+            let theirs = String::from_utf8_lossy(&buf).into_owned();
+            let (their_keys, stripped) = git_config_exec_keys(&theirs);
+            let local = std::fs::read_to_string(&out).ok();
+            let local_keys = local.as_deref().map(|l| git_config_exec_keys(l).0);
+            if !their_keys.is_empty() && local_keys.as_ref() != Some(&their_keys) {
+                let keys: Vec<String> = their_keys
+                    .iter()
+                    .map(|(s, k, _)| format!("{s}.{k}"))
+                    .collect();
+                if local.is_some() {
+                    notes.push(format!(
+                        "kept local {} — the cloud copy changes {}",
+                        norm(&path),
+                        keys.join(", ")
+                    ));
+                } else {
+                    if let Some(parent) = out.parent() {
+                        mkdir_within_root(root, parent, &path)?;
+                    }
+                    std::fs::write(&out, stripped)
+                        .map_err(|e| format!("write {}: {}", out.display(), e))?;
+                    notes.push(format!("wrote {} without {}", norm(&path), keys.join(", ")));
+                    written += 1;
+                }
+                incoming.insert(path);
+                continue;
+            }
+            if let Some(parent) = out.parent() {
+                mkdir_within_root(root, parent, &path)?;
+            }
+            std::fs::write(&out, &buf).map_err(|e| format!("write {}: {}", out.display(), e))?;
+            incoming.insert(path);
+            written += 1;
+            continue;
+        }
         if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
-            guard_within_root(root, parent, &path)?;
+            mkdir_within_root(root, parent, &path)?;
         }
         let mode = entry.header().mode().ok();
         let mut f =
@@ -518,7 +658,7 @@ fn extract_tarball<R: Read>(
         incoming.insert(path);
         written += 1;
     }
-    Ok((written, incoming))
+    Ok((written, incoming, notes))
 }
 
 /// Extract a full `.tar.gz` (streamed from `reader`) into `root`, overwriting in
@@ -530,7 +670,7 @@ pub fn untar_workspace_from<R: Read>(
     delete: bool,
 ) -> Result<UntarResult, String> {
     let root = canonical_root(root)?;
-    let (written, incoming) = extract_tarball(reader, &root, MAX_SYNC_BYTES)?;
+    let (written, incoming, notes) = extract_tarball(reader, &root, MAX_SYNC_BYTES)?;
     let trash = root.join(TRASH_PREFIX).join(unix_secs().to_string());
     let mut trash_used = false;
     let mut deleted = 0usize;
@@ -546,6 +686,7 @@ pub fn untar_workspace_from<R: Read>(
         written,
         deleted,
         trash_dir: trash_used.then_some(trash),
+        notes,
     })
 }
 
@@ -572,7 +713,7 @@ fn apply_mode(_path: &Path, _mode: Option<u32>) {}
 
 /// Reject archive entries that would escape the extraction root.
 fn is_unsafe_entry(path: &Path) -> bool {
-    path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir))
+    crate::sandbox::is_unsafe_archive_entry(&norm(path), cfg!(windows))
 }
 
 fn move_to_trash(root: &Path, trash: &Path, rel: &Path, used: &mut bool) -> Result<(), String> {
@@ -815,9 +956,31 @@ fn index(es: &[FileEntry]) -> BTreeMap<&str, &str> {
 /// Callers reporting "did my work change?" count it apart from real edits.
 const STATE_PREFIX: &str = ".thclaws/state/";
 
-/// Is this path engine-written runtime state rather than user work?
+/// Is this path engine-written runtime state rather than user work? Nested
+/// too: a workspace host keeps each agent's own state under
+/// `.thclaws/bots/<id>/.thclaws/state/`, and a workspace push carries those.
 pub fn is_runtime_state(path: &str) -> bool {
-    path.starts_with(STATE_PREFIX)
+    state_rest(path).is_some()
+}
+
+fn state_rest(path: &str) -> Option<&str> {
+    path.strip_prefix(STATE_PREFIX).or_else(|| {
+        path.find(&format!("/{STATE_PREFIX}"))
+            .map(|i| &path[i + 1 + STATE_PREFIX.len()..])
+    })
+}
+
+/// The part of runtime state that churns with no one working: agent-team
+/// status/locks/logs and the per-machine bot address files. Both ends rewrite
+/// these just by running, so a difference in them is never work at risk.
+/// Sessions and KMS are state too, but they are someone's work — not churn.
+pub fn is_engine_churn(path: &str) -> bool {
+    state_rest(path).is_some_and(|rest| {
+        rest.starts_with("team/")
+            || rest.starts_with("bots/")
+            || rest.ends_with(".log")
+            || rest.ends_with(".lock")
+    })
 }
 
 /// What ONE end changed since the base it recorded: `(changed, removed)`,
@@ -950,12 +1113,40 @@ pub fn trash_paths(root: &Path, paths: &[String]) -> Result<UntarResult, String>
         written: 0,
         deleted,
         trash_dir: trash_used.then_some(trash),
+        notes: Vec::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_state_includes_a_hosted_agents_own_state() {
+        for p in [
+            ".thclaws/state/sessions/a.jsonl",
+            ".thclaws/bots/main/.thclaws/state/sessions/a.jsonl",
+        ] {
+            assert!(is_runtime_state(p), "{p}");
+        }
+        assert!(!is_runtime_state("notes/.thclaws-state.md"));
+        assert!(!is_runtime_state("plan.md"));
+        for p in [
+            ".thclaws/state/team/agents/lead/status.json",
+            ".thclaws/bots/main/.thclaws/state/team/agents/lead/output.log",
+            ".thclaws/bots/main/.thclaws/state/team/agents/lead/status.lock",
+            ".thclaws/state/bots/main.addr",
+        ] {
+            assert!(is_engine_churn(p), "{p}");
+        }
+        for p in [
+            ".thclaws/bots/main/.thclaws/state/sessions/a.jsonl",
+            ".thclaws/state/kms/x/index.md",
+            "logs/server.log",
+        ] {
+            assert!(!is_engine_churn(p), "{p}");
+        }
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let ts = SystemTime::now()
@@ -1570,6 +1761,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
+    /// The guard ran after `create_dir_all`, so a directory entry under a
+    /// symlinked folder created its tree outside the root before refusing.
+    #[cfg(unix)]
+    #[test]
+    fn extraction_creates_no_directory_through_a_symlink() {
+        let root = canonical_root(&tmp("symlink-mkdir")).unwrap();
+        let outside = canonical_root(&tmp("symlink-mkdir-outside")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("logs")).unwrap();
+        for entry in [
+            ("logs/a/b", "d", &b""[..]),
+            ("logs/c/d.txt", "f", &b"x"[..]),
+        ] {
+            let bytes = tar_gz(&[entry]);
+            let err = extract_tarball(&bytes[..], &root, MAX_SYNC_BYTES).unwrap_err();
+            assert!(err.contains("escaping the workspace"), "{err}");
+        }
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
     /// A path that stays inside must still extract — the guard has to reject
     /// escapes without rejecting ordinary nesting.
     #[test]
@@ -1577,12 +1789,73 @@ mod tests {
         let root = tmp("nested-ok");
         let root = canonical_root(&root).unwrap();
         let bytes = tar_gz(&[("a/b/c.txt", "f", b"fine"), ("a/empty", "d", b"")]);
-        let (written, incoming) = extract_tarball(&bytes[..], &root, MAX_SYNC_BYTES).unwrap();
+        let (written, incoming, _) = extract_tarball(&bytes[..], &root, MAX_SYNC_BYTES).unwrap();
         assert_eq!(written, 1);
         assert!(incoming.contains(Path::new("a/b/c.txt")));
         assert_eq!(std::fs::read(root.join("a/b/c.txt")).unwrap(), b"fine");
         assert!(root.join("a/empty").is_dir());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A cloud agent can write `.git/hooks/*` or `core.fsmonitor`; on pull
+    /// the user's own `git` would run them. History still teleports.
+    #[test]
+    fn pull_skips_git_hooks_and_keeps_local_exec_config() {
+        let root = canonical_root(&tmp("git-guard")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        let evil = "[core]\n\tbare = false\n\tfsmonitor = touch PWNED\n[alias]\n\tst = status\n";
+        let bytes = tar_gz(&[
+            (".git/hooks/pre-commit", "f", b"#!/bin/sh\ntouch PWNED\n"),
+            (".git/config", "f", evil.as_bytes()),
+            (".git/HEAD", "f", b"ref: refs/heads/main\n"),
+            ("sub/.git/hooks/post-checkout", "f", b"x"),
+        ]);
+        let (_, _, notes) = extract_tarball(&bytes[..], &root, MAX_SYNC_BYTES).unwrap();
+        assert!(!root.join(".git/hooks/pre-commit").exists());
+        assert!(!root.join("sub/.git/hooks/post-checkout").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".git/config")).unwrap(),
+            "[core]\n\tbare = false\n"
+        );
+        assert_eq!(
+            std::fs::read(root.join(".git/HEAD")).unwrap(),
+            b"ref: refs/heads/main\n"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("core.fsmonitor")),
+            "{notes:?}"
+        );
+
+        std::fs::remove_file(root.join(".git/config")).unwrap();
+        extract_tarball(&bytes[..], &root, MAX_SYNC_BYTES).unwrap();
+        let fresh = std::fs::read_to_string(root.join(".git/config")).unwrap();
+        assert!(
+            !fresh.contains("fsmonitor") && fresh.contains("st = status"),
+            "{fresh}"
+        );
+
+        let benign = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = x\n";
+        extract_tarball(
+            &tar_gz(&[(".git/config", "f", benign.as_bytes())])[..],
+            &root,
+            MAX_SYNC_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(".git/config")).unwrap(),
+            benign
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exec_capable_git_keys() {
+        let (keys, _) = git_config_exec_keys(
+            "[alias]\n co = checkout\n x = !sh -c evil\n[filter \"lfs\"]\n smudge = git-lfs smudge\n[user]\n name = a\n",
+        );
+        let names: Vec<String> = keys.iter().map(|(s, k, _)| format!("{s}.{k}")).collect();
+        assert_eq!(names, vec!["alias.x", "filter \"lfs\".smudge"]);
     }
 
     /// Reads through, counting what the extractor actually consumed.
@@ -1648,7 +1921,7 @@ mod tests {
         );
 
         // Same archive under a cap it fits: extraction proceeds normally.
-        let (written, _) = extract_tarball(&bytes[..], &root, MAX_SYNC_BYTES).unwrap();
+        let (written, _, _) = extract_tarball(&bytes[..], &root, MAX_SYNC_BYTES).unwrap();
         assert_eq!(written, 1);
         assert_eq!(
             std::fs::metadata(root.join("big.bin")).unwrap().len(),

@@ -484,11 +484,14 @@ pub async fn quota(cloud_url: &str) -> Option<Value> {
     resp.json().await.ok()
 }
 
-/// The `cloud_quota_result` frame: the api's body when it is in quota mode,
-/// else `quota: null` so the sidebar hides the credits line.
+/// The `cloud_quota_result` frame: the api's body in quota mode (credits)
+/// or plan mode (% of a 5-hour and a 7-day window), else `quota: null` so
+/// the sidebar hides the line.
 pub fn quota_payload(body: Option<Value>) -> Value {
-    let quota = body.filter(|b| {
-        b.get("mode").and_then(Value::as_str) == Some("quota") && b.get("month").is_some()
+    let quota = body.filter(|b| match b.get("mode").and_then(Value::as_str) {
+        Some("quota") => b.get("month").is_some_and(|m| !m.is_null()),
+        Some("plan") => b.get("windows").is_some_and(|w| w.is_object()),
+        _ => false,
     });
     serde_json::json!({ "type": "cloud_quota_result", "quota": quota })
 }
@@ -542,6 +545,16 @@ mod tests {
         assert!(quota_payload(None)["quota"].is_null());
         let other = serde_json::json!({"mode": "credit", "month": {}});
         assert!(quota_payload(Some(other))["quota"].is_null());
+
+        let plan = serde_json::json!({
+            "mode": "plan", "plan": {"tier": "plan-pro", "label": "Pro", "units": 5},
+            "unlimited": false, "warn_pct": 80, "month": null, "day": null, "rate": null,
+            "windows": {"5h": {"used_pct": 37, "resets_at": "2026-10-29T12:00:00Z"},
+                        "7d": {"used_pct": 12, "resets_at": null}}
+        });
+        let p = quota_payload(Some(plan));
+        assert_eq!(p["quota"]["windows"]["5h"]["used_pct"], 37);
+        assert!(p["quota"]["windows"]["7d"]["resets_at"].is_null());
     }
 
     fn cb(code: Option<&str>, state: Option<&str>, error: Option<&str>) -> CallbackResult {

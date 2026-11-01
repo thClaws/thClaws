@@ -126,6 +126,8 @@ pub fn spawn_command(config: &McpServerConfig) -> Option<tokio::process::Command
         std::iter::once(config.command.as_str()).chain(args.iter().map(String::as_str)),
     );
     let mut cmd = crate::confine::current_policy()
+        .ok()
+        .flatten()
         .filter(confiner_works)
         .and_then(|policy| crate::confine::confined_command(&line, &policy))
         .unwrap_or_else(|| {
@@ -240,7 +242,7 @@ pub async fn after_call(client: &crate::mcp::McpClient, tool: &str, result: &str
         return;
     }
     let opts = super::fixup::FixupOptions::default();
-    let fixed = tokio::task::spawn_blocking(move || {
+    let fixed = crate::workdir::spawn_blocking_scoped(move || {
         paths
             .into_iter()
             .filter(|p| match super::fixup::fixup_file(p, &opts) {

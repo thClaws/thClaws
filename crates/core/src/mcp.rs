@@ -314,21 +314,17 @@ impl McpAllowlist {
     }
 
     /// An allowlist written before entries carried arguments holds bare
-    /// commands (`npx`). One still covers a server from the user's OWN
-    /// mcp.json, so headless and scheduled runs keep the servers they had —
-    /// never one from a project's mcp.json, which is what a cloned repo
-    /// controls and what the bare entry used to let through.
-    fn grandfathers(
-        &self,
-        config: &McpServerConfig,
-        key: &str,
-        user_servers: &[McpServerConfig],
-    ) -> bool {
-        key != config.command
-            && self.contains(&config.command)
+    /// commands (`npx`), and one written before they carried env and cwd
+    /// holds the bare command line. Either still covers a server from the
+    /// user's OWN mcp.json, unchanged, so headless and scheduled runs keep
+    /// the servers they had — never one from a project's mcp.json, which is
+    /// what a cloned repo controls and what the old entries let through.
+    fn grandfathers(&self, config: &McpServerConfig, user_servers: &[McpServerConfig]) -> bool {
+        let line = invocation(config);
+        (self.contains(&config.command) || self.contains(&line))
             && user_servers
                 .iter()
-                .any(|s| s.name == config.name && invocation(s) == key)
+                .any(|s| s.name == config.name && invocation(s) == line && s.env == config.env)
     }
 
     fn insert(&mut self, cmd: &str) {
@@ -343,6 +339,54 @@ fn invocation(config: &McpServerConfig) -> String {
     shell_words::join(
         std::iter::once(config.command.as_str()).chain(config.args.iter().map(String::as_str)),
     )
+}
+
+/// What the allowlist remembers for a stdio server: the command line, its
+/// env and the folder it starts in. The env is kept as a digest (values are
+/// often tokens); without it an approved `node server.js` re-ran with a
+/// project's `NODE_OPTIONS=--require ./x.js` (audit 2026-11-01 #6), and
+/// without the cwd an approved `npx pkg` resolves a cloned repo's own
+/// `node_modules` copy.
+fn spawn_key(config: &McpServerConfig, cwd: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut key = invocation(config);
+    if !config.env.is_empty() {
+        let mut pairs: Vec<(&String, &String)> = config.env.iter().collect();
+        pairs.sort();
+        let mut h = Sha256::new();
+        for (k, v) in pairs {
+            h.update(k.as_bytes());
+            h.update([0]);
+            h.update(v.as_bytes());
+            h.update([0]);
+        }
+        let digest = h.finalize();
+        let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        key.push_str(&format!(" [env:{hex}]"));
+    }
+    key.push_str(&format!(" [cwd:{}]", cwd.display()));
+    key
+}
+
+/// `env` entries a server config may not set, for the reasons a project
+/// `.env` may not ([`crate::dotenv::is_blocked_key`]): `PATH`,
+/// `NODE_OPTIONS`, `LD_PRELOAD` and the like turn an approved command into
+/// someone else's.
+fn spawn_env(config: &McpServerConfig) -> Vec<(&String, &String)> {
+    config
+        .env
+        .iter()
+        .filter(|(k, _)| {
+            let blocked = crate::dotenv::is_blocked_key(k);
+            if blocked {
+                eprintln!(
+                    "[mcp] {}: ignoring env {k} — it can redirect what the server runs",
+                    config.name
+                );
+            }
+            !blocked
+        })
+        .collect()
 }
 
 /// Gate an MCP stdio spawn through an allowlist. The first time we see
@@ -371,16 +415,13 @@ async fn check_stdio_command_allowed(
         return Ok(());
     }
 
-    let key = invocation(config);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let key = spawn_key(config, &cwd);
     let mut allowlist = McpAllowlist::load();
     if allowlist.contains(&key) {
         return Ok(());
     }
-    if allowlist.grandfathers(
-        config,
-        &key,
-        &crate::config::AppConfig::load_user_mcp_servers(),
-    ) {
+    if allowlist.grandfathers(config, &crate::config::AppConfig::load_user_mcp_servers()) {
         allowlist.insert(&key);
         allowlist.save();
         return Ok(());
@@ -393,6 +434,8 @@ async fn check_stdio_command_allowed(
                 "name": config.name,
                 "command": config.command,
                 "args": config.args,
+                "env": config.env.keys().collect::<Vec<_>>(),
+                "cwd": cwd.display().to_string(),
             }),
             summary: Some(format!(
                 "Allow thClaws to run `{}` for MCP server `{}`? It will \
@@ -439,6 +482,12 @@ async fn check_stdio_command_allowed(
     if !config.args.is_empty() {
         eprintln!("      args:    {}", config.args.join(" "));
     }
+    if !config.env.is_empty() {
+        let mut keys: Vec<&str> = config.env.keys().map(String::as_str).collect();
+        keys.sort();
+        eprintln!("      env:     {}", keys.join(", "));
+    }
+    eprintln!("      cwd:     {}", cwd.display());
     eprintln!();
     eprintln!("This will run the binary with your user privileges. Only");
     eprintln!("approve if you trust the MCP config that requested it.");
@@ -670,6 +719,9 @@ impl McpClient {
         if config.transport == "http" {
             return Self::connect_http(config, true).await;
         }
+        if let Some(reason) = multiuser_stdio_refusal(&config) {
+            return Err(Error::Provider(reason));
+        }
 
         // Allowlist gate: MCP stdio configs come from project-scoped
         // JSON files that a user may have cloned from the internet. A
@@ -693,7 +745,7 @@ impl McpClient {
         for k in crate::tools::bash::ENGINE_SECRET_ENV {
             cmd.env_remove(k);
         }
-        for (k, v) in &config.env {
+        for (k, v) in spawn_env(&config) {
             cmd.env(k, v);
         }
 
@@ -1646,6 +1698,22 @@ pub const MCP_NAME_SEPARATOR: &str = "__";
 /// itself) makes the server's tools ambiguous to route. Enforced where
 /// a name arrives from a UI, not where an existing file is read — an
 /// mcp.json written by hand keeps working.
+/// A shared (multiuser) workspace never starts a member-supplied stdio
+/// server: the process runs outside the confiner with the engine's env and
+/// filesystem view (every member's folder), and its approval prompt goes to
+/// a shared approver. HTTP servers and the engine's own servers still run.
+pub fn multiuser_stdio_refusal(config: &McpServerConfig) -> Option<String> {
+    (crate::workdir::is_multiuser() && config.transport != "http" && !config.engine_managed).then(
+        || {
+            format!(
+                "mcp '{}' refused: stdio MCP servers cannot run in a shared workspace — \
+             use an HTTP MCP server instead",
+                config.name
+            )
+        },
+    )
+}
+
 pub fn is_valid_server_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -2357,16 +2425,56 @@ mod tests {
         let legacy = McpAllowlist {
             commands: vec!["npx".into()],
         };
-        assert!(legacy.grandfathers(&mine, &invocation(&mine), &user_level));
+        assert!(legacy.grandfathers(&mine, &user_level));
         // A project's server — not in the user's mcp.json — gets no pass,
         // nor does one that reuses a user server's name with other args.
         let cloned = server("evil", &["-y", "evil-pkg"]);
-        assert!(!legacy.grandfathers(&cloned, &invocation(&cloned), &user_level));
+        assert!(!legacy.grandfathers(&cloned, &user_level));
         let renamed = server("weather", &["-y", "evil-pkg"]);
-        assert!(!legacy.grandfathers(&renamed, &invocation(&renamed), &user_level));
+        assert!(!legacy.grandfathers(&renamed, &user_level));
         // Without the bare entry there is nothing to grandfather.
         let empty = McpAllowlist::default();
-        assert!(!empty.grandfathers(&mine, &invocation(&mine), &user_level));
+        assert!(!empty.grandfathers(&mine, &user_level));
+        // A command-line entry from before env/cwd joined the key covers the
+        // user's own unchanged server, not one with a different env.
+        let line = McpAllowlist {
+            commands: vec![invocation(&mine)],
+        };
+        assert!(line.grandfathers(&mine, &user_level));
+        let mut poisoned = mine.clone();
+        poisoned
+            .env
+            .insert("NODE_OPTIONS".into(), "--require ./x.js".into());
+        assert!(!line.grandfathers(&poisoned, &user_level));
+    }
+
+    /// Audit 2026-11-01 #6: an approved command line re-used with another
+    /// env or from another folder is a new spawn, and env keys that redirect
+    /// the program never reach the child.
+    #[test]
+    fn the_spawn_key_covers_env_and_cwd_and_blocked_env_is_dropped() {
+        let base = McpServerConfig {
+            name: "x".into(),
+            transport: "stdio".into(),
+            command: "node".into(),
+            args: vec!["server.js".into()],
+            env: HashMap::new(),
+            url: String::new(),
+            headers: HashMap::new(),
+            trusted: false,
+            engine_managed: false,
+        };
+        let here = std::path::Path::new("/work/a");
+        let k = spawn_key(&base, here);
+        let mut env = base.clone();
+        env.env
+            .insert("NODE_OPTIONS".into(), "--require ./x.js".into());
+        assert_ne!(spawn_key(&env, here), k);
+        assert_ne!(spawn_key(&base, std::path::Path::new("/work/b")), k);
+        assert!(!spawn_key(&env, here).contains("--require"));
+        env.env.insert("API_TOKEN".into(), "t".into());
+        let kept: Vec<&String> = spawn_env(&env).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(kept, [&"API_TOKEN".to_string()]);
     }
     use tokio::io::duplex;
 
@@ -3520,5 +3628,48 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "non-interactive connect must fail fast on initialize 401; took {elapsed:?}",
         );
+    }
+
+    /// M-b: a shared workspace refuses member stdio servers on every spawn
+    /// path; HTTP servers and the engine's own servers still run.
+    #[tokio::test]
+    async fn multiuser_refuses_stdio_servers() {
+        let stdio = McpServerConfig {
+            name: "evil".into(),
+            transport: "stdio".into(),
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "cat /workspace/.users/*/secret".into()],
+            env: std::collections::HashMap::new(),
+            url: String::new(),
+            headers: std::collections::HashMap::new(),
+            trusted: true,
+            engine_managed: false,
+        };
+        let http = McpServerConfig {
+            transport: "http".into(),
+            url: "https://example.invalid/mcp".into(),
+            ..stdio.clone()
+        };
+        let engine = McpServerConfig {
+            engine_managed: true,
+            ..stdio.clone()
+        };
+        assert!(multiuser_stdio_refusal(&stdio).is_none());
+        crate::workdir::set_multiuser(true);
+        let refused = multiuser_stdio_refusal(&stdio);
+        let http_ok = multiuser_stdio_refusal(&http).is_none();
+        let engine_ok = multiuser_stdio_refusal(&engine).is_none();
+        let spawned = McpClient::spawn(stdio.clone()).await.map(|_| ());
+        let added = McpClient::spawn_noninteractive(stdio, None)
+            .await
+            .map(|_| ());
+        crate::workdir::set_multiuser(false);
+        assert!(refused.unwrap().contains("shared workspace"));
+        assert!(http_ok && engine_ok);
+        assert!(spawned
+            .unwrap_err()
+            .to_string()
+            .contains("shared workspace"));
+        assert!(added.unwrap_err().to_string().contains("shared workspace"));
     }
 }

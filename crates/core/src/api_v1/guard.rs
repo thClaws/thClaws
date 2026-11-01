@@ -114,8 +114,41 @@ fn behind_authenticating_proxy() -> bool {
         || std::env::var("THCLAWS_SERVE_BEHIND_PROXY").ok().as_deref() == Some("1")
 }
 
+static SERVE_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Set the `--serve` bearer without touching the environment. A token in an
+/// exec-time env stays readable by same-user processes (`KERN_PROCARGS2`,
+/// `/proc/<pid>/environ`) after the process unsets it, and a confined Bash
+/// child is one of those.
+pub fn set_serve_token(token: Option<String>) {
+    *SERVE_TOKEN.write().unwrap_or_else(|e| e.into_inner()) = token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+}
+
+/// The `--serve` bearer: one set in-process (handed over by a supervisor, or
+/// minted at startup) wins over a user's own `THCLAWS_SERVE_TOKEN`.
+pub fn serve_token() -> Option<String> {
+    if let Some(t) = SERVE_TOKEN
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Some(t);
+    }
+    std::env::var("THCLAWS_SERVE_TOKEN")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 fn serve_token_set() -> bool {
-    std::env::var("THCLAWS_SERVE_TOKEN").is_ok_and(|v| !v.trim().is_empty())
+    serve_token().is_some()
+}
+
+/// Something in front of this `--serve` authenticates every request.
+pub fn serve_behind_proxy() -> bool {
+    behind_authenticating_proxy()
 }
 
 /// Why a `--serve` on `bind` must not start, if it must not. `own_auth` is

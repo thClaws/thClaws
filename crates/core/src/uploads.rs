@@ -45,32 +45,71 @@ pub const UPLOADS_DIRNAME: &str = "_uploads";
 /// The returned path is **not** created on disk; the caller writes
 /// bytes to it.
 pub fn unique_path(dir: &Path, filename: &str) -> PathBuf {
-    let sanitized = sanitize_filename(filename);
-    let path = dir.join(&sanitized);
-    if !path.exists() {
-        return path;
+    // `symlink_metadata`, not `exists()`: a dangling symlink is a taken
+    // name, never a free one to write through.
+    candidates(dir, filename)
+        .find(|p| p.symlink_metadata().is_err())
+        .unwrap_or_else(|| overflow_path(dir, filename))
+}
+
+/// Create a fresh file for an upload and write `bytes` to it. The name is
+/// claimed with `create_new` (O_EXCL, plus O_NOFOLLOW on Unix), so a symlink
+/// planted at the name — dangling or not — is skipped like any other taken
+/// name instead of redirecting the write outside the folder.
+pub fn write_unique(dir: &Path, filename: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    for path in candidates(dir, filename) {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        match opts.open(&path) {
+            Ok(mut f) => {
+                f.write_all(bytes)?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("no free name for {filename}"),
+    ))
+}
+
+fn candidates<'a>(dir: &'a Path, filename: &str) -> impl Iterator<Item = PathBuf> + 'a {
+    let sanitized = sanitize_filename(filename);
+    let stem = Path::new(&sanitized)
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("upload")
+        .to_string();
+    let ext = Path::new(&sanitized)
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("")
+        .to_string();
+    std::iter::once(dir.join(&sanitized)).chain((1..10_000).map(move |n| {
+        dir.join(if ext.is_empty() {
+            format!("{stem}_{n}")
+        } else {
+            format!("{stem}_{n}.{ext}")
+        })
+    }))
+}
+
+// Astronomically unlikely; surface a clearly-broken filename so the
+// caller's write fails fast rather than silently overwriting.
+fn overflow_path(dir: &Path, filename: &str) -> PathBuf {
+    let sanitized = sanitize_filename(filename);
     let stem = Path::new(&sanitized)
         .file_stem()
         .and_then(OsStr::to_str)
         .unwrap_or("upload");
-    let ext = Path::new(&sanitized)
-        .extension()
-        .and_then(OsStr::to_str)
-        .unwrap_or("");
-    for n in 1..10_000 {
-        let candidate = if ext.is_empty() {
-            format!("{stem}_{n}")
-        } else {
-            format!("{stem}_{n}.{ext}")
-        };
-        let p = dir.join(&candidate);
-        if !p.exists() {
-            return p;
-        }
-    }
-    // Astronomically unlikely; surface a clearly-broken filename so
-    // the caller's write fails fast rather than silently overwriting.
     dir.join(format!("{stem}.collision-overflow"))
 }
 
@@ -85,13 +124,21 @@ fn sanitize_filename(raw: &str) -> String {
         .rsplit(|c: char| c == '/' || c == '\\')
         .next()
         .unwrap_or("");
+    // `:` makes `C:x` drive-relative and `name:stream` an alternate data
+    // stream on Windows; trailing dots and spaces are stripped there, and a
+    // device name opens the device. Neutralised on every OS so a name means
+    // the same file wherever the workspace is opened.
     let cleaned: String = trailing
         .chars()
         .filter(|c| !c.is_control() && *c != '\0')
+        .map(|c| if c == ':' { '_' } else { c })
         .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+    let trimmed = cleaned.trim().trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
         return "upload".to_string();
+    }
+    if crate::sandbox::is_windows_device_name(trimmed) {
+        return format!("_{trimmed}");
     }
     trimmed.to_string()
 }
@@ -99,9 +146,21 @@ fn sanitize_filename(raw: &str) -> String {
 /// Ensure `<workspace>/_uploads/` exists and return the absolute path.
 /// Idempotent; safe to call before every upload.
 pub fn ensure_uploads_dir(workspace: &Path) -> std::io::Result<PathBuf> {
-    let dir = workspace.join(UPLOADS_DIRNAME);
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    contained_dir(workspace, UPLOADS_DIRNAME)
+}
+
+/// `<workspace>/<rel>` created only once it is known to land inside the
+/// workspace: a symlink planted at `rel` (or any parent of it) that points
+/// out is refused before `create_dir_all` can follow it, and the landing is
+/// checked again once the folder exists.
+fn contained_dir(workspace: &Path, rel: &str) -> std::io::Result<PathBuf> {
+    let deny = |e: crate::error::Error| {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
+    };
+    let landing = crate::sandbox::Sandbox::check_in(workspace, rel).map_err(deny)?;
+    std::fs::create_dir_all(&landing)?;
+    crate::sandbox::Sandbox::check_in(workspace, rel).map_err(deny)?;
+    Ok(workspace.join(rel))
 }
 
 /// Ensure `<workspace>/<rel>/` exists and return the absolute path,
@@ -129,9 +188,7 @@ pub fn ensure_target_dir(workspace: &Path, rel: &str) -> std::io::Result<PathBuf
             format!("unsafe upload dir: {rel}"),
         ));
     }
-    let dir = workspace.join(candidate);
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    contained_dir(workspace, rel)
 }
 
 /// Render the user-turn text for a batch of uploaded files.
@@ -262,6 +319,34 @@ mod tests {
         }
     }
 
+    /// M-d: a planted dangling symlink at the upload name (or at the target
+    /// dir) cannot redirect the write outside the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn upload_never_writes_through_a_planted_symlink() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("workspace-alice");
+        let victim = tmp.path().join("workspace-bob");
+        std::fs::create_dir_all(ws.join(UPLOADS_DIRNAME)).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        let up = ws.join(UPLOADS_DIRNAME);
+        std::os::unix::fs::symlink(victim.join("pwned.txt"), up.join("pwned.txt")).unwrap();
+
+        assert_eq!(unique_path(&up, "pwned.txt"), up.join("pwned_1.txt"));
+        let dest = write_unique(&up, "pwned.txt", b"x").unwrap();
+        assert_eq!(dest, up.join("pwned_1.txt"));
+        assert!(!victim.join("pwned.txt").exists());
+
+        std::os::unix::fs::symlink(victim.join("raw"), ws.join("raw")).unwrap();
+        assert!(ensure_target_dir(&ws, "raw").is_err());
+        assert!(ensure_target_dir(&ws, "raw/sub").is_err());
+        assert!(!victim.join("raw").exists(), "nothing created via the link");
+
+        std::fs::remove_dir_all(&up).unwrap();
+        std::os::unix::fs::symlink(&victim, &up).unwrap();
+        assert!(ensure_uploads_dir(&ws).is_err());
+    }
+
     #[test]
     fn unique_path_returns_original_when_free() {
         let td = tempdir().unwrap();
@@ -304,6 +389,17 @@ mod tests {
         let td = tempdir().unwrap();
         let p = unique_path(td.path(), "..\\..\\evil.txt");
         assert_eq!(p, td.path().join("evil.txt"));
+    }
+
+    #[test]
+    fn sanitize_filename_neutralises_windows_drive_stream_and_device_names() {
+        assert_eq!(sanitize_filename("C:evil.bat"), "C_evil.bat");
+        assert_eq!(sanitize_filename("notes.txt:hidden"), "notes.txt_hidden");
+        assert_eq!(sanitize_filename("CON"), "_CON");
+        assert_eq!(sanitize_filename("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_filename("com1.log"), "_com1.log");
+        assert_eq!(sanitize_filename("report.pdf. "), "report.pdf");
+        assert_eq!(sanitize_filename("console.log"), "console.log");
     }
 
     #[test]

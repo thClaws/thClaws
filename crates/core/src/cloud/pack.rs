@@ -339,17 +339,16 @@ pub fn unpack(bytes: &[u8], target: &Path, force: bool) -> Result<Vec<PathBuf>, 
         .map_err(|e| format!("read archive: {}", e))?
     {
         let mut entry = entry.map_err(|e| format!("read entry: {}", e))?;
+        // Agents are unpacked on Windows too, so the Windows rules apply on
+        // every OS: a bundle that is unsafe anywhere is refused everywhere.
+        let raw = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
+        if crate::sandbox::is_unsafe_archive_entry(&raw, true) {
+            return Err(format!("refused unsafe entry path: {raw}"));
+        }
         let path = entry
             .path()
             .map_err(|e| format!("entry path: {}", e))?
             .into_owned();
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(format!("refused unsafe entry path: {}", path.display()));
-        }
         let out = canonical_target.join(&path);
         // Entry type, before anything tries to open `out` as a file. A tar
         // may carry directory entries (`./`, `.thclaws/`) — every agent
@@ -409,6 +408,35 @@ fn ensure_write<W: Write>(w: W) -> W {
 mod unpack_tests {
     use super::unpack;
     use std::io::Write;
+
+    /// Audit 2026-11-01 #11: `is_absolute()` is false for `\Users\…` and
+    /// `C:foo`, so on Windows these escaped the target. Refused on every OS,
+    /// before anything is created.
+    #[test]
+    fn windows_rooted_and_drive_entries_are_refused_everywhere() {
+        for name in [
+            r"\Users\Public\x.bat",
+            "C:foo",
+            "a/b:stream",
+            "con.txt",
+            "x./y",
+        ] {
+            let mut tar = tar::Builder::new(Vec::new());
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_size(1);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, name, &b"x"[..]).unwrap();
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            gz.write_all(&tar.into_inner().unwrap()).unwrap();
+            let bytes = gz.finish().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let err = unpack(&bytes, dir.path(), true).unwrap_err();
+            assert!(err.contains("refused unsafe entry"), "{name}: {err}");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "{name}");
+        }
+    }
 
     /// Build a tarball the way a directory-walking packer does: a `./` entry,
     /// directory entries, then the files. Every first-party agent published

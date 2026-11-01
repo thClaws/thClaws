@@ -2291,7 +2291,8 @@ impl Agent {
                     // under `Auto`, bypassing both the mode check and the
                     // tool's own `requires_approval` — an interactive-only
                     // escape hatch (an AutoApprover sink still auto-yeses).
-                    let force_ask = ask_tools.iter().any(|t| t.as_str() == name);
+                    let force_ask = ask_tools.iter().any(|t| t.as_str() == name)
+                        || tool.forces_approval(input);
                     let needs_approval = force_ask
                         || (permission_mode.asks_for_approval() && tool.requires_approval(input));
                     let mut audit_decision = (crate::audit::record::Decision::Allow, "auto");

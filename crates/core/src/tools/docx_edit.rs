@@ -83,7 +83,7 @@ impl Tool for DocxEditTool {
         };
 
         let path_clone = validated.clone();
-        let summary = tokio::task::spawn_blocking(move || apply_edit(&path_clone, &edit))
+        let summary = crate::workdir::spawn_blocking_scoped(move || apply_edit(&path_clone, &edit))
             .await
             .map_err(|e| Error::Tool(format!("DOCX edit worker: {e}")))??;
         Ok(summary)

@@ -199,11 +199,14 @@ fn mime_for_path(path: &Path) -> &'static str {
 /// user (`~/.config/thclaws/gui-shell/`) and project
 /// (`./.thclaws/gui-shell/`) shells. Resolution precedence:
 /// project > user > builtin (so a project ships an override of a
-/// public shell by reusing its id).
+/// public shell by reusing its id) — but only in a trusted folder. An
+/// untrusted folder's shells can't shadow a user or built-in id, and
+/// hold none of the permissions their manifest declares.
 pub struct ShellRegistry {
     builtin: HashMap<String, EmbeddedShell>,
     user: HashMap<String, OnDiskEntry>,
     project: HashMap<String, OnDiskEntry>,
+    project_trusted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +235,7 @@ impl ShellRegistry {
             builtin,
             user,
             project,
+            project_trusted: crate::config::trust::is_folder_trusted(project_root),
         }
     }
 
@@ -243,6 +247,7 @@ impl ShellRegistry {
             builtin: Self::builtin_only_map(),
             user: HashMap::new(),
             project: HashMap::new(),
+            project_trusted: false,
         }
     }
 
@@ -260,10 +265,33 @@ impl ShellRegistry {
     pub fn rescan(&mut self) {
         self.user = scan_dir(&user_shell_dir());
         self.project = scan_dir(&project_shell_dir());
+        self.project_trusted =
+            std::env::current_dir().is_ok_and(|d| crate::config::trust::is_folder_trusted(&d));
+    }
+
+    fn project_wins(&self, id: &str) -> bool {
+        self.project_trusted || !(self.user.contains_key(id) || self.builtin.contains_key(id))
+    }
+
+    /// Whether `shell` holds what its manifest declares. A project shell
+    /// from a folder the user hasn't trusted came with the folder (a
+    /// cloned repo), so its declared permissions grant nothing.
+    pub fn holds_manifest_grants(&self, shell: &ShellRef) -> bool {
+        shell.source() != ShellSource::Project || self.project_trusted
+    }
+
+    /// The permissions `id` actually holds; `None` for an unknown id.
+    pub fn granted_permissions(&self, id: &str) -> Option<Vec<String>> {
+        let shell = self.resolve(id)?;
+        Some(if self.holds_manifest_grants(&shell) {
+            shell.manifest().permissions.clone()
+        } else {
+            Vec::new()
+        })
     }
 
     pub fn resolve(&self, id: &str) -> Option<ShellRef> {
-        if let Some(e) = self.project.get(id) {
+        if let Some(e) = self.project.get(id).filter(|_| self.project_wins(id)) {
             return Some(ShellRef::OnDisk {
                 manifest: e.manifest.clone(),
                 root: e.root.clone(),
@@ -287,8 +315,10 @@ impl ShellRegistry {
         let mut out: Vec<(ShellSource, ShellManifest)> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for e in self.project.values() {
-            seen.insert(e.manifest.id.clone());
-            out.push((ShellSource::Project, e.manifest.clone()));
+            if self.project_wins(&e.manifest.id) {
+                seen.insert(e.manifest.id.clone());
+                out.push((ShellSource::Project, e.manifest.clone()));
+            }
         }
         for e in self.user.values() {
             if seen.insert(e.manifest.id.clone()) {
@@ -327,6 +357,18 @@ pub fn user_shell_dir() -> PathBuf {
 
 /// `./.thclaws/gui-shell/` — project-scoped, sits next to
 /// `./.thclaws/sessions/`. Resolved relative to current cwd at call time.
+/// Ids of `root`'s project shells whose manifest declares permissions:
+/// what trusting the folder would grant them.
+pub fn project_shells_with_permissions(root: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = scan_dir(&root.join(".thclaws").join("gui-shell"))
+        .into_values()
+        .filter(|e| !e.manifest.permissions.is_empty())
+        .map(|e| e.manifest.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
 pub fn project_shell_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -593,6 +635,21 @@ mod tests {
         assert_eq!(ids, ["with-manifest", "with-shell"]);
     }
 
+    #[test]
+    fn only_shells_asking_for_permissions_are_reported() {
+        let tmp = tempdir().unwrap();
+        for (id, perms) in [("plain", "[]"), ("studio", r#"["agent.run"]"#)] {
+            let d = tmp.path().join(".thclaws/gui-shell").join(id);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("manifest.json"),
+                format!(r#"{{"id":"{id}","name":"{id}","version":"0.1.0","description":"t","entry":"index.html","permissions":{perms}}}"#),
+            )
+            .unwrap();
+        }
+        assert_eq!(project_shells_with_permissions(tmp.path()), ["studio"]);
+    }
+
     /// dev-plan/59: a workspace host's cwd is the shelf; the shell a bot
     /// ships (`guiShell.tabDefault`) is under the bot. Resolved against the
     /// cwd it was absent — a 404 and a blank iframe — so the desktop asks
@@ -656,6 +713,61 @@ mod tests {
                 .unwrap_or_else(|e| panic!("media-studio asset {rel}: {e}"));
             assert!(!bytes.is_empty(), "{rel} is empty");
         }
+    }
+
+    fn with_project(trusted: bool) -> (tempfile::TempDir, ShellRegistry) {
+        let tmp = tempfile::tempdir().unwrap();
+        for id in ["chatbot", "repo-shell"] {
+            let dir = tmp.path().join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("manifest.json"),
+                format!(
+                    r#"{{"id":"{id}","name":"{id}","version":"1","description":"","entry":"index.html",
+                    "permissions":["agent.run","mode.write","schedule.write"]}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let mut r = ShellRegistry::builtin_only();
+        r.project = scan_dir(tmp.path());
+        r.project_trusted = trusted;
+        (tmp, r)
+    }
+
+    #[test]
+    fn untrusted_project_shell_holds_no_permissions() {
+        let (_tmp, r) = with_project(false);
+        assert_eq!(r.granted_permissions("repo-shell"), Some(Vec::new()));
+        assert!(!r.holds_manifest_grants(&r.resolve("repo-shell").unwrap()));
+        assert!(r.holds_manifest_grants(&r.resolve("chatbot").unwrap()));
+        let (_tmp, r) = with_project(true);
+        assert!(r.holds_manifest_grants(&r.resolve("repo-shell").unwrap()));
+        assert!(r
+            .granted_permissions("repo-shell")
+            .unwrap()
+            .contains(&"mode.write".to_string()));
+        assert_eq!(r.granted_permissions("nope"), None);
+    }
+
+    #[test]
+    fn untrusted_project_shell_cannot_shadow_a_builtin() {
+        let (_tmp, r) = with_project(false);
+        assert_eq!(r.resolve("chatbot").unwrap().source(), ShellSource::Builtin);
+        assert_eq!(
+            r.resolve("repo-shell").unwrap().source(),
+            ShellSource::Project
+        );
+        let listed = r.list();
+        assert!(listed
+            .iter()
+            .any(|(src, m)| m.id == "chatbot" && *src == ShellSource::Builtin));
+        assert!(!listed
+            .iter()
+            .any(|(src, m)| m.id == "chatbot" && *src == ShellSource::Project));
+
+        let (_tmp, r) = with_project(true);
+        assert_eq!(r.resolve("chatbot").unwrap().source(), ShellSource::Project);
     }
 
     #[test]
@@ -773,6 +885,7 @@ mod tests {
         )
         .unwrap();
         r.project = scan_dir(proj_tmp.path());
+        r.project_trusted = true;
 
         let s = r.resolve(id).unwrap();
         assert_eq!(s.source(), ShellSource::Project);
@@ -832,6 +945,7 @@ mod tests {
         }
         r.user = scan_dir(user_tmp.path());
         r.project = scan_dir(proj_tmp.path());
+        r.project_trusted = true;
 
         let listed = r.list();
         let ids: Vec<&str> = listed.iter().map(|(_, m)| m.id.as_str()).collect();

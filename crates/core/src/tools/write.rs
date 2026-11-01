@@ -69,9 +69,16 @@ impl Tool for WriteTool {
         true
     }
 
+    fn forces_approval(&self, input: &Value) -> bool {
+        input
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(crate::sandbox::Sandbox::forces_instructions_approval)
+    }
+
     async fn call(&self, input: Value) -> Result<String> {
         let raw_path = req_str(&input, "path")?;
-        let validated = crate::sandbox::Sandbox::check_write(raw_path)?;
+        let validated = crate::sandbox::Sandbox::check_write_approved(raw_path)?;
         // Lead is a coordinator — never the author. The destructive-command
         // guard in BashTool catches `rm -rf` etc., but a lead could still
         // overwrite source files via Write. Cut that off here so every

@@ -285,6 +285,28 @@ fn user_turn_content(last: Option<&crate::types::Message>) -> Value {
     Value::Array(blocks)
 }
 
+/// Tool flags for the `claude` subprocess, which runs under
+/// `bypassPermissions`. `--allowedTools` only auto-approves; it does not
+/// remove anything, so Claude Code's own Bash/Write/Edit/WebFetch stayed
+/// callable with no prompt, sandbox, hook or audit (#5). `--tools ""` turns
+/// every built-in off, and `--strict-mcp-config` keeps the project's own
+/// `.mcp.json` from starting servers outside thClaws. What is left is
+/// thClaws's bridge (`bridged`), an MCP server and so not a built-in.
+fn tool_args(bridged: Option<Vec<String>>) -> Vec<String> {
+    let mut args = vec![
+        "--tools".to_string(),
+        String::new(),
+        "--strict-mcp-config".to_string(),
+    ];
+    if let Some(patterns) = bridged {
+        args.push("--mcp-config".into());
+        args.push(crate::sdk_mcp::mcp_config_value().to_string());
+        args.push("--allowedTools".into());
+        args.push(patterns.join(","));
+    }
+    args
+}
+
 #[async_trait]
 impl Provider for AgentSdkProvider {
     async fn stream(&self, req: StreamRequest) -> Result<EventStream> {
@@ -364,19 +386,11 @@ impl Provider for AgentSdkProvider {
             }
         }
 
-        // SDK MCP bridge. When a tool registry is attached, expose
-        // thClaws's tools to the subprocess and pin the allowedTools
-        // filter to ONLY those bridged names — Claude Code's
-        // built-in tools (Read/Edit/Bash/etc) are disabled so the
-        // model can't bypass thClaws's sandbox + hooks by using
-        // them. Without the registry, this whole block is skipped
-        // and Claude Code runs with its native tools.
-        if let Some(tools) = &self.tools {
-            let mcp_config = crate::sdk_mcp::mcp_config_value();
-            cmd.arg("--mcp-config").arg(mcp_config.to_string());
-            let patterns = crate::sdk_mcp::allowed_tool_patterns(tools);
-            cmd.arg("--allowedTools").arg(patterns.join(","));
-        }
+        cmd.args(tool_args(
+            self.tools
+                .as_ref()
+                .map(|t| crate::sdk_mcp::allowed_tool_patterns(t)),
+        ));
 
         // Mirror the Python SDK env hygiene: identify ourselves via
         // CLAUDE_CODE_ENTRYPOINT, and scrub CLAUDECODE so the child doesn't
@@ -791,6 +805,28 @@ mod tests {
             Some(v) => std::env::set_var("CLAUDE_BIN", v),
             None => std::env::remove_var("CLAUDE_BIN"),
         }
+    }
+
+    /// #5: `--allowedTools` only auto-approves, so the built-ins must be
+    /// switched off outright, bridge or no bridge.
+    #[test]
+    fn built_in_tools_are_always_disabled() {
+        for args in [
+            tool_args(None),
+            tool_args(Some(vec!["mcp__thclaws__Read".into()])),
+        ] {
+            let i = args.iter().position(|a| a == "--tools").expect("--tools");
+            assert_eq!(args[i + 1], "");
+            assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        }
+        let args = tool_args(Some(vec![
+            "mcp__thclaws__Read".into(),
+            "mcp__thclaws__Bash".into(),
+        ]));
+        let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[i + 1], "mcp__thclaws__Read,mcp__thclaws__Bash");
+        assert!(args.iter().any(|a| a == "--mcp-config"));
+        assert!(!tool_args(None).iter().any(|a| a == "--mcp-config"));
     }
 
     #[test]

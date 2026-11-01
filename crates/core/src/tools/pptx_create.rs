@@ -93,7 +93,7 @@ impl Tool for PptxCreateTool {
 
         let path_clone = validated.clone();
 
-        let n = tokio::task::spawn_blocking(move || -> Result<usize> {
+        let n = crate::workdir::spawn_blocking_scoped(move || -> Result<usize> {
             render_pptx(&path_clone, &slides)
         })
         .await

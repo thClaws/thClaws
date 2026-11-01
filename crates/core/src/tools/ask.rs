@@ -40,7 +40,7 @@ pub fn set_line_driven_turn(active: bool) {
     LINE_DRIVEN_TURN.store(active, Ordering::Relaxed);
 }
 
-fn is_line_driven_turn() -> bool {
+pub fn is_line_driven_turn() -> bool {
     LINE_DRIVEN_TURN.load(Ordering::Relaxed)
 }
 

@@ -45,6 +45,17 @@ pub fn parse_bang(line: &str) -> Option<&str> {
     Some(cmd)
 }
 
+/// Refusal for a `!` command that arrived over a chat bridge (LINE,
+/// Telegram, Messenger, thClaws Remote). The approval skip above holds
+/// only for the person at this machine; anyone who can message the bot
+/// is not that person.
+pub fn remote_bang_refusal(line: &str) -> Option<&'static str> {
+    parse_bang(line).map(|_| {
+        "`!` shell commands only run from this machine, not over chat. \
+         Describe what you need instead."
+    })
+}
+
 /// Run a `!`-prefixed shell command through the BashTool. Returns the
 /// formatted output string on success, or an error message on failure.
 /// Does NOT touch the agent's history.
@@ -69,6 +80,14 @@ pub async fn run_bang_command(cmd: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bang_over_chat_is_refused() {
+        assert!(remote_bang_refusal("!rm -rf ~").is_some());
+        assert!(remote_bang_refusal("  !ls").is_some());
+        assert!(remote_bang_refusal("hello").is_none());
+        assert!(remote_bang_refusal("!!").is_none());
+    }
 
     #[test]
     fn parse_bang_strips_prefix_and_trims() {

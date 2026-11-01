@@ -107,13 +107,27 @@ impl Tool for BashTool {
         true
     }
 
+    /// The modal shows the summary in place of the input, so it repeats the
+    /// command under the warning.
+    fn approval_summary(&self, input: &Value) -> Option<String> {
+        if !crate::confine::runs_unconfined() {
+            return None;
+        }
+        let mut s = format!("WARNING: {}\n\n", crate::confine::UNCONFINED_NOTICE);
+        s.push_str(input.get("command").and_then(Value::as_str).unwrap_or(""));
+        if let Some(cwd) = input.get("cwd").and_then(Value::as_str) {
+            s.push_str(&format!("\n\ncwd: {cwd}"));
+        }
+        Some(s)
+    }
+
     async fn call(&self, input: Value) -> Result<String> {
         let raw_command = req_str(&input, "command")?;
         let cwd = input.get("cwd").and_then(Value::as_str);
 
         let resolved_cwd = if let Some(c) = cwd {
             crate::sandbox::Sandbox::check(c)?
-        } else if let Some(root) = crate::sandbox::Sandbox::root() {
+        } else if let Some(root) = crate::sandbox::Sandbox::try_root()? {
             root
         } else {
             crate::workdir::current_workdir()
@@ -288,10 +302,17 @@ async fn run_shell_command(
 ///
 /// Disarmed on the deliberate background-server path, where outliving the call
 /// is the entire point.
+///
+/// Windows has no process groups; the child goes into a kill-on-close Job
+/// Object instead ([`crate::util::KillOnCloseJob`]), which `cmd.exe`'s
+/// children inherit.
 struct KillGroupOnDrop {
     /// `None` once disarmed or already killed, and on platforms where we have
     /// no group to kill.
+    #[cfg(unix)]
     pgid: Option<i32>,
+    #[cfg(windows)]
+    job: Option<crate::util::KillOnCloseJob>,
 }
 
 impl KillGroupOnDrop {
@@ -304,20 +325,39 @@ impl KillGroupOnDrop {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn arm(child: &tokio::process::Child) -> Self {
+        Self {
+            job: crate::util::KillOnCloseJob::for_child(child),
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn arm(_child: &tokio::process::Child) -> Self {
-        Self { pgid: None }
+        Self {}
     }
 
     /// Let the group outlive this call.
     fn disarm(&mut self) {
-        self.pgid = None;
+        #[cfg(unix)]
+        {
+            self.pgid = None;
+        }
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.release();
+        }
     }
 
     /// Kill now rather than waiting for the drop, and don't kill twice.
     fn kill_now(&mut self) {
+        #[cfg(unix)]
         if let Some(pgid) = self.pgid.take() {
             kill_group(pgid);
+        }
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.kill();
         }
     }
 }
@@ -337,9 +377,6 @@ fn kill_group(pgid: i32) {
         libc::kill(-pgid, libc::SIGKILL);
     }
 }
-
-#[cfg(not(unix))]
-fn kill_group(_pgid: i32) {}
 
 async fn run_shell_command_inner(
     command: &str,

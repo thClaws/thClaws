@@ -29,6 +29,13 @@ where
     MEMBER_ID.scope(member_id, fut).await
 }
 
+pub fn sync_scope_member<F, T>(member_id: String, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    MEMBER_ID.sync_scope(member_id, f)
+}
+
 /// The active member id, when inside a multiuser member scope.
 pub fn current_member_id() -> Option<String> {
     MEMBER_ID.try_with(|m| m.clone()).ok()

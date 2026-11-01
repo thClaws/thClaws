@@ -118,6 +118,9 @@ impl Tool for PathScopedWriteTool {
     fn requires_approval(&self, input: &Value) -> bool {
         self.inner.requires_approval(input)
     }
+    fn forces_approval(&self, input: &Value) -> bool {
+        self.inner.forces_approval(input)
+    }
     fn parallelizable(&self) -> bool {
         self.inner.parallelizable()
     }

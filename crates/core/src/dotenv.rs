@@ -137,6 +137,15 @@ const DOTENV_BLOCKLIST: &[&str] = &[
     "USER",
     "LOGNAME",
     "SHELL",
+    // Windows home / profile / shell resolution (`util::home_dir` falls back
+    // to USERPROFILE, so it moves the config dir like HOME does).
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PATHEXT",
+    "COMSPEC",
     // Temp dir hijack (symlink races, predictable paths)
     "TMPDIR",
     "TMP",
@@ -220,7 +229,23 @@ fn is_untrusted_project_key(key: &str) -> bool {
         || !UNTRUSTED_ALLOWED_SUFFIXES.iter().any(|s| up.ends_with(s))
 }
 
-fn is_blocked_key(key: &str) -> bool {
+/// Keys in the project `.env` at `path` that load only once the folder is
+/// trusted.
+pub fn untrusted_project_keys(path: &Path) -> Vec<String> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
+        .filter(|k| !k.is_empty() && !is_blocked_key(k) && is_untrusted_project_key(k))
+        .map(str::to_string)
+        .collect()
+}
+
+pub(crate) fn is_blocked_key(key: &str) -> bool {
     let up = key.to_ascii_uppercase();
     // Exact blocklist match.
     if DOTENV_BLOCKLIST.iter().any(|b| *b == up) {
@@ -356,6 +381,13 @@ mod tests {
             "EDITOR",
             "VISUAL",
             "PAGER",
+            "USERPROFILE",
+            "AppData",
+            "LOCALAPPDATA",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "PATHEXT",
+            "ComSpec",
         ] {
             assert!(is_blocked_key(key), "{key} must be blocked");
         }

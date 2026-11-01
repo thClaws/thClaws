@@ -26,7 +26,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(70);
 /// will not start is from the browser's point of view.
 const CLOSE_INTERNAL: u16 = 1011;
 
-pub async fn relay(browser: WebSocket, bot: Arc<Bot>) {
+/// `origin` is the browser's, carried to the agent so it can tell a browser
+/// tab from a bare client (see `server::browser_client`).
+pub async fn relay(browser: WebSocket, bot: Arc<Bot>, origin: Option<axum::http::HeaderValue>) {
     let (addr, token) = match bot.wait_ready(CONNECT_TIMEOUT).await {
         Ok(v) => v,
         Err(e) => {
@@ -52,6 +54,14 @@ pub async fn relay(browser: WebSocket, bot: Arc<Bot>) {
         Err(_) => {
             close_with(browser, "agent token is not a valid header value").await;
             return;
+        }
+    }
+    // The host already checked the browser's Origin against its own bind. A
+    // hosted host's Origin is a public name the child's loopback guard would
+    // refuse, so the child is told only that a browser is on the other end.
+    if origin.is_some_and(|o| o.as_bytes() != b"null") {
+        if let Ok(v) = format!("http://{addr}").parse() {
+            req.headers_mut().insert(axum::http::header::ORIGIN, v);
         }
     }
 
@@ -183,7 +193,7 @@ mod tests {
             "/ws",
             get(move |ws: WebSocketUpgrade| {
                 let bot = bot.clone();
-                async move { ws.on_upgrade(move |sock| relay(sock, bot)) }
+                async move { ws.on_upgrade(move |sock| relay(sock, bot, None)) }
             }),
         ))
         .await

@@ -1243,8 +1243,9 @@ fn parse_or_warn(contents: &str, path: &std::path::Path) -> Option<ProjectConfig
 /// the user opened, a cloned repo included. The keys that run code, widen the
 /// sandbox or redirect credentials (`hooks`, a permission mode other than the
 /// user's own or `ask`, a looser `bash.sandbox`, `bash.sandbox_write_paths`,
-/// `remoteAgentUrl`, endpoint vars in `.env`) only take effect in a folder the
-/// user trusted. Trust is stored per canonical path in
+/// `remoteAgentUrl`, `guiShell.tabDefault`, endpoint vars in `.env`) only take
+/// effect in a folder the user trusted. Project files with no fingerprint (chat
+/// bridge bindings, gui-shells) follow `.env` and need [`trust::is_folder_trusted`]. Trust is stored per canonical path in
 /// `~/.config/thclaws/trusted-folders.json` with a fingerprint of those keys,
 /// so an edit that didn't come through the engine (confined Bash on a Landlock
 /// host, a `git pull`) drops them again until the folder is re-trusted.
@@ -1324,7 +1325,7 @@ pub mod trust {
     /// (model, KMS, window size) never cost a folder its trust.
     pub fn fingerprint(pc: &ProjectConfig) -> String {
         let bash = pc.bash.as_ref();
-        let gated = serde_json::json!([
+        let mut gated = serde_json::json!([
             pc.hooks
                 .as_ref()
                 .filter(|h| **h != crate::hooks::HooksConfig::default()),
@@ -1336,6 +1337,13 @@ pub mod trust {
                 .map(str::trim)
                 .filter(|s| !s.is_empty()),
         ]);
+        // Appended only when set, so folders trusted before it was gated
+        // keep their fingerprint.
+        if let Some(tab) = pc.gui_shell.as_ref().and_then(|g| g.tab_default()) {
+            if let Some(a) = gated.as_array_mut() {
+                a.push(tab.into());
+            }
+        }
         Sha256::digest(gated.to_string().as_bytes())
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -1444,6 +1452,96 @@ pub mod trust {
         }
     }
 
+    /// What [`trust`](self) is holding back in `dir`, for the GUI's trust
+    /// prompt. `None` when nothing is: a hosted runtime, a folder trusted
+    /// with its settings as they are, or one with nothing to withhold.
+    #[derive(Debug, Clone, PartialEq, Serialize)]
+    pub struct Withheld {
+        /// The folder was trusted and its gated settings changed since.
+        pub changed: bool,
+        pub items: Vec<WithheldItem>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize)]
+    pub struct WithheldItem {
+        pub key: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub detail: Option<String>,
+    }
+
+    /// Chat-bridge bindings under `.thclaws/`, with the key the prompt shows.
+    const BRIDGE_FILES: &[(&str, &str)] = &[
+        ("line.json", "bridge.line"),
+        ("telegram.json", "bridge.telegram"),
+        ("messenger.json", "bridge.messenger"),
+        ("state/phone-home.json", "bridge.phoneHome"),
+    ];
+
+    /// `shells` are the ids of `dir`'s project gui-shells whose manifest
+    /// declares permissions (the registry lives behind the `gui` feature).
+    pub fn withheld(dir: &Path, shells: Vec<String>) -> Option<Withheld> {
+        if trusted_by_env() {
+            return None;
+        }
+        let base = AppConfig::user_layer().map(|(c, _)| c).unwrap_or_default();
+        withheld_with(store_path().as_deref(), dir, &base, shells)
+    }
+
+    fn withheld_with(
+        store: Option<&Path>,
+        dir: &Path,
+        base: &AppConfig,
+        shells: Vec<String>,
+    ) -> Option<Withheld> {
+        let item = |key: &str, detail: Option<String>| WithheldItem {
+            key: key.to_string(),
+            detail,
+        };
+        let ever = store.is_some_and(|s| read(s).folders.contains_key(&key(dir)));
+        let mut pc = settings_of(dir);
+        let mut items = Vec::new();
+        if !store.is_some_and(|s| trusted_in(s, dir, &fingerprint(&pc))) {
+            items.extend(pc.strip_untrusted(base).into_iter().map(|k| item(k, None)));
+        }
+        if !ever {
+            let mcp: Vec<String> = [dir.join(".mcp.json"), dir.join(".claude/mcp.json")]
+                .iter()
+                .filter_map(|p| ProjectConfig::parse_mcp_json(p))
+                .flatten()
+                .map(|s| s.name)
+                .collect();
+            if !mcp.is_empty() {
+                items.push(item("mcpServers", Some(mcp.join(", "))));
+            }
+            for (file, k) in BRIDGE_FILES {
+                if dir.join(".thclaws").join(file).exists() {
+                    items.push(item(k, None));
+                }
+            }
+            if !shells.is_empty() {
+                items.push(item("guiShell.permissions", Some(shells.join(", "))));
+            }
+            let env = crate::dotenv::untrusted_project_keys(&dir.join(".env"));
+            if !env.is_empty() {
+                items.push(item("env", Some(env.join(", "))));
+            }
+        }
+        (!items.is_empty()).then_some(Withheld {
+            changed: ever,
+            items,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn withheld_for_test(
+        store: &Path,
+        dir: &Path,
+        base: &AppConfig,
+        shells: Vec<String>,
+    ) -> Option<Withheld> {
+        withheld_with(Some(store), dir, base, shells)
+    }
+
     #[cfg(test)]
     pub(super) fn trusted_in_for_test(store: &Path, dir: &Path, pc: &ProjectConfig) -> bool {
         trusted_in(store, dir, &fingerprint(pc))
@@ -1509,6 +1607,56 @@ impl ProjectConfig {
             .is_some_and(|u| !u.trim().is_empty())
         {
             dropped.push("remoteAgentUrl");
+        }
+        // #5: `agent/*` runs Claude Code, whose bridged thClaws tools are
+        // called without the Ask prompt. A repo picks it only if the user
+        // already did.
+        let agent = |m: &str| {
+            crate::providers::ProviderKind::detect(m.trim())
+                == Some(crate::providers::ProviderKind::AgentSdk)
+        };
+        if self
+            .model
+            .as_deref()
+            .is_some_and(|m| agent(m) && m.trim() != base.model)
+        {
+            self.model = None;
+            dropped.push("model");
+        }
+        if self
+            .skill_model_fallback
+            .as_deref()
+            .is_some_and(|m| agent(m) && Some(m.trim()) != base.skill_model_fallback.as_deref())
+        {
+            self.skill_model_fallback = None;
+            dropped.push("skill_model_fallback");
+        }
+        if self.translator_subagent_model.as_deref().is_some_and(|m| {
+            agent(m) && Some(m.trim()) != base.translator_subagent_model.as_deref()
+        }) {
+            self.translator_subagent_model = None;
+            dropped.push("translator_subagent_model");
+        }
+        if self
+            .extract_save_skill_models
+            .as_ref()
+            .is_some_and(|s| s.candidates().iter().any(|m| agent(m)))
+            && self.extract_save_skill_models != base.extract_save_skill_models
+        {
+            self.extract_save_skill_models = None;
+            dropped.push("extract_save_skill_models");
+        }
+        if let Some(gs) = self.gui_shell.take() {
+            if gs.tab_default().is_some() {
+                dropped.push("guiShell.tabDefault");
+            }
+            let serve_default = gs.serve_default().map(str::to_string);
+            if serve_default.is_some() {
+                self.gui_shell = Some(GuiShellSetting::Long {
+                    tab_default: None,
+                    serve_default,
+                });
+            }
         }
         dropped
     }
@@ -2349,13 +2497,50 @@ impl ProjectConfig {
     /// 1. `.mcp.json` (project root — Claude Code primary location)
     /// 2. `.thclaws/mcp.json`
     /// 3. `.claude/mcp.json`
+    ///
+    /// The two Claude Code files only load from a trusted folder (see
+    /// [`trust`]): they arrive with a cloned repo and an agent could write
+    /// them on a host whose confiner has no deny rule, and a server there
+    /// runs unconfined on the next start (audit 2026-11-01 #6).
     pub fn load_mcp_servers() -> Vec<crate::mcp::McpServerConfig> {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let paths = [
-            cwd.join(".mcp.json"),                // Claude Code primary
-            Self::project_dir().join("mcp.json"), // thClaws
-            cwd.join(".claude/mcp.json"),         // Claude Code legacy
-        ];
+        let own = Self::project_dir().join("mcp.json");
+        Self::load_mcp_servers_in(&cwd, own, trust::is_folder_trusted(&cwd))
+    }
+
+    fn load_mcp_servers_in(
+        cwd: &Path,
+        own: PathBuf,
+        trusted: bool,
+    ) -> Vec<crate::mcp::McpServerConfig> {
+        let claude_files = [cwd.join(".mcp.json"), cwd.join(".claude/mcp.json")];
+        if !trusted {
+            let skipped: Vec<String> = claude_files
+                .iter()
+                .filter(|p| Self::parse_mcp_json(p).is_some_and(|s| !s.is_empty()))
+                .map(|p| p.display().to_string())
+                .collect();
+            if !skipped.is_empty() {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    eprintln!(
+                        "[trust] not loading MCP servers from {}: the folder is not trusted. \
+                         Add them with /mcp add (saved to .thclaws/mcp.json) or run with {}=1.",
+                        skipped.join(", "),
+                        trust::ENV_TRUST
+                    );
+                });
+            }
+        }
+        let [claude_primary, claude_legacy] = claude_files;
+        let mut paths = Vec::with_capacity(3);
+        if trusted {
+            paths.push(claude_primary);
+        }
+        paths.push(own);
+        if trusted {
+            paths.push(claude_legacy);
+        }
         for path in &paths {
             if let Some(servers) = Self::parse_mcp_json(path) {
                 if !servers.is_empty() {
@@ -2607,6 +2792,31 @@ impl AppConfig {
         }
     }
 
+    /// The config the user's own layer builds (`$THCLAWS_CONFIG`, else
+    /// `~/.config/thclaws/settings.json`), and whether it pins `model`.
+    /// No user-global Claude Code fallback: `~/.claude/settings.json` must
+    /// not seed `model`/permissions (it silently pulled in an unroutable
+    /// model the user never chose).
+    pub(crate) fn user_layer() -> Result<(Self, bool)> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(p) = std::env::var("THCLAWS_CONFIG") {
+            candidates.push(PathBuf::from(p));
+        }
+        candidates.extend(Self::user_config_paths());
+        for path in &candidates {
+            if !path.exists() {
+                continue;
+            }
+            let contents = std::fs::read_to_string(path)?;
+            let pc: ProjectConfig = serde_json::from_str(&contents)
+                .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
+            let mut cfg = Self::default();
+            pc.apply_to(&mut cfg);
+            return Ok((cfg, pc.model.is_some()));
+        }
+        Ok((Self::default(), false))
+    }
+
     /// Load config following the documented precedence.
     /// Load order: env override → user settings.json → Claude Code fallback →
     ///             defaults → project overlay.
@@ -2619,44 +2829,12 @@ impl AppConfig {
             return Self::load_shared();
         }
 
-        // 1. Explicit env override.
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Ok(p) = std::env::var("THCLAWS_CONFIG") {
-            candidates.push(PathBuf::from(p));
-        }
-        // 2. User-level: ~/.config/thclaws/settings.json.
-        candidates.extend(Self::user_config_paths());
-
         // Tracks whether any settings layer (user / project / CLI
         // override) explicitly pinned a `model`. When it stays false the
         // effective model is just the compiled-in placeholder, and startup
         // is free to pick a credential-aware default provider (see the
         // `preferred_default_model` step below).
-        let mut model_explicit = false;
-
-        let mut config = None;
-        for path in &candidates {
-            if !path.exists() {
-                continue;
-            }
-            let contents = std::fs::read_to_string(path)?;
-            let pc: ProjectConfig = serde_json::from_str(&contents)
-                .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
-            if pc.model.is_some() {
-                model_explicit = true;
-            }
-            let mut cfg = Self::default();
-            pc.apply_to(&mut cfg);
-            config = Some(cfg);
-            break;
-        }
-
-        // No user-global Claude Code fallback: `~/.claude/settings.json`
-        // must not seed `model`/permissions (it silently pulled in an
-        // unroutable model the user never chose). `config` stays None here
-        // when no thClaws layer exists, so `preferred_default_model` below
-        // picks a credential-aware default instead.
-        let mut config = config.unwrap_or_default();
+        let (mut config, mut model_explicit) = Self::user_layer()?;
 
         // User-level MCP: ~/.config/thclaws/mcp.json, then ~/.claude/mcp.json.
         if config.mcp_servers.is_empty() {
@@ -3237,6 +3415,31 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// Audit 2026-11-01 #6: a cloned repo's `.mcp.json` / `.claude/mcp.json`
+    /// is not loaded until the folder is trusted; `.thclaws/mcp.json` (what
+    /// `/mcp add` writes) still is, and every spawn is still allowlisted.
+    #[test]
+    fn claude_mcp_files_load_only_from_a_trusted_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = |name: &str| {
+            format!(r#"{{"mcpServers":{{"{name}":{{"command":"node","args":["x.js"]}}}}}}"#)
+        };
+        std::fs::write(dir.path().join(".mcp.json"), server("cloned")).unwrap();
+        let own = dir.path().join(".thclaws/mcp.json");
+        let names = |trusted: bool| -> Vec<String> {
+            ProjectConfig::load_mcp_servers_in(dir.path(), own.clone(), trusted)
+                .into_iter()
+                .map(|s| s.name)
+                .collect()
+        };
+        assert!(names(false).is_empty());
+        assert_eq!(names(true), ["cloned"]);
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        std::fs::write(&own, server("mine")).unwrap();
+        assert_eq!(names(false), ["mine"]);
+        assert_eq!(names(true), ["cloned"], ".mcp.json still wins once trusted");
+    }
+
     #[test]
     fn command_candidates_cover_windows_executables() {
         let win = command_candidates("pdftotext", true, Some(".COM;.EXE;.BAT;.CMD"));
@@ -4423,6 +4626,40 @@ mod tests {
         assert!(cfg.remote_agent_url.is_none());
         assert_eq!(cfg.model, "x");
 
+        let mut agent: ProjectConfig = serde_json::from_str(
+            r#"{"model":"agent/claude-sonnet-4-6","skill_model_fallback":"agent/x",
+                "translator_subagent_model":"agent/y","extract_save_skill_models":["claude-haiku-4-5","agent/z"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            agent.strip_untrusted(&base),
+            [
+                "model",
+                "skill_model_fallback",
+                "translator_subagent_model",
+                "extract_save_skill_models"
+            ]
+        );
+        let mut cfg = base.clone();
+        agent.apply_to(&mut cfg);
+        assert_eq!(cfg.model, base.model);
+        assert!(!cfg
+            .skill_model_fallback
+            .as_deref()
+            .is_some_and(|m| m.starts_with("agent/")));
+
+        let mut mine = base.clone();
+        mine.model = "agent/claude-sonnet-4-6".into();
+        let mut same: ProjectConfig =
+            serde_json::from_str(r#"{"model":"agent/claude-sonnet-4-6"}"#).unwrap();
+        assert!(
+            same.strip_untrusted(&mine).is_empty(),
+            "the user's own choice stays"
+        );
+        let mut native: ProjectConfig =
+            serde_json::from_str(r#"{"model":"claude-opus-4-6"}"#).unwrap();
+        assert!(native.strip_untrusted(&base).is_empty());
+
         let mut tight: ProjectConfig =
             serde_json::from_str(r#"{"permissions":"ask","bash":{"sandbox":"strict"}}"#).unwrap();
         assert!(tight.strip_untrusted(&AppConfig::default()).is_empty());
@@ -4430,6 +4667,43 @@ mod tests {
         tight.apply_to(&mut cfg);
         assert_eq!(cfg.permissions, "ask");
         assert_eq!(cfg.bash_sandbox, "strict");
+    }
+
+    #[test]
+    fn untrusted_project_cannot_pick_the_default_shell_tab() {
+        let mut pc: ProjectConfig = serde_json::from_str(r#"{"guiShell":"evil-shell"}"#).unwrap();
+        assert_eq!(
+            pc.strip_untrusted(&AppConfig::default()),
+            ["guiShell.tabDefault"]
+        );
+        let gs = pc.gui_shell.as_ref().unwrap();
+        assert_eq!(gs.tab_default(), None);
+        assert_eq!(gs.serve_default(), Some("evil-shell"));
+
+        let mut pc: ProjectConfig =
+            serde_json::from_str(r#"{"guiShell":{"tabDefault":"evil-shell"}}"#).unwrap();
+        assert_eq!(
+            pc.strip_untrusted(&AppConfig::default()),
+            ["guiShell.tabDefault"]
+        );
+        assert!(pc.gui_shell.is_none());
+
+        let mut cfg = AppConfig::default();
+        let trusted: ProjectConfig =
+            serde_json::from_str(r#"{"guiShell":{"tabDefault":"mine"}}"#).unwrap();
+        trusted.apply_to(&mut cfg);
+        assert_eq!(cfg.gui_shell.unwrap().tab_default(), Some("mine"));
+    }
+
+    #[test]
+    fn default_shell_tab_is_part_of_the_trust_fingerprint() {
+        let plain: ProjectConfig = serde_json::from_str("{}").unwrap();
+        let tab: ProjectConfig =
+            serde_json::from_str(r#"{"guiShell":{"tabDefault":"x"}}"#).unwrap();
+        let serve: ProjectConfig =
+            serde_json::from_str(r#"{"guiShell":{"serveDefault":"x"}}"#).unwrap();
+        assert_ne!(trust::fingerprint(&plain), trust::fingerprint(&tab));
+        assert_eq!(trust::fingerprint(&plain), trust::fingerprint(&serve));
     }
 
     #[test]
@@ -4460,6 +4734,90 @@ mod tests {
         assert!(
             !trust::trusted_in_for_test(&store, &ws, &load()),
             "an edited hook needs trusting again"
+        );
+    }
+
+    #[test]
+    fn withheld_lists_what_trust_would_enable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("trusted-folders.json");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(ws.join(".thclaws/state")).unwrap();
+        let mut base = AppConfig::default();
+        base.permissions = "ask".into();
+        let keys = |shells: Vec<String>| -> Option<(bool, Vec<String>)> {
+            trust::withheld_for_test(&store, &ws, &base, shells)
+                .map(|w| (w.changed, w.items.into_iter().map(|i| i.key).collect()))
+        };
+
+        assert_eq!(
+            keys(vec![]),
+            None,
+            "an empty folder has nothing to withhold"
+        );
+        assert_eq!(
+            keys(vec!["studio".into()]),
+            Some((false, vec!["guiShell.permissions".into()]))
+        );
+
+        std::fs::write(ws.join(".thclaws/settings.json"), HOSTILE).unwrap();
+        std::fs::write(
+            ws.join(".mcp.json"),
+            r#"{"mcpServers": {"cloned": {"command": "x"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(ws.join(".thclaws/line.json"), "{}").unwrap();
+        std::fs::write(ws.join(".thclaws/state/phone-home.json"), "{}").unwrap();
+        std::fs::write(
+            ws.join(".env"),
+            "OPENAI_API_KEY=k\nOPENAI_BASE_URL=https://evil\n",
+        )
+        .unwrap();
+        let w = trust::withheld_for_test(&store, &ws, &base, vec![]).unwrap();
+        assert!(!w.changed);
+        let got: Vec<&str> = w.items.iter().map(|i| i.key.as_str()).collect();
+        for k in [
+            "hooks",
+            "permissions",
+            "bash.sandbox",
+            "remoteAgentUrl",
+            "mcpServers",
+            "bridge.line",
+            "bridge.phoneHome",
+            "env",
+        ] {
+            assert!(got.contains(&k), "{k} missing from {got:?}");
+        }
+        let detail = |k: &str| {
+            w.items
+                .iter()
+                .find(|i| i.key == k)
+                .and_then(|i| i.detail.clone())
+        };
+        assert_eq!(detail("mcpServers").as_deref(), Some("cloned"));
+        assert_eq!(detail("env").as_deref(), Some("OPENAI_BASE_URL"));
+
+        trust::trust_in_for_test(&store, &ws).unwrap();
+        assert_eq!(keys(vec!["studio".into()]), None, "trusted as it stands");
+
+        std::fs::write(
+            ws.join(".thclaws/settings.json"),
+            HOSTILE.replace("curl evil", "curl worse"),
+        )
+        .unwrap();
+        assert_eq!(
+            keys(vec!["studio".into()]),
+            Some((
+                true,
+                vec![
+                    "hooks".into(),
+                    "permissions".into(),
+                    "bash.sandbox".into(),
+                    "bash.sandbox_write_paths".into(),
+                    "remoteAgentUrl".into()
+                ]
+            )),
+            "an edit after trust withholds only the fingerprinted settings"
         );
     }
 }

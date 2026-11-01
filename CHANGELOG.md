@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.150.0] — 2026-11-01
+
+**A security release: tighter sandboxing on every platform, a "trust this folder" prompt, and `/cloud push`/`pull` fixes for agent workspaces.** Some defaults are stricter; read *Changed* before upgrading a server.
+
+### Added
+
+- **"Trust this folder?" banner.** A folder's own settings that can run code or grant permissions are held back until you trust it: hooks, permission mode, Bash sandbox settings, MCP servers from `.mcp.json`, chat-bridge bindings, gui-shells that ask for permissions. The banner lists what would be enabled. On the desktop, trusting needs a confirmation in a native system dialog, so a page inside the app can't approve it. If the settings change after you trust a folder, it asks again. Agents installed from the official thClaws catalog are trusted automatically.
+- **A banner when Bash runs without a sandbox** (Windows, or Linux without Landlock or bubblewrap). The approval prompt says so too.
+- **thclaws.cloud plan usage** shows as two live bars (5 hours, 7 days) in the sidebar.
+
+### Changed
+
+- **A loopback `--serve` now always requires a token.** With no `THCLAWS_SERVE_TOKEN`, it makes one at startup and prints `http://…/?token=…`. Scripts that called `/ws`, `/upload` or `/file-asset` on 127.0.0.1 without a bearer get 401. Set your own `THCLAWS_SERVE_TOKEN`, or `THCLAWS_SERVE_BEHIND_PROXY=1` if an authenticating proxy is in front. `/healthz` and `/v1` are unchanged. A `--bind 0.0.0.0` server still needs `THCLAWS_SERVE_TOKEN` set by you.
+- **Agents can't write the workspace's own configuration.** Write, Edit and sandboxed Bash are refused for `.thclaws/`, `.claude/`, `.mcp.json`, `.env` and `.env.*` (except `.env.example`, `.env.sample`, `.env.template`), `.git/config`, `.git/hooks/` and `.git/info/`. Writing `AGENTS.md` or `CLAUDE.md` always asks first, even in auto mode. In an existing repository, sandboxed `git config`, `git remote add` and `git submodule add` now fail; run them yourself.
+- **The project `.mcp.json` and `.claude/mcp.json` load only in a trusted folder.** `.thclaws/mcp.json` is unchanged. An approved MCP server is approved for its exact command, environment and working directory; its `env` can't set `PATH`, `NODE_OPTIONS` or the other blocked variables.
+- **Chat bridges:** a project's LINE, Telegram, Messenger or Remote binding reconnects at startup only in a trusted folder. `!command` from a chat is refused. In Telegram groups, only users in `allow_from` can approve a tool call. An EE policy with `allow_remote: false` now turns off every bridge, not only thClaws Remote.
+- **`agent/*` models run without Claude Code's built-in tools**, so Bash, Write and the rest go through thClaws' own tools, sandbox and approvals. A folder you haven't trusted can't select an `agent/*` model.
+
+### Fixed
+
+- **`/cloud push`, `pull` and `revision` in a multi-agent workspace move the whole workspace,** not just the agent's own folder. Pull is no longer blocked by agent-team logs and locks that change on both ends, or by a session file the app rewrote when it opened.
+- **`/cloud pull` doesn't bring in git hooks.** A pulled `.git/config` that changes a setting able to run commands (`core.fsmonitor`, `core.sshCommand`, `alias.x = !…`, filters, credential helpers, includes) keeps your local file. The pull says what it skipped.
+- **thClaws's own `git` calls never run a repository's hooks or fsmonitor.**
+- **Bash and the Terminal can no longer reach the app's own server.** The token isn't passed through the environment, the Terminal opens only for the app's own window or browser tab, and on macOS sandboxed Bash can't connect to thClaws's ports.
+- **Windows:** paths like `\\server\share` are refused before anything touches the network. Agent and sync archives can't write outside their folder. Stop and timeouts end the whole process tree. `cmd.exe` no longer runs programs from the current folder ahead of `PATH`. Hook commands can't be injected through `%THCLAWS_TOOL_OUTPUT%`, and `.env` can't move `USERPROFILE` or `APPDATA`.
+- **Shared (multi-user) workspaces keep every member in their own folder,** including tool calls from gui-shells, workflows and office tools. Members can't add stdio MCP servers or install plugins. KMS is per member. Bash refuses to run when it can't be sandboxed.
+- **File uploads can't be redirected through a symlink,** and the `_uploads` folder is checked before it is created.
+
 ## [0.149.0] — 2026-10-29
 
 **Windows workspaces upgrade again.** The fix for #226 in 0.148 addressed the wrong cause. This release removes the real one, and was tested on Windows 11.

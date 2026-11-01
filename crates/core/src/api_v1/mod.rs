@@ -320,6 +320,7 @@ pub async fn spawn_loopback() -> std::io::Result<String> {
 
     let bind = format!("{bind_host}:{port}");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
+    crate::confine::register_engine_port(port);
     // Advertise via 127.0.0.1 in the URL even when bound to 0.0.0.0 —
     // in-process callers always want loopback, and the env var
     // override is purely for in-from-the-container reach.

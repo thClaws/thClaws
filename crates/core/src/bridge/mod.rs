@@ -15,6 +15,26 @@ pub mod protocol;
 pub use client::{BridgeClient, BridgeClientError, BridgeEnvelopeSink};
 pub use protocol::{parse_envelope, QuickReplyButton, ReplyBody, WsEnvelope, WsIncoming};
 
+/// Whether chat-bridge bindings in `dir`'s `.thclaws/` may connect on
+/// their own and carry a relay override. They have no fingerprint, so
+/// they follow the project `.env`: a folder the user trusted.
+pub fn folder_trusted(dir: &std::path::Path) -> bool {
+    crate::config::trust::is_folder_trusted(dir)
+}
+
+/// Refusal for starting chat bridge `channel` under org policy.
+/// `runtime.allow_remote = false` covers every channel that lets someone
+/// off this machine drive the agent, not only thClaws Remote.
+pub fn policy_refusal(channel: &str) -> Option<String> {
+    policy_refusal_for(crate::policy::remote_allowed(), channel)
+}
+
+fn policy_refusal_for(allowed: bool, channel: &str) -> Option<String> {
+    (!allowed).then(|| {
+        format!("{channel} is disabled by org policy (policies.runtime.allow_remote = false)")
+    })
+}
+
 /// Per-channel relay config the shared bridge transport needs. A
 /// channel (LINE, Messenger, …) implements the four accessors +
 /// optional [`route_prefix`](BridgeConfig::route_prefix); the URL
@@ -115,7 +135,7 @@ pub trait BridgeConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::BridgeConfig;
+    use super::{policy_refusal_for, BridgeConfig};
 
     struct TestCfg {
         token: String,
@@ -146,6 +166,44 @@ mod tests {
             override_url: override_url.map(str::to_string),
             prefix,
         }
+    }
+
+    #[test]
+    fn policy_without_remote_refuses_every_bridge() {
+        assert!(policy_refusal_for(true, "LINE").is_none());
+        let msg = policy_refusal_for(false, "Telegram").unwrap();
+        assert!(msg.starts_with("Telegram is disabled by org policy"));
+    }
+
+    #[test]
+    fn untrusted_project_binding_loses_its_relay_override() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".thclaws/state")).unwrap();
+        let body = r#"{"binding_token":"t","server_url":"https://evil.example"}"#;
+        for f in ["line.json", "messenger.json", "state/phone-home.json"] {
+            std::fs::write(dir.path().join(".thclaws").join(f), body).unwrap();
+        }
+        let d = dir.path();
+        let line = |t| crate::line::LineConfig::load_in(d, t).unwrap().unwrap();
+        let msgr = |t| {
+            crate::messenger::MessengerConfig::load_in(d, t)
+                .unwrap()
+                .unwrap()
+        };
+        let ph = |t| {
+            crate::phone_home::PhoneHomeConfig::load_in(d)
+                .unwrap()
+                .unwrap()
+                .gated(t)
+        };
+        assert_eq!(line(false).server_url, None);
+        assert_eq!(msgr(false).server_url, None);
+        assert_eq!(ph(false).server_url, None);
+        assert_eq!(line(false).binding_token, "t");
+        let evil = Some("https://evil.example".to_string());
+        assert_eq!(line(true).server_url, evil);
+        assert_eq!(msgr(true).server_url, evil);
+        assert_eq!(ph(true).server_url, evil);
     }
 
     #[test]

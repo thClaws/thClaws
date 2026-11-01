@@ -84,6 +84,13 @@ pub fn resolve_cloud_url(cli_override: Option<&str>, config: Option<&CloudConfig
     }
 }
 
+/// Whether `url` is the catalog this install answers to on its own (org
+/// policy, `THCLAWS_CLOUD_URL`, or thclaws.cloud) rather than one a project's
+/// settings or a flag pointed it at.
+pub fn is_own_catalog(url: &str) -> bool {
+    url.trim_end_matches('/') == resolve_cloud_url(None, None)
+}
+
 /// URL resolved purely from persisted state (no `--cloud-url` flag).
 /// Used by the IPC handler that powers the Settings modal — the modal
 /// only ever shows what's persisted, not anything an in-process flag

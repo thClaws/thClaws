@@ -20,7 +20,7 @@
 //! a token never has to be written to disk in CI / container runs.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -205,7 +205,15 @@ impl TelegramConfig {
     /// moving their `telegram.json` into the target project's
     /// `.thclaws/` folder.
     pub fn load() -> Result<Option<Self>, TelegramConfigError> {
-        let project_path = Self::path()?;
+        Self::load_from(Self::path()?)
+    }
+
+    /// [`load`](Self::load) against `dir` instead of the cwd.
+    pub fn load_in(dir: &Path) -> Result<Option<Self>, TelegramConfigError> {
+        Self::load_from(dir.join(".thclaws").join("telegram.json"))
+    }
+
+    fn load_from(project_path: PathBuf) -> Result<Option<Self>, TelegramConfigError> {
         match std::fs::read_to_string(&project_path) {
             Ok(body) => {
                 return serde_json::from_str(&body).map(Some).map_err(|source| {
@@ -305,6 +313,13 @@ impl TelegramConfig {
     /// `Allowlist` policy: only known ids, full stop.
     pub fn allows_dm(&self, user_id: i64) -> bool {
         self.allow_from.iter().any(|id| id == &user_id.to_string())
+    }
+
+    /// True when `user_id` may answer a tool approval. Only `allow_from`
+    /// counts: an allowlisted group or channel discussion lets its
+    /// members talk to the bot, not approve what it runs.
+    pub fn may_approve(&self, user_id: Option<i64>) -> bool {
+        user_id.is_some_and(|id| self.allows_dm(id))
     }
 
     /// True when a group `chat_id` should be served.
@@ -481,6 +496,23 @@ mod tests {
         };
         assert!(c.allows_dm(111));
         assert!(!c.allows_dm(222));
+    }
+
+    #[test]
+    fn only_allow_from_users_may_approve() {
+        let mut c = TelegramConfig {
+            allow_from: vec!["111".into()],
+            group_policy: GroupPolicy::Open,
+            ..Default::default()
+        };
+        c.groups
+            .insert("-100".into(), TelegramGroupConfig::default());
+        assert!(c.may_approve(Some(111)));
+        assert!(
+            !c.may_approve(Some(222)),
+            "a group member is not an approver"
+        );
+        assert!(!c.may_approve(None));
     }
 
     #[test]

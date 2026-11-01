@@ -835,6 +835,7 @@ pub(crate) async fn get_lines(
     // misleading "no API key found for provider 'anthropic'". These keys
     // are carried forward after extraction (see `restore_installer_settings`).
     let prior_settings = std::fs::read(target.join(".thclaws").join("settings.json")).ok();
+    let auto_trust = may_auto_trust(&target, &url, dl.official);
 
     lines.push(format!("Extracting to {} …", target.display()));
     // After the UUID match (or empty target, or --force) we always
@@ -892,7 +893,29 @@ pub(crate) async fn get_lines(
             ));
         }
     }
+    if auto_trust {
+        match crate::config::trust::trust_folder(&target) {
+            Ok(()) => {
+                lines.push("  Trusted this folder: it holds an official thClaws agent.".into())
+            }
+            Err(e) => lines.push(format!("  warning: couldn't trust this folder ({e})")),
+        }
+    }
     GetOutcome::ok(lines)
+}
+
+/// Whether installing an official (platform-owned) agent from `url` into
+/// `target` may trust the folder, so the agent's own gui-shell, hooks and
+/// bindings work: only from this install's own catalog, and only when
+/// nothing in the folder was already waiting on trust, which would
+/// otherwise ride in with the agent.
+fn may_auto_trust(target: &Path, url: &str, official: bool) -> bool {
+    if !official || crate::config::trust::hosted() || !crate::cloud::is_own_catalog(url) {
+        return false;
+    }
+    let shells = target.join(".thclaws").join("gui-shell");
+    let no_shells = std::fs::read_dir(&shells).map_or(true, |mut d| d.next().is_none());
+    no_shells && crate::config::trust::withheld(target, Vec::new()).is_none()
 }
 
 /// Keys in `.thclaws/settings.json` that belong to the installing user's
@@ -1095,6 +1118,40 @@ fn post_install_hint_lines(m: &crate::cloud::manifest::Manifest, target: &Path) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_clean_folder_from_the_own_catalog_is_auto_trusted() {
+        let own = crate::cloud::resolve_cloud_url(None, None);
+        let empty = tempfile::tempdir().unwrap();
+        assert!(super::may_auto_trust(empty.path(), &own, true));
+        assert!(
+            !super::may_auto_trust(empty.path(), &own, false),
+            "a third-party agent, or a server too old to say"
+        );
+        assert!(!super::may_auto_trust(
+            empty.path(),
+            "https://catalog.evil.example",
+            true
+        ));
+
+        let cloned = tempfile::tempdir().unwrap();
+        std::fs::write(
+            cloned.path().join(".mcp.json"),
+            r#"{"mcpServers": {"x": {"command": "x"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            !super::may_auto_trust(cloned.path(), &own, true),
+            "a waiting .mcp.json"
+        );
+
+        let shelled = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(shelled.path().join(".thclaws/gui-shell/x")).unwrap();
+        assert!(
+            !super::may_auto_trust(shelled.path(), &own, true),
+            "a shell already there"
+        );
+    }
+
     /// A pull with media in it runs for minutes writing nothing to the
     /// folder — without a readout it reads as a hang, and users kill it
     /// mid-transfer. A chunked response has no total, and must still
@@ -1373,6 +1430,28 @@ mod tests {
     }
 
     #[test]
+    fn guard_ignores_engine_churn_but_not_sessions_under_a_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let log = ".thclaws/bots/main/.thclaws/state/team/agents/lead/output.log";
+        let sess = ".thclaws/bots/main/.thclaws/state/sessions/s1.jsonl";
+        let base = vec![ent("plan.md", "p"), ent(log, "l0"), ent(sess, "s0")];
+        wssync::write_sync_base_manifests(cwd, &base, &base).unwrap();
+
+        let local = vec![ent("plan.md", "p"), ent(log, "l_local"), ent(sess, "s0")];
+        let remote = vec![ent("plan.md", "p2"), ent(log, "l_cloud"), ent(sess, "s0")];
+        assert!(guard_divergence(cwd, "ws", &local, &remote, false).is_ok());
+
+        let local_s = vec![ent("plan.md", "p"), ent(log, "l0"), ent(sess, "s_local")];
+        let remote_s = vec![ent("plan.md", "p"), ent(log, "l0"), ent(sess, "s_cloud")];
+        let err = guard_divergence(cwd, "ws", &local_s, &remote_s, false).unwrap_err();
+        assert!(
+            err.contains("BOTH ends") && err.contains("s1.jsonl"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn guard_falls_back_to_the_v1_fingerprint_without_a_per_file_base() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
@@ -1613,7 +1692,12 @@ fn guard_divergence(
         }
         return Ok(());
     };
-    let r = wssync::reconcile(&base_local, &base_remote, local, remote);
+    let mut r = wssync::reconcile(&base_local, &base_remote, local, remote);
+    // Engine churn changes on both ends just by running; it still rides the
+    // sync (and --force still backs it up) but never blocks it.
+    for v in [&mut r.push, &mut r.pull, &mut r.conflicts] {
+        v.retain(|p| !wssync::is_engine_churn(p));
+    }
     // Only the far end's edits are at risk: a push is free to overwrite files
     // that only this machine changed, and vice-versa.
     let theirs = if is_push { &r.pull } else { &r.push };
@@ -1907,7 +1991,9 @@ async fn sync_inner(
                     let f =
                         std::fs::File::open(tmp.path()).map_err(|e| format!("open temp: {}", e))?;
                     emit(format!("  unpacking {} file(s)…", download.len()));
-                    wssync::untar_workspace_from(f, cwd, false)?;
+                    for n in wssync::untar_workspace_from(f, cwd, false)?.notes {
+                        emit(format!("  ⚠ {n}"));
+                    }
                 }
                 let deleted = if opts.delete && !extraneous.is_empty() {
                     wssync::trash_paths(cwd, &extraneous)?.deleted
@@ -1962,6 +2048,9 @@ async fn sync_inner(
                 let f = std::fs::File::open(tmp.path()).map_err(|e| format!("open temp: {}", e))?;
                 emit(format!("  unpacking {} file(s)…", stat.file_count));
                 let r = wssync::untar_workspace_from(f, cwd, opts.delete)?;
+                for n in &r.notes {
+                    emit(format!("  ⚠ {n}"));
+                }
                 write_pull_binding(cwd, &ws, &url, &local_binding, revision)?;
                 emit(format!(
                     "✓ pulled {} file(s){} into {} — rev {}",

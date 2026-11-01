@@ -199,6 +199,18 @@ fn spawn_event_translator(handle: &SharedSessionHandle, proxy: EventLoopProxy<Us
 /// Windows MessageBox enforces "Yes"/"No" labels; `yes_label`/`no_label`
 /// are only honoured on macOS and Linux, with the message text carrying
 /// the intent on Windows.
+/// Trusting a folder lets its settings run code, so on the desktop it takes
+/// a native dialog: a gui-shell sharing the page's origin can press the
+/// banner's button, not this.
+fn confirm_trust(dir: &std::path::Path) -> bool {
+    native_confirm(
+        "ไว้ใจโฟลเดอร์นี้",
+        &crate::ipc::trust_prompt_text(dir),
+        "ไว้ใจ",
+        "ไม่ตอนนี้",
+    )
+}
+
 pub(crate) fn native_confirm(title: &str, message: &str, yes_label: &str, no_label: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -1166,6 +1178,16 @@ fn run_gui_inner(
                 let decoded = urlencoding::decode(rest)
                     .map(|c| c.into_owned())
                     .unwrap_or_else(|_| rest.to_string());
+                // Before the `is_file` probe below: on Windows that probe
+                // alone sends the user's NTLM hash to a `\\host\share`.
+                if crate::sandbox::is_remote_or_device_path(&decoded)
+                    || crate::sandbox::is_remote_or_device_path(&format!("/{decoded}"))
+                {
+                    return Response::builder()
+                        .status(403)
+                        .body(Cow::Borrowed(&b"forbidden"[..]))
+                        .expect("build 403");
+                }
                 // Two URL shapes both reach this route — match the
                 // dual-path lookup in server.rs::serve_project_asset:
                 //   - FilesView builds absolute paths (`/Users/.../foo.png`);
@@ -1295,6 +1317,17 @@ fn run_gui_inner(
         .with_devtools(devtools_on)
         .with_ipc_handler(move |req| {
             let body = req.body();
+            let top_frame = crate::ipc::is_top_frame_uri(&req.uri().to_string());
+            if !top_frame
+                && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|m| {
+                    m.get("type")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(crate::ipc::top_frame_only)
+                })
+            {
+                eprintln!("[ipc] refused a trust frame from {}", req.uri());
+                return;
+            }
             // dev-plan/59 §7.6 step 3: in host mode every frame belongs to a
             // bot. Forwarded verbatim — the host does not parse the protocol,
             // and a frame it does not recognise is an agent frame, which is
@@ -1368,6 +1401,7 @@ fn run_gui_inner(
                     };
                     let initial_tab = std::fs::read_to_string(dir.join(".thclaws/settings.json"))
                         .ok()
+                        .filter(|_| crate::config::trust::is_folder_trusted(&dir))
                         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
                         .and_then(|v| v.get("guiShell").cloned())
                         .and_then(|g| {
@@ -1424,6 +1458,36 @@ fn run_gui_inner(
                         serde_json::json!({ "type": "confirm_result", "id": id, "ok": ok })
                             .to_string(),
                     ));
+                    return;
+                }
+                // Trust belongs to the window too: the bot's `--serve` takes
+                // it only from a browser, and this bridge isn't one. The
+                // agent's folder is what its process loads settings from.
+                if kind == "workspace_trust" {
+                    let slug = bridge_for_ipc
+                        .lock()
+                        .ok()
+                        .and_then(|b| b.as_ref().map(|b| b.slug.clone()))
+                        .unwrap_or_default();
+                    let Some(root) = host_root_for_ipc.as_ref().filter(|_| !slug.is_empty())
+                    else {
+                        return;
+                    };
+                    let dir = crate::bots::resolve_agent_dir(root, &slug);
+                    if !confirm_trust(&dir) {
+                        let _ = proxy_for_bots
+                            .send_event(UserEvent::Dispatch(crate::ipc::trust_declined_frame()));
+                        return;
+                    }
+                    let (ok, frame) = crate::ipc::trust_workspace(&dir);
+                    let _ = proxy_for_bots.send_event(UserEvent::Dispatch(frame.to_string()));
+                    if ok {
+                        if let Ok(link) = bridge_for_ipc.lock() {
+                            if let Some(bridge) = link.as_ref() {
+                                bridge.send(r#"{"type":"workspace_trust_apply"}"#.to_string());
+                            }
+                        }
+                    }
                     return;
                 }
                 if kind == "pick_directory" {
@@ -1663,6 +1727,15 @@ fn run_gui_inner(
                             }
                         }
                     }
+                }
+                if msg.get("type").and_then(|t| t.as_str()) == Some("workspace_trust") {
+                    let dir = std::env::current_dir().unwrap_or_default();
+                    if confirm_trust(&dir) {
+                        crate::ipc::trust_and_apply(&ipc_ctx, &dir);
+                    } else {
+                        (ipc_ctx.dispatch)(crate::ipc::trust_declined_frame());
+                    }
+                    return;
                 }
                 if crate::ipc::handle_ipc(msg.clone(), &ipc_ctx) {
                     return;

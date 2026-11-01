@@ -69,6 +69,10 @@ impl MessengerMessageHandler for HeadlessAgentHandler {
 /// Run the headless Messenger bridge until Ctrl-C or a fatal error.
 /// Blocks for the process lifetime.
 pub async fn run(config: AppConfig) -> Result<()> {
+    if let Some(why) = crate::bridge::policy_refusal("Messenger") {
+        eprintln!("\x1b[31m[messenger] refused: {why}\x1b[0m");
+        std::process::exit(1);
+    }
     // 1. Resolve the binding config (relay URL + binding JWT).
     let Some(msgr_cfg) = MessengerConfig::load().ok().flatten() else {
         eprintln!(

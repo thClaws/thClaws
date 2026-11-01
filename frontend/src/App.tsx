@@ -65,6 +65,8 @@ import { useEditingShortcuts } from "./hooks/useEditingShortcuts";
 import { send, subscribe, type IPCMessage } from "./hooks/useIPC";
 import { useBranding } from "./hooks/useBranding";
 import { DesktopUpdateBanner } from "./components/DesktopUpdateBanner";
+import { ConfinementBanner } from "./components/ConfinementBanner";
+import { TrustBanner } from "./components/TrustBanner";
 
 type Tab = "terminal" | "chat" | "files" | "team" | "ui" | "shell" | "browser";
 
@@ -1212,6 +1214,8 @@ export default function App() {
         </div>
       )}
       <DesktopUpdateBanner />
+      <ConfinementBanner />
+      {!fullscreen && <TrustBanner />}
       {fullscreen && (
         <FullscreenExitChrome
           onExit={() => setFullscreen(false)}

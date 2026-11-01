@@ -7,9 +7,54 @@ import { KmsCreateModal, type KmsCreateMode } from "./KmsCreateModal";
 import { CtxMenuItem } from "./CtxMenuItem";
 
 type QuotaPeriod = { used_credits: number; limit_credits: number | null };
-type OrgQuota = { month: QuotaPeriod; day?: QuotaPeriod | null };
+type PlanWindow = { used_pct: number | null; resets_at: string | null };
+/** EE quota mode carries `month`/`day` credits; thclaws.cloud plan mode
+ *  carries `windows` (% of a 5-hour and a 7-day window). */
+type OrgQuota = {
+  month?: QuotaPeriod | null;
+  day?: QuotaPeriod | null;
+  plan?: { label: string } | null;
+  unlimited?: boolean;
+  warn_pct?: number;
+  windows?: { "5h": PlanWindow; "7d": PlanWindow };
+};
 
 const fmtCredits = (n: number) => Math.round(n).toLocaleString("en-US");
+
+/// Plan usage as two thin bars that move after every turn — the user sees
+/// a big model eat the window and picks a lighter one on their own.
+function PlanBars({ q }: { q: OrgQuota }) {
+  if (!q.windows || q.unlimited) return null;
+  if (!q.plan) {
+    return (
+      <div className="ml-3 mt-1" style={{ fontSize: "10px", color: "var(--warning, #d19a66)" }}>
+        No thClaws plan — choose one on thclaws.cloud
+      </div>
+    );
+  }
+  const warn = q.warn_pct ?? 80;
+  return (
+    <div className="ml-3 mt-1" style={{ fontSize: "10px", color: "var(--text-secondary)" }}>
+      {(["5h", "7d"] as const).map((k) => {
+        const w = q.windows![k];
+        const pct = Math.min(100, w.used_pct ?? 0);
+        const color = pct >= 100 ? "var(--danger, #e06c75)" : pct >= warn ? "var(--warning, #d19a66)" : "var(--accent)";
+        const reset = w.resets_at ? `resets ${new Date(w.resets_at).toLocaleString()}` : "starts on next use";
+        return (
+          <div key={k} title={`${k === "5h" ? "5-hour" : "7-day"} limit · ${pct}% used · ${reset}`} style={{ marginTop: 3 }}>
+            <div className="flex justify-between">
+              <span>{k === "5h" ? "5 hr" : "7 days"}</span>
+              <span style={{ color }}>{pct}%</span>
+            </div>
+            <div style={{ height: 3, borderRadius: 2, background: "var(--bg-tertiary)", overflow: "hidden" }}>
+              <div style={{ width: `${pct}%`, height: "100%", background: color }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function quotaLine(p: QuotaPeriod | null | undefined, label: string): string {
   if (!p) return `no limit ${label}`;
@@ -162,6 +207,16 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
       send({ type: "cloud_quota" });
     }
   }, [branding.org_cloud_url, providerReady]);
+  // A thclaws.cloud plan's windows move with every model call, from any
+  // device: ask on start and every minute (the engine answers null when not
+  // signed in, without a network call), and after each turn (below).
+  useEffect(() => {
+    send({ type: "cloud_quota" });
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") send({ type: "cloud_quota" });
+    }, 60_000);
+    return () => clearInterval(t);
+  }, []);
   // Inline model picker dropdown anchored to the Provider section.
   // null means closed; opens on click of the active model row. #49.
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -239,7 +294,7 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
       } else if (msg.type === "cloud_quota_result") {
         setOrgQuota((msg.quota as OrgQuota | null) ?? null);
       } else if (msg.type === "chat_done") {
-        if (orgCloudUrlRef.current) send({ type: "cloud_quota" });
+        send({ type: "cloud_quota" });
       } else if (msg.type === "cloud_whoami_result") {
         setOrgAccount(typeof msg.email === "string" ? (msg.email as string) : null);
       } else if (msg.type === "cloud_sign_out_result") {
@@ -530,7 +585,8 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
               </button>
             </div>
           )}
-          {providerReady && branding.org_cloud_url && orgQuota && (
+          {orgQuota?.windows && <PlanBars q={orgQuota} />}
+          {providerReady && branding.org_cloud_url && orgQuota?.month && (
             <div
               className="ml-3 mt-1"
               style={{ fontSize: "10px", color: "var(--text-secondary)" }}

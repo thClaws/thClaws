@@ -17,7 +17,7 @@
 //! fallback only when env var `THCLAWS_MESSENGER_USER_CONFIG=1` is
 //! set, so pre-Tier 2 installs keep working until the user migrates.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -100,15 +100,31 @@ impl MessengerConfig {
     /// Read from disk. Project path first; legacy user path as
     /// opt-in fallback. `Ok(None)` when both are absent.
     pub fn load() -> Result<Option<Self>, MessengerConfigError> {
-        let project_path = Self::path()?;
+        let cwd = std::env::current_dir().map_err(|source| MessengerConfigError::Io {
+            path: PathBuf::from("."),
+            source,
+        })?;
+        Self::load_in(&cwd, crate::bridge::folder_trusted(&cwd))
+    }
+
+    /// [`load`](Self::load) against `dir`. A relay override in the
+    /// project file of a folder that isn't `trusted` is dropped, so a
+    /// cloned repo can't point the bridge at its own relay.
+    pub fn load_in(dir: &Path, trusted: bool) -> Result<Option<Self>, MessengerConfigError> {
+        let project_path = dir.join(".thclaws").join("messenger.json");
         match std::fs::read_to_string(&project_path) {
             Ok(body) => {
-                return serde_json::from_str(&body).map(Some).map_err(|source| {
-                    MessengerConfigError::Json {
+                return serde_json::from_str::<Self>(&body)
+                    .map(|mut c| {
+                        if !trusted {
+                            c.server_url = None;
+                        }
+                        Some(c)
+                    })
+                    .map_err(|source| MessengerConfigError::Json {
                         path: project_path,
                         source,
-                    }
-                });
+                    });
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => {

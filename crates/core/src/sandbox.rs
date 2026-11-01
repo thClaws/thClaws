@@ -54,11 +54,23 @@ impl Sandbox {
     /// per-session and follows the task across runtime threads. Single-
     /// tenant / desktop / CLI never scope it, so the global path is
     /// unchanged.
+    ///
+    /// A multiuser process outside any member scope gets `None` here, never
+    /// the pod root; use [`Self::try_root`] where `None` would mean "allow".
     pub fn root() -> Option<PathBuf> {
+        Self::try_root().ok().flatten()
+    }
+
+    /// [`Self::root`], but an error in a multiuser process with no member
+    /// scope active (a thread or task that dropped it): callers fail closed.
+    pub fn try_root() -> Result<Option<PathBuf>> {
         if crate::workdir::workdir_is_scoped() {
-            return Some(crate::workdir::current_workdir());
+            return Ok(Some(crate::workdir::current_workdir()));
         }
-        SANDBOX_ROOT.read().ok()?.clone()
+        if crate::workdir::is_multiuser() {
+            return Err(Error::Tool(crate::workdir::UNSCOPED_REFUSAL.into()));
+        }
+        Ok(SANDBOX_ROOT.read().ok().and_then(|r| r.clone()))
     }
 
     /// Clear the global sandbox root back to its initial unset state.
@@ -84,13 +96,17 @@ impl Sandbox {
     /// of `.thclaws/`) and are writable like any other project subdirectory.
     pub fn check_write(path: &str) -> Result<PathBuf> {
         let resolved = Self::check(path)?;
-        if let Some(root) = Self::root() {
+        if let Some(root) = Self::try_root()? {
             return Self::enforce_write_policy(&root, resolved);
         }
         Ok(resolved)
     }
 
-    fn enforce_write_policy(root: &Path, resolved: PathBuf) -> Result<PathBuf> {
+    fn enforce_write_policy_with(
+        root: &Path,
+        resolved: PathBuf,
+        allow_instructions: bool,
+    ) -> Result<PathBuf> {
         // finding 11: an agent's own folder sits under `.thclaws/bots/<slug>/`,
         // so the blanket deny below also locked an agent out of its own state —
         // Book Author could not write the `book.json` it reads every turn. That
@@ -107,8 +123,13 @@ impl Sandbox {
                 return Ok(resolved);
             }
         }
-        let protected = root.join(".thclaws");
-        if resolved == protected || resolved.starts_with(&protected) {
+        let Some(hit) = protected_match(root, &resolved) else {
+            return Ok(resolved);
+        };
+        if allow_instructions && hit.kind == ProtectedKind::Instructions {
+            return Ok(resolved);
+        }
+        if hit.rel == ".thclaws" {
             return Err(Error::Tool(format!(
                 "access denied: {} is inside .thclaws/ — that directory is reserved for team \
                  state (settings, agents, inboxes, tasks). Write shared artifacts to the \
@@ -116,7 +137,40 @@ impl Sandbox {
                 resolved.display()
             )));
         }
+        Err(Error::Tool(format!(
+            "access denied: {} is a protected path ({}) — thClaws or git loads it as \
+             configuration or instructions, so agent tools may not write it. Ask the user \
+             to edit it themselves.",
+            resolved.display(),
+            hit.rel
+        )))
+    }
+
+    /// `check_write` for a write the user approved explicitly: Write/Edit
+    /// force an approval prompt for root `AGENTS.md`/`CLAUDE.md`
+    /// ([`forces_instructions_approval`]), and the Files tab is the user's
+    /// own hand, so those two may write the instruction files. Every other
+    /// protected path stays denied.
+    pub fn check_write_approved(path: &str) -> Result<PathBuf> {
+        let resolved = Self::check(path)?;
+        if let Some(root) = Self::root() {
+            return Self::enforce_write_policy_with(&root, resolved, true);
+        }
         Ok(resolved)
+    }
+
+    /// Whether a Write/Edit of `path` targets the workspace's own
+    /// `AGENTS.md`/`CLAUDE.md`, which needs an approval prompt even in
+    /// auto mode — they are loaded into every later system prompt.
+    pub fn forces_instructions_approval(path: &str) -> bool {
+        let (Some(root), Ok(resolved)) = (Self::root(), Self::check(path)) else {
+            return false;
+        };
+        protected_match(&root, &resolved).is_some_and(|h| h.kind == ProtectedKind::Instructions)
+    }
+
+    fn enforce_write_policy(root: &Path, resolved: PathBuf) -> Result<PathBuf> {
+        Self::enforce_write_policy_with(root, resolved, false)
     }
 
     /// Validate and resolve a path. Returns the canonicalized absolute path
@@ -129,7 +183,8 @@ impl Sandbox {
     /// - Symlinks: canonicalize follows them, so a symlink pointing outside is denied.
     /// - New files (don't exist yet): parent directory is validated instead.
     pub fn check(path: &str) -> Result<PathBuf> {
-        let Some(root) = Self::root() else {
+        refuse_remote(path)?;
+        let Some(root) = Self::try_root()? else {
             // No sandbox initialized — allow everything (backward compat),
             // while still returning the path's actual landing so callers
             // can safely use O_NOFOLLOW for the final open.
@@ -198,6 +253,7 @@ impl Sandbox {
     }
 
     fn validate_against(root: &Path, cwd: &Path, path: &str) -> Result<PathBuf> {
+        refuse_remote(path)?;
         // Resolve relative paths from cwd, not root. A teammate in
         // .worktrees/backend/ calling Write("src/server.ts") must land the
         // file in its worktree (where it stays on team/backend), not in the
@@ -259,6 +315,193 @@ impl Sandbox {
             root.display()
         ))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedKind {
+    /// The directory and everything under it.
+    Dir,
+    File,
+    /// Any file directly in the root whose name starts with `rel`, except
+    /// the [`ENV_TEMPLATES`].
+    FilePrefix,
+    /// A file the agent may write only after an explicit approval.
+    Instructions,
+}
+
+#[derive(Debug)]
+pub struct ProtectedPath {
+    pub rel: &'static str,
+    pub kind: ProtectedKind,
+}
+
+/// Paths under the workspace root that thClaws, Claude Code or git load as
+/// configuration, hooks or instructions. Writing one plants code or prompt
+/// text that runs on a later start with no prompt (audit 2026-11-01 #4, #6,
+/// #7), so the file tools ([`Sandbox::check_write`]) and the OS confiner for
+/// Bash ([`crate::confine::build_policy`]) both deny them from this one list.
+pub const PROTECTED_PATHS: &[ProtectedPath] = &[
+    ProtectedPath {
+        rel: ".thclaws",
+        kind: ProtectedKind::Dir,
+    },
+    ProtectedPath {
+        rel: ".claude",
+        kind: ProtectedKind::Dir,
+    },
+    ProtectedPath {
+        rel: ".mcp.json",
+        kind: ProtectedKind::File,
+    },
+    ProtectedPath {
+        rel: ".env",
+        kind: ProtectedKind::File,
+    },
+    ProtectedPath {
+        rel: ".env.",
+        kind: ProtectedKind::FilePrefix,
+    },
+    ProtectedPath {
+        rel: ".git/config",
+        kind: ProtectedKind::File,
+    },
+    ProtectedPath {
+        rel: ".git/hooks",
+        kind: ProtectedKind::Dir,
+    },
+    ProtectedPath {
+        rel: ".git/info",
+        kind: ProtectedKind::Dir,
+    },
+    ProtectedPath {
+        rel: "AGENTS.md",
+        kind: ProtectedKind::Instructions,
+    },
+    ProtectedPath {
+        rel: "CLAUDE.md",
+        kind: ProtectedKind::Instructions,
+    },
+];
+
+/// `.env.*` names no loader reads: committed placeholders agents are asked
+/// to write.
+pub const ENV_TEMPLATES: &[&str] = &[".env.example", ".env.sample", ".env.template"];
+
+/// Whether `name` (one path component) falls under a `FilePrefix` entry.
+pub fn matches_file_prefix(name: &str, prefix: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with(&prefix.to_ascii_lowercase()) && !ENV_TEMPLATES.contains(&name.as_str())
+}
+
+/// Windows: a path that reaches the network or a raw device instead of a
+/// drive. Touching `\\host\share` at all — `canonicalize`, `metadata`,
+/// `is_file` — makes Windows authenticate to that host with the user's NTLM
+/// hash, so the sandbox has to refuse it before its first filesystem call
+/// (audit 2026-11-01 #10). Always false elsewhere, where `//x` is just `/x`.
+pub fn is_remote_or_device_path(path: &str) -> bool {
+    cfg!(windows) && remote_or_device(path)
+}
+
+fn refuse_remote(path: &str) -> Result<()> {
+    if is_remote_or_device_path(path) {
+        return Err(Error::Tool(format!(
+            "access denied: '{path}' is a network (UNC) or device path. File tools only \
+             open files on a local drive inside the workspace."
+        )));
+    }
+    Ok(())
+}
+
+/// [`is_remote_or_device_path`] without the OS gate, so it is tested on
+/// every CI host. Refuses any path opening with two separators (`\\`, `//`,
+/// `\/`) except a verbatim drive path `\\?\C:\…`, which `canonicalize`
+/// produces for every local file; also the NT object prefix `\??\`.
+pub(crate) fn remote_or_device(path: &str) -> bool {
+    let sep = |c: char| c == '\\' || c == '/';
+    let mut chars = path.chars();
+    let (a, b) = (chars.next(), chars.next());
+    if a.is_some_and(sep) && path[1..].starts_with("??") && path[3..].starts_with(sep) {
+        return true;
+    }
+    if !(a.is_some_and(sep) && b.is_some_and(sep)) {
+        return false;
+    }
+    let rest: Vec<char> = path.chars().skip(2).collect();
+    let verbatim_drive = rest.len() >= 4
+        && rest[0] == '?'
+        && sep(rest[1])
+        && rest[2].is_ascii_alphabetic()
+        && rest[3] == ':'
+        && (rest.len() == 4 || sep(rest[4]));
+    !verbatim_drive
+}
+
+/// `CON`, `NUL`, `COM1`… — Windows opens the device for these names in any
+/// folder and with any extension (`nul.txt` is still NUL).
+pub fn is_windows_device_name(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
+/// Whether an archive entry name is unsafe to join onto an extraction root.
+/// Only plain relative names pass: no root, no `..`, and — when `windows` —
+/// no backslash, no `:` (`C:x` is drive-relative, `a:b` an alternate data
+/// stream), no device name and no component ending in a dot or space, which
+/// Windows strips (`.git.` is `.git`). `Path::is_absolute` is false for
+/// `\Users\x.bat` and `C:x`, which is how such entries got past the old
+/// check (audit 2026-11-01 #11). Checked on the raw name so the rule is the
+/// same on every OS the archive may be unpacked on.
+pub fn is_unsafe_archive_entry(raw: &str, windows: bool) -> bool {
+    use std::path::Component;
+    if raw.is_empty() || raw.starts_with('/') || raw.starts_with('\\') {
+        return true;
+    }
+    if windows && (raw.contains('\\') || raw.contains(':')) {
+        return true;
+    }
+    let seps: &[char] = if windows { &['/', '\\'] } else { &['/'] };
+    for part in raw.split(seps) {
+        if part == ".." {
+            return true;
+        }
+        if windows
+            && part != "."
+            && (part.ends_with('.') || part.ends_with(' ') || is_windows_device_name(part))
+        {
+            return true;
+        }
+    }
+    !Path::new(raw)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// The protected entry `path` falls under, if any. Case-insensitive: macOS
+/// and Windows file systems resolve `.CLAUDE/x` and `.Env` to the same files
+/// the loaders read, and a false positive on Linux only refuses an odd name.
+pub fn protected_match(root: &Path, path: &Path) -> Option<&'static ProtectedPath> {
+    let rel = path.strip_prefix(root).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect();
+    PROTECTED_PATHS.iter().find(|p| {
+        let rel = p.rel.to_ascii_lowercase();
+        let want: Vec<&str> = rel.split('/').collect();
+        match p.kind {
+            ProtectedKind::Dir => parts.len() >= want.len() && parts[..want.len()] == want[..],
+            ProtectedKind::File | ProtectedKind::Instructions => parts == want,
+            ProtectedKind::FilePrefix => parts.len() == 1 && matches_file_prefix(&parts[0], &rel),
+        }
+    })
 }
 
 /// Resolve `..` and `.` components lexically (no filesystem access).
@@ -622,6 +865,162 @@ mod tests {
     }
 
     #[test]
+    fn write_denied_on_every_protected_path() {
+        with_sandbox(|root| {
+            for rel in [
+                ".claude/settings.json",
+                ".claude/skills/x/SKILL.md",
+                ".CLAUDE/agents/x.md",
+                ".mcp.json",
+                ".env",
+                ".env.local",
+                ".Env",
+                ".env.example.local",
+                ".env.examples",
+                ".git/config",
+                ".git/hooks/pre-commit",
+                ".git/info/attributes",
+                "AGENTS.md",
+                "claude.md",
+            ] {
+                let err = Sandbox::enforce_write_policy(root, root.join(rel)).unwrap_err();
+                assert!(format!("{err}").contains("access denied"), "{rel}");
+            }
+        });
+    }
+
+    #[test]
+    fn protected_list_leaves_lookalikes_writable() {
+        with_sandbox(|root| {
+            for rel in [
+                "src/.env",
+                "docs/AGENTS.md",
+                ".git/HEAD",
+                ".git/objects/ab/cd",
+                ".gitignore",
+                ".environment",
+                ".claudeignore",
+                "app/.claude/x.md",
+                ".env.example",
+                ".env.Sample",
+                ".ENV.TEMPLATE",
+            ] {
+                let p = root.join(rel);
+                assert_eq!(
+                    Sandbox::enforce_write_policy(root, p.clone()).unwrap(),
+                    p,
+                    "{rel}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn approved_write_reaches_instructions_but_nothing_else() {
+        with_sandbox(|root| {
+            for rel in ["AGENTS.md", "CLAUDE.md"] {
+                let p = root.join(rel);
+                assert_eq!(
+                    Sandbox::enforce_write_policy_with(root, p.clone(), true).unwrap(),
+                    p
+                );
+            }
+            for rel in [
+                ".mcp.json",
+                ".claude/settings.json",
+                ".thclaws/settings.json",
+            ] {
+                assert!(Sandbox::enforce_write_policy_with(root, root.join(rel), true).is_err());
+            }
+        });
+    }
+
+    #[test]
+    fn remote_and_device_paths_are_recognised_on_every_os() {
+        for p in [
+            r"\\host\share\x.txt",
+            "//host/share/x.txt",
+            r"\/host/share",
+            r"/\host\share",
+            r"\\?\UNC\host\share\x",
+            r"\\?\GLOBALROOT\Device\x",
+            r"\\.\pipe\x",
+            r"\\.\C:\x",
+            r"\??\UNC\host\share",
+            r"\??\C:\x",
+            r"\\?\C",
+            r"\\?\CC:\x",
+        ] {
+            assert!(remote_or_device(p), "{p}");
+        }
+        for p in [
+            r"\\?\C:\Users\me\ws\a.txt",
+            r"\\?\d:",
+            r"C:\Users\me\a.txt",
+            r"\Users\me",
+            "src/main.rs",
+            "/home/me/ws/a.txt",
+            "",
+            "?",
+        ] {
+            assert!(!remote_or_device(p), "{p}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unc_paths_are_refused_before_touching_the_network() {
+        with_sandbox(|root| {
+            let err = Sandbox::validate_against(root, root, r"\\attacker\share\x").unwrap_err();
+            assert!(format!("{err}").contains("UNC"));
+        });
+    }
+
+    #[test]
+    fn archive_entries_must_be_plain_relative_names() {
+        for (raw, windows) in [
+            ("/etc/passwd", false),
+            ("../x", false),
+            ("a/../../x", false),
+            ("", false),
+            (r"\Users\Public\x.bat", false),
+            (r"\Users\Public\x.bat", true),
+            ("C:foo", true),
+            ("C:/x", true),
+            ("a/b:stream", true),
+            (r"a\..\..\x", true),
+            ("nul", true),
+            ("dir/COM3.log", true),
+            (".git./config", true),
+            ("x /y", true),
+        ] {
+            assert!(is_unsafe_archive_entry(raw, windows), "{raw} ({windows})");
+        }
+        for (raw, windows) in [
+            ("a/b/c.md", true),
+            ("./", true),
+            ("./.thclaws/skills/", true),
+            ("dir/", true),
+            ("a:b.txt", false),
+            ("console.log", true),
+            ("COM10", true),
+            ("LPT", true),
+        ] {
+            assert!(!is_unsafe_archive_entry(raw, windows), "{raw} ({windows})");
+        }
+    }
+
+    #[test]
+    fn windows_device_names() {
+        for n in ["CON", "nul", "Aux.txt", "com1", "LPT9.tar.gz", "prn "] {
+            assert!(is_windows_device_name(n), "{n}");
+        }
+        for n in ["CONFIG", "com0", "COM10", "lpt", "nul_", "x.nul"] {
+            assert!(!is_windows_device_name(n), "{n}");
+        }
+    }
+
+    #[test]
     fn write_allowed_inside_worktree() {
         with_sandbox(|root| {
             let file = root.join(".worktrees/backend/src/lib.rs");
@@ -731,6 +1130,35 @@ mod tests {
             let err = Sandbox::check_write_for_user(root, &alice, "output/shared.png").unwrap_err();
             assert!(format!("{err}").contains("outside the per-user writable subtree"));
         });
+    }
+
+    /// M-a/M-e: a multiuser call that lost its member scope (a thread or
+    /// blocking task) is refused, never resolved against the pod root.
+    #[test]
+    fn multiuser_without_a_member_scope_fails_closed() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        crate::workdir::set_multiuser(true);
+        let root = Sandbox::try_root();
+        let plain_root = Sandbox::root();
+        let check = Sandbox::check("notes.md");
+        let write = Sandbox::check_write("notes.md");
+        let scoped = crate::workdir::sync_scope_workdir(ws.clone(), || {
+            (
+                Sandbox::try_root().unwrap(),
+                Sandbox::check("notes.md").is_ok(),
+            )
+        });
+        crate::workdir::set_multiuser(false);
+
+        assert!(root.is_err());
+        assert!(plain_root.is_none());
+        assert!(check
+            .unwrap_err()
+            .to_string()
+            .contains("no member workspace"));
+        assert!(write.is_err());
+        assert_eq!(scoped, (Some(ws), true));
     }
 
     // dev-plan/42 security proof: in a multiuser process two concurrent

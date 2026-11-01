@@ -320,19 +320,21 @@ pub async fn run_with_tools(
         let sources_owned = sources.clone();
         let cancel_owned = cancel.clone();
         let timeout = config.llm_timeout;
-        page_futures.push(tokio::spawn(async move {
-            llm_calls::write_research_page(
-                provider_ref.as_ref(),
-                &model_owned,
-                &query_owned,
-                &page_owned,
-                &plan_owned,
-                &sources_owned,
-                timeout,
-                &cancel_owned,
-            )
-            .await
-        }));
+        page_futures.push(tokio::spawn(crate::workdir::Scope::capture().run(
+            async move {
+                llm_calls::write_research_page(
+                    provider_ref.as_ref(),
+                    &model_owned,
+                    &query_owned,
+                    &page_owned,
+                    &plan_owned,
+                    &sources_owned,
+                    timeout,
+                    &cancel_owned,
+                )
+                .await
+            },
+        )));
     }
     let mut bodies: Vec<(usize, String)> = Vec::with_capacity(plan.len());
     for (idx, fut) in page_futures.into_iter().enumerate() {

@@ -269,6 +269,13 @@ impl SessionSink {
         self.config.lock().map(|c| c.dm_policy).unwrap_or_default()
     }
 
+    fn may_approve(&self, user_id: Option<i64>) -> bool {
+        self.config
+            .lock()
+            .map(|c| c.may_approve(user_id))
+            .unwrap_or(false)
+    }
+
     fn group_authorized(&self, chat_id: i64) -> bool {
         self.config
             .lock()
@@ -396,6 +403,18 @@ impl SessionSink {
         let Some(approver) = self.approver.clone() else {
             return;
         };
+        if !self.may_approve(Some(cbq.from.id)) {
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                let _ = client
+                    .answer_callback_query(&AnswerCallbackQuery::with_toast(
+                        cbq.id,
+                        "Only an approved user can answer this.",
+                    ))
+                    .await;
+            });
+            return;
+        }
         let data = cbq.data.clone().unwrap_or_default();
         // Resolve synchronously — this is what UNBLOCKS the agent turn
         // awaiting approval. Network confirmation (answer + edit) is
@@ -461,7 +480,14 @@ impl SessionSink {
             ChatKind::Private => {
                 let user_id = msg.from.as_ref().map(|u| u.id).unwrap_or(chat.id);
                 if self.dm_authorized(user_id) {
-                    self.route_authorized_text(chat.id, None, None, text, photo_file_id);
+                    self.route_authorized_text(
+                        chat.id,
+                        None,
+                        None,
+                        Some(user_id),
+                        text,
+                        photo_file_id,
+                    );
                     return;
                 }
                 match self.dm_policy() {
@@ -492,7 +518,15 @@ impl SessionSink {
                     .unwrap_or(false);
                 if self.group_authorized(chat.id) || is_channel_surface {
                     let agent_id = self.route_for(chat.id, topic);
-                    self.route_authorized_text(chat.id, topic, agent_id, text, photo_file_id);
+                    let sender = msg.from.as_ref().map(|u| u.id);
+                    self.route_authorized_text(
+                        chat.id,
+                        topic,
+                        agent_id,
+                        sender,
+                        text,
+                        photo_file_id,
+                    );
                 } else {
                     eprintln!(
                         "[telegram] ignoring message from unallowlisted group {}",
@@ -517,11 +551,12 @@ impl SessionSink {
         chat_id: i64,
         topic: Option<i64>,
         agent_id: Option<String>,
+        sender: Option<i64>,
         text: String,
         photo_file_id: Option<String>,
     ) {
         if let Some(approver) = &self.approver {
-            if approver.has_pending() {
+            if approver.has_pending() && self.may_approve(sender) {
                 if let Some(reply) = approver.record_decision_from_text(&text) {
                     let msg = match reply {
                         ApprovalReply::Allow => "✅ Approved — running now.",

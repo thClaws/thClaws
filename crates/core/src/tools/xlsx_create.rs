@@ -88,7 +88,7 @@ impl Tool for XlsxCreateTool {
         }
 
         let path_clone = validated.clone();
-        let summary = tokio::task::spawn_blocking(move || -> Result<String> {
+        let summary = crate::workdir::spawn_blocking_scoped(move || -> Result<String> {
             render_xlsx(&path_clone, &sheets, with_headers, auto_width)
         })
         .await

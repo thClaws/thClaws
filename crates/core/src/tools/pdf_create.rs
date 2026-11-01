@@ -185,7 +185,7 @@ impl Tool for PdfCreateTool {
         }
 
         let path_clone = validated.clone();
-        let pages = tokio::task::spawn_blocking(move || -> Result<usize> {
+        let pages = crate::workdir::spawn_blocking_scoped(move || -> Result<usize> {
             render_pdf(
                 &path_clone,
                 &title,

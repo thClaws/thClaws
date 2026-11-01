@@ -1244,10 +1244,29 @@ pub fn append_turn_usage(path: &Path, after: usize, text: &str, cost_usd: f64) -
     append_locked(path, |file| writeln!(file, "{}", line))
 }
 
+/// Does the file hold no `kind` snapshot, or is its newest one null? The GUI
+/// broadcasters fire on every session load, so without this each app start
+/// appended a `{plan:null}`/`{goal:null}` pair — the session file "changed"
+/// with no one working, and a `/cloud pull` refused to overwrite it.
+fn latest_snapshot_is_null(path: &Path, kind: &str, field: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    let tag = format!("\"type\":\"{kind}\"");
+    text.lines()
+        .rev()
+        .find(|l| l.contains(&tag))
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .map_or(true, |v| v.get(field).map_or(true, |x| x.is_null()))
+}
+
 pub fn append_plan_snapshot(
     path: &Path,
     plan: Option<&crate::tools::plan_state::Plan>,
 ) -> Result<()> {
+    if plan.is_none() && latest_snapshot_is_null(path, "plan_snapshot", "plan") {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1268,6 +1287,9 @@ pub fn append_goal_snapshot(
     path: &Path,
     goal: Option<&crate::goal_state::GoalState>,
 ) -> Result<()> {
+    if goal.is_none() && latest_snapshot_is_null(path, "goal_snapshot", "goal") {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -2625,6 +2647,38 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains(r#""type":"header""#));
         assert!(contents.contains(r#""model":"test-model""#));
+    }
+
+    #[test]
+    fn null_snapshots_are_written_only_on_a_real_clear() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess-test.jsonl");
+        let header = r#"{"type":"header","id":"sess-test","model":"m","cwd":"","created_at":100}"#;
+        std::fs::write(&path, format!("{header}\n")).unwrap();
+        let count = |k: &str| {
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .matches(&format!(r#""type":"{k}""#))
+                .count()
+        };
+
+        // App start on a session that never had a plan or goal: nothing.
+        append_plan_snapshot(&path, None).unwrap();
+        append_goal_snapshot(&path, None).unwrap();
+        assert_eq!((count("plan_snapshot"), count("goal_snapshot")), (0, 0));
+
+        // A plan existed, so clearing it is a real transition — once.
+        std::fs::write(
+            &path,
+            format!(
+                "{header}\n{}\n",
+                r#"{"type":"plan_snapshot","plan":{"steps":[]},"timestamp":1}"#
+            ),
+        )
+        .unwrap();
+        append_plan_snapshot(&path, None).unwrap();
+        append_plan_snapshot(&path, None).unwrap();
+        assert_eq!(count("plan_snapshot"), 2);
     }
 
     #[test]

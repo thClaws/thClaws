@@ -46,7 +46,7 @@ impl Tool for DocxReadTool {
         let raw_path = req_str(&input, "path")?;
         let validated = crate::sandbox::Sandbox::check(raw_path)?;
         let path_clone = validated.clone();
-        tokio::task::spawn_blocking(move || extract_docx(&path_clone))
+        crate::workdir::spawn_blocking_scoped(move || extract_docx(&path_clone))
             .await
             .map_err(|e| Error::Tool(format!("DOCX worker join failed: {e}")))?
     }

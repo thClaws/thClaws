@@ -38,15 +38,39 @@ static MULTIUSER: AtomicBool = AtomicBool::new(false);
 /// Mark the process as a multiuser serve pod. Called once from
 /// `server::run` when multi-tenant mode is configured.
 pub fn set_multiuser(on: bool) {
+    #[cfg(test)]
+    TEST_MULTIUSER.with(|c| c.set(on));
+    #[cfg(not(test))]
     MULTIUSER.store(on, Ordering::Relaxed);
+}
+
+// Unit tests run in parallel threads of one process; a process-wide flag
+// flipped by one test would make every concurrent file-tool test fail closed.
+#[cfg(test)]
+thread_local! {
+    static TEST_MULTIUSER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// True in a `--serve --multiuser` process. Global cwd/sandbox mutators
 /// guard on this to stay no-ops (per-session roots come from the
 /// task-local scope instead).
 pub fn is_multiuser() -> bool {
+    #[cfg(test)]
+    if TEST_MULTIUSER.with(|c| c.get()) {
+        return true;
+    }
     MULTIUSER.load(Ordering::Relaxed)
 }
+
+/// A multiuser process running code outside any member's scope: there is no
+/// right root to resolve against, so path and confinement checks refuse
+/// rather than fall back to the pod-wide `/workspace` (every member's files).
+pub fn member_scope_missing() -> bool {
+    is_multiuser() && !workdir_is_scoped()
+}
+
+pub const UNSCOPED_REFUSAL: &str =
+    "refused: no member workspace is active for this call in a shared workspace";
 
 /// The active session's working directory: the task-local root when a
 /// worker has scoped one (multiuser), else the process cwd (single-
@@ -67,6 +91,18 @@ pub fn workspace_root() -> PathBuf {
     match std::env::var("THCLAWS_WORKSPACE_ROOT") {
         Ok(s) if !s.trim().is_empty() => PathBuf::from(s),
         _ => std::env::current_dir().unwrap_or_default(),
+    }
+}
+
+/// The folder `/cloud push|pull|revision` moves. A multiuser pod hands each
+/// session its own root; elsewhere it is the workspace, never an agent's own
+/// folder under a host — syncing that left every user file behind and wrote
+/// the agent's `.thclaws` over the cloud workspace's root.
+pub fn cloud_sync_root(session_cwd: &std::path::Path) -> PathBuf {
+    if is_multiuser() {
+        session_cwd.to_path_buf()
+    } else {
+        workspace_root()
     }
 }
 
@@ -168,6 +204,71 @@ where
     }
 }
 
+/// The member's workdir and billing identity, captured before a thread or
+/// spawned task (task-locals cross neither) and re-entered on the far side.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    root: Option<PathBuf>,
+    member: Option<String>,
+}
+
+impl Scope {
+    pub fn capture() -> Self {
+        Self {
+            root: scoped_root(),
+            member: crate::multi_tenant::current_member_id(),
+        }
+    }
+
+    pub fn new(root: Option<PathBuf>, member: Option<String>) -> Self {
+        Self { root, member }
+    }
+
+    pub async fn run<F, T>(self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        match self.member {
+            Some(m) => rescope(self.root, crate::multi_tenant::scope_member(m, fut)).await,
+            None => rescope(self.root, fut).await,
+        }
+    }
+
+    pub fn run_sync<F, T>(self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        let inner = move || match self.member {
+            Some(m) => crate::multi_tenant::member::sync_scope_member(m, f),
+            None => f(),
+        };
+        match self.root {
+            Some(r) => WORKDIR.sync_scope(r, inner),
+            None => inner(),
+        }
+    }
+}
+
+/// `tokio::spawn` that keeps the caller's [`Scope`].
+pub fn spawn_scoped<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(Scope::capture().run(fut))
+}
+
+/// `tokio::task::spawn_blocking` that keeps the caller's [`Scope`]: the
+/// blocking pool's threads carry no task-locals of their own.
+pub fn spawn_blocking_scoped<F, T>(f: F) -> tokio::task::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let scope = Scope::capture();
+    tokio::task::spawn_blocking(move || scope.run_sync(f))
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -205,6 +306,33 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn cloud_sync_moves_the_workspace_not_the_agent_folder() {
+        let _g = crate::kms::test_env_lock();
+        let prev = std::env::var("THCLAWS_WORKSPACE_ROOT").ok();
+        let ws = tempfile::tempdir().unwrap();
+        let agent = ws.path().join(".thclaws/bots/main");
+
+        std::env::set_var("THCLAWS_WORKSPACE_ROOT", ws.path());
+        assert_eq!(
+            cloud_sync_root(&agent),
+            ws.path(),
+            "under a host: the workspace"
+        );
+
+        std::env::remove_var("THCLAWS_WORKSPACE_ROOT");
+        assert_eq!(
+            cloud_sync_root(&agent),
+            std::env::current_dir().unwrap(),
+            "no host: the process cwd"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("THCLAWS_WORKSPACE_ROOT", v),
+            None => std::env::remove_var("THCLAWS_WORKSPACE_ROOT"),
+        }
+    }
 
     /// finding 11: an agent's own `.thclaws/…` resolves in its folder, so it
     /// can reach the scripts and state it ships. The user's files and the two
@@ -261,6 +389,46 @@ mod tests {
         let expected = std::env::current_dir().unwrap();
         assert_eq!(current_workdir(), expected);
         assert!(!workdir_is_scoped());
+    }
+
+    /// M-a/M-e: a member's scope survives the thread and blocking-pool hops
+    /// tool callers make; without it the far side would fail closed.
+    #[tokio::test]
+    async fn scope_crosses_threads_and_blocking_tasks() {
+        let root = PathBuf::from("/tmp/workspace-alice");
+        let (blocking, spawned, thread) = scope_workdir(root.clone(), async {
+            let blocking = spawn_blocking_scoped(scoped_root).await.unwrap();
+            let spawned = spawn_scoped(async { scoped_root() }).await.unwrap();
+            let scope = Scope::capture();
+            let thread = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                rt.block_on(scope.run(async { scoped_root() }))
+            })
+            .join()
+            .unwrap();
+            (blocking, spawned, thread)
+        })
+        .await;
+        assert_eq!(blocking.as_ref(), Some(&root));
+        assert_eq!(spawned.as_ref(), Some(&root));
+        assert_eq!(thread.as_ref(), Some(&root));
+        assert_eq!(
+            tokio::task::spawn_blocking(scoped_root).await.unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn member_scope_missing_only_when_multiuser_and_unscoped() {
+        assert!(!member_scope_missing());
+        set_multiuser(true);
+        let unscoped = member_scope_missing();
+        let scoped = sync_scope_workdir(PathBuf::from("/tmp/w"), member_scope_missing);
+        set_multiuser(false);
+        assert!(unscoped);
+        assert!(!scoped);
     }
 
     #[tokio::test]

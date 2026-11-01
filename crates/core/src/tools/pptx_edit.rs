@@ -69,9 +69,11 @@ impl Tool for PptxEditTool {
         }
 
         let path_clone = validated.clone();
-        tokio::task::spawn_blocking(move || apply_find_replace(&path_clone, &find, &replace))
-            .await
-            .map_err(|e| Error::Tool(format!("PPTX edit worker: {e}")))?
+        crate::workdir::spawn_blocking_scoped(move || {
+            apply_find_replace(&path_clone, &find, &replace)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("PPTX edit worker: {e}")))?
     }
 }
 

@@ -481,7 +481,7 @@ async fn supervise(
             mut child,
             _stdin,
             stderr_done,
-        } = match spawn_child(&bot, &program) {
+        } = match spawn_child(&bot, &program).await {
             Ok(c) => c,
             Err(e) => {
                 if !backoff(
@@ -610,7 +610,7 @@ struct Spawned {
     stderr_done: Option<tokio::task::JoinHandle<()>>,
 }
 
-fn spawn_child(bot: &Arc<Bot>, program: &Path) -> Result<Spawned> {
+async fn spawn_child(bot: &Arc<Bot>, program: &Path) -> Result<Spawned> {
     // A stale address from the previous run would be read as this run's, so
     // it goes before the child can write a new one.
     let _ = std::fs::remove_file(&bot.addr_file);
@@ -638,7 +638,12 @@ fn spawn_child(bot: &Arc<Bot>, program: &Path) -> Result<Spawned> {
         .arg("--port")
         .arg("0")
         .current_dir(&bot.dir)
-        .env("THCLAWS_SERVE_TOKEN", &token)
+        // #3: tokens go over stdin, never the exec env, which any same-user
+        // process (the child's own confined Bash included) can read back
+        // through KERN_PROCARGS2 or /proc/<pid>/environ.
+        .env_remove("THCLAWS_SERVE_TOKEN")
+        .env_remove("THCLAWS_API_TOKEN")
+        .env(HANDOVER_ENV, "1")
         .env("THCLAWS_SERVE_ADDR_FILE", &bot.addr_file)
         .env("THCLAWS_SUPERVISED", "1")
         // dev-plan/61: an agent's files are the workspace's. Its own folder
@@ -665,11 +670,78 @@ fn spawn_child(bot: &Arc<Bot>, program: &Path) -> Result<Spawned> {
         pump(bot.clone(), out, false);
     }
     let stderr_done = child.stderr.take().map(|err| pump(bot.clone(), err, true));
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::Tool("child stdin not piped".into()))?;
+    let line = handover_line(&Handover {
+        serve_token: token,
+        api_token: std::env::var("THCLAWS_API_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty()),
+    });
+    // A child that died before reading closes the pipe; its exit status, not
+    // this EPIPE, is the account the restart loop should report.
+    {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(line.as_bytes()).await;
+        let _ = stdin.flush().await;
+    }
     Ok(Spawned {
-        _stdin: child.stdin.take(),
+        _stdin: Some(stdin),
         stderr_done,
         child,
     })
+}
+
+/// Marks a child that must read its [`Handover`] from stdin at startup.
+pub const HANDOVER_ENV: &str = "THCLAWS_SERVE_TOKEN_STDIN";
+
+/// What a supervisor gives a `--serve` child: its own serve token, and the
+/// host's `/v1` bearer so the child accepts `/v1` the host forwards.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Handover {
+    pub serve_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
+}
+
+pub fn handover_line(h: &Handover) -> String {
+    let mut s = serde_json::to_string(h).expect("handover serializes");
+    s.push('\n');
+    s
+}
+
+pub fn parse_handover(line: &str) -> Option<Handover> {
+    serde_json::from_str::<Handover>(line.trim())
+        .ok()
+        .filter(|h| !h.serve_token.trim().is_empty())
+}
+
+/// Child side: read the supervisor's first stdin line, before anything else
+/// reads stdin (the EOF watchdog shares the same buffered `Stdin`). The serve
+/// token stays in-process. The `/v1` bearer goes into this process's env,
+/// which `api_v1` reads: `setenv` after exec does not show in
+/// KERN_PROCARGS2 or /proc/<pid>/environ, and every child the agent steers
+/// has it scrubbed (`ENGINE_SECRET_ENV`).
+pub fn take_handover_from_stdin() {
+    if std::env::var(HANDOVER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+    std::env::remove_var(HANDOVER_ENV);
+    let mut line = String::new();
+    use std::io::BufRead;
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    let Some(h) = parse_handover(&line) else {
+        eprintln!(
+            "\x1b[31m[serve] supervisor handed over no token on stdin — refusing to serve\x1b[0m"
+        );
+        std::process::exit(1);
+    };
+    crate::api_v1::guard::set_serve_token(Some(h.serve_token));
+    if let Some(t) = h.api_token {
+        std::env::set_var("THCLAWS_API_TOKEN", t);
+    }
 }
 
 /// Relay a child stream to the host's own stderr, prefixed, and keep the last
@@ -1219,5 +1291,25 @@ mod tests {
         let b = mint_token();
         assert_eq!(a.len(), TOKEN_LEN);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn handover_is_one_line_and_round_trips() {
+        let h = Handover {
+            serve_token: "abc".into(),
+            api_token: Some("def".into()),
+        };
+        let line = handover_line(&h);
+        assert!(line.ends_with('\n'));
+        assert_eq!(line.matches('\n').count(), 1);
+        assert_eq!(parse_handover(&line), Some(h));
+        let bare = Handover {
+            serve_token: "abc".into(),
+            api_token: None,
+        };
+        assert_eq!(parse_handover(&handover_line(&bare)), Some(bare));
+        assert_eq!(parse_handover(""), None);
+        assert_eq!(parse_handover(r#"{"serve_token":"  "}"#), None);
+        assert_eq!(parse_handover("abc"), None);
     }
 }

@@ -4906,7 +4906,7 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
         ProviderKind::AgentSdk => {
             let bin = crate::providers::agent_sdk::claude_bin();
             // SDK MCP bridge: Claude Code's built-in tools are
-            // disabled (via --allowedTools) and thClaws's tool
+            // disabled (via --tools "") and thClaws's tool
             // registry is exposed over the in-process SDK MCP
             // channel. The model sees `mcp__thclaws__KmsWrite`,
             // `mcp__thclaws__Bash`, … instead of Claude Code's

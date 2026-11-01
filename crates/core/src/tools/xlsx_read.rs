@@ -55,7 +55,7 @@ impl Tool for XlsxReadTool {
             .to_string();
 
         let path_clone = validated.clone();
-        tokio::task::spawn_blocking(move || -> Result<String> {
+        crate::workdir::spawn_blocking_scoped(move || -> Result<String> {
             let head = sheet_header(&path_clone, sheet_arg.as_deref())?;
             Ok(format!(
                 "{head}\n{}",

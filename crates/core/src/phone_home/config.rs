@@ -70,7 +70,17 @@ impl PhoneHomeConfig {
     /// Convenience: load from the current dir's `.thclaws/phone-home.json`.
     /// Used by the worker's boot auto-reconnect.
     pub fn load() -> std::io::Result<Option<Self>> {
-        Self::load_in(&std::env::current_dir()?)
+        let cwd = std::env::current_dir()?;
+        Ok(Self::load_in(&cwd)?.map(|c| c.gated(crate::bridge::folder_trusted(&cwd))))
+    }
+
+    /// A relay override only counts in a trusted folder, so a cloned
+    /// repo can't point the tunnel at its own relay.
+    pub fn gated(mut self, trusted: bool) -> Self {
+        if !trusted {
+            self.server_url = None;
+        }
+        self
     }
 
     /// Convenience: save under the current dir.

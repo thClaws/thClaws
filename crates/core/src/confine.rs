@@ -49,6 +49,16 @@ impl ConfineMode {
             _ => Self::Off,
         }
     }
+    /// A shared workspace never runs Bash unconfined: `off`, a typo or an
+    /// empty value all mean `workspace` there — the confiner is the only
+    /// thing between one member's command and another member's folder.
+    pub fn in_process(self, multiuser: bool) -> Self {
+        if multiuser && self == Self::Off {
+            Self::Workspace
+        } else {
+            self
+        }
+    }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -58,11 +68,50 @@ impl ConfineMode {
     }
 }
 
+static ENGINE_PORTS: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+
+/// A loopback port this engine serves on. Confined Bash may not connect to it
+/// (Seatbelt only): the engine's socket carries a PTY and settings writes that
+/// no Bash sandbox covers.
+pub fn register_engine_port(port: u16) {
+    if port == 0 {
+        return;
+    }
+    let mut ports = ENGINE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    if !ports.contains(&port) {
+        ports.push(port);
+    }
+}
+
+/// Registered ports plus the host's `/v1` bridge, which a supervised agent
+/// learns only from `THCLAWS_LOOPBACK_URL`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn engine_ports() -> Vec<u16> {
+    let mut ports = ENGINE_PORTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(p) = std::env::var(crate::api_v1::LOOPBACK_URL_ENV)
+        .ok()
+        .and_then(|u| {
+            u.rsplit_once(':')
+                .and_then(|(_, p)| p.trim_end_matches('/').parse().ok())
+        })
+    {
+        if p != 0 && !ports.contains(&p) {
+            ports.push(p);
+        }
+    }
+    ports
+}
+
 /// Resolved policy for one spawn: which roots may be written, which paths must
 /// not be readable.
 #[derive(Debug, Clone)]
 pub struct ConfinePolicy {
     pub mode: ConfineMode,
+    /// The canonical workspace root the protected paths are relative to.
+    pub workspace: PathBuf,
     pub write_roots: Vec<PathBuf>,
     pub deny_read: Vec<PathBuf>,
     /// Read ALLOWLIST (dev-plan/45): `Some` ⇒ reads/execs are restricted to
@@ -76,9 +125,9 @@ pub struct ConfinePolicy {
     /// behaviour unchanged; the dotfile `deny_read` list above still applies
     /// via Seatbelt/bwrap).
     pub read_roots: Option<Vec<PathBuf>>,
-    /// Inside a write root but not writable: `<workspace>/.thclaws/`, which
-    /// file tools already refuse (`Sandbox::enforce_write_policy`) and whose
-    /// `settings.json` the watcher hot-reloads, hooks included (audit H1).
+    /// Inside a write root but not writable: the protected paths of
+    /// [`crate::sandbox::PROTECTED_PATHS`] (`.thclaws/`, `.claude/`,
+    /// `.mcp.json`, `.env`, `.git/config`, …), which file tools refuse too.
     pub deny_write: Vec<PathBuf>,
     /// Re-allowed inside `deny_write`: an agent's own folder under
     /// `.thclaws/bots/<slug>/`, as the file tools allow it.
@@ -122,7 +171,7 @@ fn settings() -> &'static ConfineSettings {
 }
 
 pub fn mode() -> ConfineMode {
-    settings().mode
+    settings().mode.in_process(crate::workdir::is_multiuser())
 }
 
 /// `(mode, enforced)` for the audit record: `enforced` is false when the
@@ -135,6 +184,35 @@ pub fn enforcement_state() -> (ConfineMode, bool) {
     (m, m != ConfineMode::Off && platform_ok && probed_ok)
 }
 
+/// Bash runs with the user's full rights although a confined mode is set:
+/// Windows (no confiner), or a host where Seatbelt/Landlock/bwrap failed the
+/// probe. The probe runs here if no command has run yet, so the answer holds
+/// from the first frame. A multiuser worker refuses instead, so never.
+pub fn runs_unconfined() -> bool {
+    !crate::workdir::is_multiuser()
+        && current_policy()
+            .ok()
+            .flatten()
+            .is_some_and(|p| !enforces(&p))
+}
+
+/// Text for the Bash approval prompt and the UI notice when
+/// [`runs_unconfined`] (audit 2026-11-01 #9: the fallback used to reach only
+/// a log file while settings still said `workspace`).
+pub const UNCONFINED_NOTICE: &str = "No OS sandbox on this host: Bash commands and hooks run \
+     with your full user rights and can change any file you can, including .thclaws/settings.json.";
+
+/// `{"type":"confinement_status",…}` for the frontend.
+pub fn status_frame() -> serde_json::Value {
+    let unconfined = runs_unconfined();
+    serde_json::json!({
+        "type": "confinement_status",
+        "mode": mode().as_str(),
+        "unconfined": unconfined,
+        "notice": unconfined.then_some(UNCONFINED_NOTICE),
+    })
+}
+
 fn expand(s: &String) -> PathBuf {
     if let Some(rest) = s.strip_prefix("~/") {
         if let Some(h) = crate::util::home_dir() {
@@ -144,22 +222,26 @@ fn expand(s: &String) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Resolve the active policy for the current call, or `None` when confinement
+/// Resolve the active policy for the current call, `Ok(None)` when confinement
 /// is off. The workspace root is resolved here (not cached) so multi-tenant
-/// sessions get their own writable root.
-pub fn current_policy() -> Option<ConfinePolicy> {
+/// sessions get their own writable root; a multiuser call with no member
+/// scope is an error, never a policy rooted at the pod-wide workspace.
+pub fn current_policy() -> Result<Option<ConfinePolicy>, String> {
     let s = settings();
-    if s.mode == ConfineMode::Off {
-        return None;
+    let mode = mode();
+    if mode == ConfineMode::Off {
+        return Ok(None);
     }
-    let workspace = crate::sandbox::Sandbox::root().unwrap_or_else(crate::workdir::current_workdir);
-    Some(build_policy(
-        s.mode,
+    let workspace = crate::sandbox::Sandbox::try_root()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(crate::workdir::current_workdir);
+    Ok(Some(build_policy(
+        mode,
         &workspace,
         &s.extra_write,
         &s.extra_deny_read,
         crate::workdir::is_multiuser(),
-    ))
+    )))
 }
 
 /// System roots granted for reads in read-mask (multiuser) mode. Everything a
@@ -182,8 +264,9 @@ pub fn build_policy(
     extra_deny_read: &[PathBuf],
     read_mask: bool,
 ) -> ConfinePolicy {
-    let mut write_roots: Vec<PathBuf> = vec![canon(workspace)];
-    let deny_write = vec![canon(&canon(workspace).join(".thclaws"))];
+    let root = canon(workspace);
+    let mut write_roots: Vec<PathBuf> = vec![root.clone()];
+    let deny_write = protected_deny_paths(&root);
     let reallow_write: Vec<PathBuf> = crate::workdir::agent_dir()
         .map(|a| canon(&a))
         .filter(|a| deny_write.iter().any(|d| a.starts_with(d)))
@@ -312,12 +395,53 @@ pub fn build_policy(
 
     ConfinePolicy {
         mode,
+        workspace: root,
         write_roots,
         deny_read,
         read_roots,
         deny_write,
         reallow_write,
     }
+}
+
+/// The protected entries the confiner enforces for `root`. The `.git/…`
+/// ones only once `.git` exists: `git init` has to write all three, and in a
+/// folder with no repo there is nothing for an agent to poison yet — the
+/// engine's own git calls neutralise hooks and fsmonitor regardless
+/// ([`crate::util::engine_git`]).
+fn protected_for(root: &Path) -> Vec<&'static crate::sandbox::ProtectedPath> {
+    let has_git = root.join(".git").exists();
+    crate::sandbox::PROTECTED_PATHS
+        .iter()
+        .filter(|p| has_git || !p.rel.starts_with(".git/"))
+        .collect()
+}
+
+/// The concrete paths of [`crate::sandbox::PROTECTED_PATHS`] under `root`,
+/// for confiners that take paths (bwrap); prefix entries expand to the
+/// files that exist now. Seatbelt matches the list by pattern instead, so it
+/// also covers names created later.
+fn protected_deny_paths(root: &Path) -> Vec<PathBuf> {
+    use crate::sandbox::ProtectedKind;
+    let mut out = Vec::new();
+    for p in protected_for(root) {
+        match p.kind {
+            ProtectedKind::FilePrefix => {
+                if let Ok(rd) = std::fs::read_dir(root) {
+                    for e in rd.flatten() {
+                        if crate::sandbox::matches_file_prefix(
+                            &e.file_name().to_string_lossy(),
+                            p.rel,
+                        ) {
+                            out.push(canon(&e.path()));
+                        }
+                    }
+                }
+            }
+            _ => out.push(canon(&root.join(p.rel))),
+        }
+    }
+    out
 }
 
 fn canon(p: &Path) -> PathBuf {
@@ -450,7 +574,7 @@ fn confine_runtime_failed() -> bool {
 /// the confiner enforces, a plain one when it doesn't (desktop, logged once),
 /// and an error in a multiuser worker, where unconfined is not an option.
 pub fn shell_command_async(command: &str) -> Result<tokio::process::Command, String> {
-    let policy = current_policy();
+    let policy = current_policy()?;
     let works = policy.as_ref().is_some_and(enforces);
     match plan(policy.is_some(), works, crate::workdir::is_multiuser()) {
         Plan::Confined => policy
@@ -564,16 +688,17 @@ mod macos {
             }
             p.push_str(")\n");
         }
-        for (rule, paths) in [
-            ("deny", &policy.deny_write),
-            ("allow", &policy.reallow_write),
-        ] {
-            for r in paths.iter() {
-                p.push_str(&format!(
-                    "({rule} file-write* (subpath \"{}\"))\n",
-                    sb_escape(r)
-                ));
-            }
+        for re in protected_regexes(&policy.workspace) {
+            p.push_str(&format!("(deny file-write* (regex #\"{re}\"))\n"));
+        }
+        for re in env_template_regexes(&policy.workspace) {
+            p.push_str(&format!("(allow file-write* (regex #\"{re}\"))\n"));
+        }
+        for r in &policy.reallow_write {
+            p.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                sb_escape(r)
+            ));
         }
         if !policy.deny_read.is_empty() {
             p.push_str("(deny file-read*\n");
@@ -582,7 +707,63 @@ mod macos {
             }
             p.push_str(")\n");
         }
+        for port in engine_ports() {
+            p.push_str(&format!(
+                "(deny network-outbound (remote ip \"localhost:{port}\"))\n"
+            ));
+        }
         p
+    }
+
+    /// One regex per protected entry, case-insensitive in the entry name
+    /// (APFS is), so `.ENV` or a `.claude` created later are covered too.
+    pub fn protected_regexes(root: &Path) -> Vec<String> {
+        use crate::sandbox::ProtectedKind;
+        let base = re_escape(&root.to_string_lossy());
+        protected_for(root)
+            .into_iter()
+            .map(|p| {
+                let name: String = p.rel.chars().map(re_ci).collect();
+                let tail = match p.kind {
+                    ProtectedKind::Dir => "(/|$)",
+                    ProtectedKind::File | ProtectedKind::Instructions => "$",
+                    ProtectedKind::FilePrefix => "[^/]*$",
+                };
+                format!("^{base}/{name}{tail}")
+            })
+            .collect()
+    }
+
+    /// Seatbelt applies the last matching rule, so these re-open the
+    /// [`crate::sandbox::ENV_TEMPLATES`] after the `.env.` prefix deny.
+    pub fn env_template_regexes(root: &Path) -> Vec<String> {
+        let base = re_escape(&root.to_string_lossy());
+        crate::sandbox::ENV_TEMPLATES
+            .iter()
+            .map(|n| format!("^{base}/{}$", n.chars().map(re_ci).collect::<String>()))
+            .collect()
+    }
+
+    fn re_ci(c: char) -> String {
+        if c.is_ascii_alphabetic() {
+            format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase())
+        } else {
+            re_escape(&c.to_string())
+        }
+    }
+
+    fn re_escape(s: &str) -> String {
+        let mut out = String::new();
+        for c in s.chars() {
+            if ".^$*+?()[]{}|\\".contains(c) {
+                out.push('\\');
+            }
+            if c == '"' {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
     }
 
     fn sb_escape(p: &Path) -> String {
@@ -894,6 +1075,14 @@ mod linux {
     /// probe and we run unconfined. `--dev /dev` is a minimal devtmpfs (basic
     /// nodes only) — accelerator devices must be re-bound explicitly.
     fn bwrap_wrap(command: &str, policy: &ConfinePolicy) -> Option<tokio::process::Command> {
+        // This bwrap profile binds `/` read-only with no read allowlist, so a
+        // multiuser member could read every other member's folder: refuse.
+        if policy.read_roots.is_some() {
+            fallback_to_screening_once(
+                "Landlock is not enforcing and the bwrap fallback cannot apply the multiuser read mask",
+            );
+            return None;
+        }
         if binary_on_path("bwrap").is_none() {
             fallback_to_screening_once(
                 "no usable confiner (Landlock not enforcing, bwrap not found)",
@@ -978,6 +1167,39 @@ mod tests {
         assert_eq!(ConfineMode::parse("nonsense"), ConfineMode::Off);
     }
 
+    /// M-f: a shared workspace never resolves to `off`, whatever was typed.
+    #[test]
+    fn multiuser_never_runs_off() {
+        for raw in ["", "off", "nonsense"] {
+            let m = ConfineMode::parse(raw);
+            assert_eq!(m.in_process(false), ConfineMode::Off, "{raw:?}");
+            assert_eq!(m.in_process(true), ConfineMode::Workspace, "{raw:?}");
+        }
+        assert_eq!(ConfineMode::Strict.in_process(true), ConfineMode::Strict);
+        crate::workdir::set_multiuser(true);
+        let m = mode();
+        crate::workdir::set_multiuser(false);
+        assert_eq!(m, ConfineMode::Workspace, "cfg(test) settings say off");
+    }
+
+    /// M-a/M-e: no member scope in a multiuser process means no policy and
+    /// no command, never one rooted at the pod-wide workspace.
+    #[test]
+    fn multiuser_policy_fails_closed_without_a_member_scope() {
+        let ws = tempfile::tempdir().unwrap();
+        crate::workdir::set_multiuser(true);
+        let unscoped = current_policy();
+        let cmd = shell_command_async("true").map(|_| ());
+        let scoped = crate::workdir::sync_scope_workdir(ws.path().to_path_buf(), current_policy);
+        crate::workdir::set_multiuser(false);
+
+        assert!(unscoped.unwrap_err().contains("no member workspace"));
+        assert!(cmd.is_err());
+        let p = scoped.unwrap().expect("multiuser forces a policy");
+        assert!(p.write_roots.contains(&canon(ws.path())));
+        assert!(p.read_roots.is_some(), "multiuser applies the read mask");
+    }
+
     #[test]
     fn no_enforce_sentinel_detection() {
         // Real command output never trips it.
@@ -1004,7 +1226,35 @@ mod tests {
     fn policy_denies_writes_to_dot_thclaws() {
         let ws = tempfile::tempdir().unwrap();
         let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
-        assert_eq!(pol.deny_write, [canon(ws.path()).join(".thclaws")]);
+        let root = canon(ws.path());
+        for rel in [".thclaws", ".claude", ".mcp.json", ".env", "AGENTS.md"] {
+            assert!(pol.deny_write.contains(&root.join(rel)), "{rel}");
+        }
+    }
+
+    #[test]
+    fn git_entries_apply_once_a_repo_exists() {
+        let ws = tempfile::tempdir().unwrap();
+        let root = canon(ws.path());
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
+        assert!(!pol.deny_write.contains(&root.join(".git/config")));
+        std::fs::create_dir(ws.path().join(".git")).unwrap();
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
+        assert!(pol.deny_write.contains(&root.join(".git/config")));
+        assert!(pol.deny_write.contains(&root.join(".git/hooks")));
+    }
+
+    #[test]
+    fn policy_expands_env_prefix_to_existing_files() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join(".env.local"), "").unwrap();
+        std::fs::write(ws.path().join("envy.txt"), "").unwrap();
+        std::fs::write(ws.path().join(".env.example"), "").unwrap();
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
+        let root = canon(ws.path());
+        assert!(pol.deny_write.contains(&root.join(".env.local")));
+        assert!(!pol.deny_write.contains(&root.join("envy.txt")));
+        assert!(!pol.deny_write.contains(&root.join(".env.example")));
     }
 
     #[test]
@@ -1088,6 +1338,37 @@ mod tests {
         assert!(prof.contains("(deny file-read*"));
     }
 
+    /// #3: confined Bash cannot reach the engine's own socket.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_bash_cannot_connect_to_the_engine_port() {
+        if binary_on_path("sandbox-exec").is_none() || binary_on_path("nc").is_none() {
+            return;
+        }
+        let engine = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (ep, op) = (
+            engine.local_addr().unwrap().port(),
+            other.local_addr().unwrap().port(),
+        );
+        register_engine_port(ep);
+        let ws = tempfile::tempdir().unwrap();
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
+        assert!(macos::seatbelt_profile(&pol).contains(&format!("localhost:{ep}")));
+        let probe = |port: u16| {
+            let mut c = confined_command(&format!("nc -z -w 2 127.0.0.1 {port}"), &pol).unwrap();
+            c.current_dir(ws.path());
+            c
+        };
+        let blocked = probe(ep).output().await.unwrap();
+        let open = probe(op).output().await.unwrap();
+        assert!(open.status.success(), "control port must stay reachable");
+        assert!(
+            !blocked.status.success(),
+            "engine port reached from confined Bash"
+        );
+    }
+
     /// Audit H1 (macOS): confined Bash can write the workspace but not its
     /// `.thclaws/settings.json`, which the watcher would hot-reload.
     #[cfg(target_os = "macos")]
@@ -1115,6 +1396,65 @@ mod tests {
         assert!(!ws.path().join(".thclaws/new.json").exists());
         let out = run("echo x > ok.txt").output().await.unwrap();
         assert!(out.status.success() && ws.path().join("ok.txt").exists());
+    }
+
+    /// Audit #4/#6/#7 (macOS): the rest of the protected list is denied to
+    /// confined Bash too, including names that do not exist yet and case
+    /// variants, while ordinary `.git` writes keep working.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_bash_cannot_write_protected_paths() {
+        if binary_on_path("sandbox-exec").is_none() {
+            return;
+        }
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join(".git/hooks")).unwrap();
+        std::fs::write(ws.path().join(".git/config"), "[core]\n").unwrap();
+        let pol = build_policy(ConfineMode::Workspace, ws.path(), &[], &[], false);
+        let run = |cmd: &str| {
+            let mut c = confined_command(cmd, &pol).unwrap();
+            c.current_dir(ws.path());
+            c
+        };
+        for cmd in [
+            "printf '[core]\\n\\tfsmonitor = touch pwned\\n' >> .git/config",
+            "echo x > .git/hooks/pre-commit",
+            "mkdir -p .claude/skills && echo x > .claude/skills/x.md",
+            "echo '{}' > .mcp.json",
+            "echo PATH=/tmp > .env",
+            "echo X=1 > .ENV.local",
+            "echo rules > AGENTS.md",
+            "echo rules > CLAUDE.md",
+        ] {
+            let _ = run(cmd).output().await.unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join(".git/config")).unwrap(),
+            "[core]\n"
+        );
+        for rel in [
+            ".git/hooks/pre-commit",
+            ".claude",
+            ".mcp.json",
+            ".env",
+            ".ENV.local",
+            "AGENTS.md",
+            "CLAUDE.md",
+        ] {
+            assert!(!ws.path().join(rel).exists(), "{rel} was written");
+        }
+        let out = run(
+            "echo ref > .git/HEAD && mkdir -p src && echo x > src/.env.rs \
+             && echo K= > .env.example && echo K= > .ENV.Sample && echo K= > .env.template",
+        )
+        .output()
+        .await
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// 49.2 acceptance (macOS): a write INSIDE the workspace succeeds; writes

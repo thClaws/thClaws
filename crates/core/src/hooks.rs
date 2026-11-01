@@ -68,6 +68,28 @@ pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 5;
 /// per-arg env limits (POSIX MAX_ARG_STRLEN ≈ 128KB but conservative).
 pub const MAX_HOOK_ENV_BYTES: usize = 8192;
 
+/// cmd.exe expands `%VAR%` into the command line BEFORE parsing it, so a
+/// hook like `echo %THCLAWS_TOOL_OUTPUT% >> log` would run any `&calc` a
+/// web page put in the tool output. On Windows every hook env value is
+/// defanged; the full tool input is still on stdin for the gate.
+fn hook_env_value(v: &str) -> String {
+    if cfg!(windows) {
+        cmd_inert(v)
+    } else {
+        v.to_string()
+    }
+}
+
+fn cmd_inert(v: &str) -> String {
+    v.chars()
+        .map(|c| match c {
+            '&' | '|' | '<' | '>' | '^' | '%' | '!' | '"' | '(' | ')' => '_',
+            '\r' | '\n' => ' ',
+            c => c,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct HooksConfig {
@@ -245,7 +267,7 @@ pub fn fire(config: &HooksConfig, event: HookEvent, env: &HashMap<String, String
 
     command.env("THCLAWS_HOOK_EVENT", event.name());
     for (k, v) in env {
-        command.env(k, v);
+        command.env(k, hook_env_value(v));
     }
     // M6.35 HOOK6: redirect all three to /dev/null (or NUL on Windows
     // — Stdio::null is cross-platform). Pre-fix the inherited stdio
@@ -258,10 +280,23 @@ pub fn fire(config: &HooksConfig, event: HookEvent, env: &HashMap<String, String
     let event_name = event.name();
     match command.spawn() {
         Ok(mut child) => {
+            // Windows: `child.kill()` reaches cmd.exe only; the job takes the
+            // hook's own children down with it on a timeout.
+            #[cfg(windows)]
+            let job = crate::util::KillOnCloseJob::for_child(&child);
             // M6.35 HOOK5 + HOOK7: reap + timeout. Detached so the
             // caller doesn't await.
             tokio::spawn(async move {
-                match tokio::time::timeout(timeout, child.wait()).await {
+                let waited = tokio::time::timeout(timeout, child.wait()).await;
+                #[cfg(windows)]
+                if let Some(job) = job {
+                    if waited.is_ok() {
+                        job.release();
+                    } else {
+                        job.kill();
+                    }
+                }
+                match waited {
                     Ok(Ok(status)) => {
                         if !status.success() {
                             let code = status
@@ -354,7 +389,7 @@ pub async fn fire_pre_tool_use_gate(
         command.env_remove(k);
     }
     command.env("THCLAWS_HOOK_EVENT", HookEvent::PreToolUse.name());
-    command.env("THCLAWS_TOOL_NAME", tool_name);
+    command.env("THCLAWS_TOOL_NAME", hook_env_value(tool_name));
     // The env var stays truncated (per-arg env limits), but the FULL,
     // untruncated tool input is also piped on STDIN — so a screening hook
     // sees the entire command even when it exceeds MAX_HOOK_ENV_BYTES (an
@@ -363,7 +398,7 @@ pub async fn fire_pre_tool_use_gate(
     // tells the hook the full payload is available there.
     command.env(
         "THCLAWS_TOOL_INPUT",
-        truncate_for_env(input, MAX_HOOK_ENV_BYTES),
+        hook_env_value(&truncate_for_env(input, MAX_HOOK_ENV_BYTES)),
     );
     command.env("THCLAWS_TOOL_INPUT_ON_STDIN", "1");
     command.stdin(std::process::Stdio::piped());
@@ -374,6 +409,9 @@ pub async fn fire_pre_tool_use_gate(
         Ok(c) => c,
         Err(e) => return on_gate_failure(format!("spawn failed: {e}")),
     };
+    // Dropped on the timeout return below, which kills the hook's tree.
+    #[cfg(windows)]
+    let job = crate::util::KillOnCloseJob::for_child(&child);
     // Stream the full input on stdin from a detached task so a hook that
     // writes a lot to stdout can't deadlock against our write.
     if let Some(mut stdin) = child.stdin.take() {
@@ -392,6 +430,10 @@ pub async fn fire_pre_tool_use_gate(
             return on_gate_failure(format!("timed out after {}s", config.timeout().as_secs()))
         }
     };
+    #[cfg(windows)]
+    if let Some(job) = job {
+        job.release();
+    }
 
     match out.status.code() {
         // Explicit deny (Claude-Code convention) — stderr is the reason.
@@ -473,6 +515,16 @@ pub fn fire_compact(config: &HooksConfig, event: HookEvent, message_count: usize
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cmd_expansion_cannot_inject_commands() {
+        let evil = "ok\" & calc & echo \"%PATH%\" | x > y ^ ! (z)\r\nnext";
+        let safe = cmd_inert(evil);
+        assert!(!safe.contains(['&', '|', '<', '>', '^', '%', '!', '"', '(', ')', '\r', '\n']));
+        assert!(safe.contains("calc") && safe.contains("next"));
+        assert_eq!(cmd_inert("tool: Read /a/b.txt"), "tool: Read /a/b.txt");
+    }
+
     use super::*;
 
     #[tokio::test]

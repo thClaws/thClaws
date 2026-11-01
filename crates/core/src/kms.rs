@@ -349,7 +349,12 @@ pub(crate) fn with_kms_lock<T>(kref: &KmsRef, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// Off in a multiuser pod: `$HOME` there is the pod's, so a user-scope vault
+/// would be one vault for every member. Members keep their project scope.
 fn user_root() -> Option<PathBuf> {
+    if crate::workdir::is_multiuser() {
+        return None;
+    }
     crate::util::home_dir()
         .map(|h| h.join(format!(".config/{}/kms", crate::profile::app_dir_name())))
 }
@@ -361,8 +366,14 @@ const PROJECT_KMS_DIR: &str = ".thclaws/state/kms";
 /// agent runs from its own folder, and the project root used to follow
 /// the process cwd — so a vault built by one agent did not exist for the
 /// next. Outside a host `workspace_root()` IS the cwd, so nothing moves.
-fn project_root() -> PathBuf {
-    crate::workdir::workspace_root().join(PROJECT_KMS_DIR)
+///
+/// In a multiuser pod it is the calling member's own workspace, and `None`
+/// outside a member scope rather than the pod root every member shares.
+fn project_root() -> Option<PathBuf> {
+    if crate::workdir::is_multiuser() {
+        return crate::workdir::scoped_root().map(|r| r.join(PROJECT_KMS_DIR));
+    }
+    Some(crate::workdir::workspace_root().join(PROJECT_KMS_DIR))
 }
 
 /// Where this agent's project vaults lived before D1, when that is a
@@ -370,8 +381,11 @@ fn project_root() -> PathBuf {
 /// what could not move — a vault whose name another agent's vault took
 /// first — and that one stays reachable to the agent that owns it.
 fn legacy_project_root() -> Option<PathBuf> {
+    if crate::workdir::is_multiuser() {
+        return None;
+    }
     let legacy = std::env::current_dir().ok()?.join(PROJECT_KMS_DIR);
-    let shared = project_root();
+    let shared = project_root()?;
     let same = match (legacy.canonicalize(), shared.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => legacy == shared,
@@ -391,7 +405,7 @@ pub fn writable_scope_roots() -> Vec<PathBuf> {
 fn scope_root(scope: KmsScope) -> Option<PathBuf> {
     match scope {
         KmsScope::User => user_root(),
-        KmsScope::Project => Some(project_root()),
+        KmsScope::Project => project_root(),
         KmsScope::Shared => crate::shared::shared_kms_root(),
     }
 }
@@ -402,9 +416,11 @@ fn scope_root(scope: KmsScope) -> Option<PathBuf> {
 /// that agent saw before D1 and loses nothing.
 fn scope_roots(scope: KmsScope) -> Vec<PathBuf> {
     if scope == KmsScope::Project {
-        migrate_legacy_project_kms();
+        if !crate::workdir::is_multiuser() {
+            migrate_legacy_project_kms();
+        }
         let mut roots: Vec<PathBuf> = legacy_project_root().into_iter().collect();
-        roots.push(project_root());
+        roots.extend(project_root());
         return roots;
     }
     scope_root(scope).into_iter().collect()
@@ -12061,5 +12077,27 @@ Inline `PostgreSQL` in code span.\n\
         assert!(cfg.gateway_use_for.iter().any(|p| p == "openai"));
 
         std::env::remove_var("THCLAWS_SHARED_AGENT_DIR");
+    }
+
+    /// M-c: in a multiuser pod the project KMS lives in the calling member's
+    /// workspace (never the pod root), and the pod-shared `$HOME` user scope
+    /// is off.
+    #[test]
+    fn multiuser_kms_roots_follow_the_member() {
+        let alice = tempfile::tempdir().unwrap();
+        let bob = tempfile::tempdir().unwrap();
+        crate::workdir::set_multiuser(true);
+        let unscoped = (project_root(), scope_roots(KmsScope::Project));
+        let a = crate::workdir::sync_scope_workdir(alice.path().to_path_buf(), || {
+            (writable_scope_roots(), user_root())
+        });
+        let b = crate::workdir::sync_scope_workdir(bob.path().to_path_buf(), writable_scope_roots);
+        crate::workdir::set_multiuser(false);
+
+        assert_eq!(unscoped.0, None);
+        assert!(unscoped.1.is_empty());
+        assert_eq!(a.0, vec![alice.path().join(PROJECT_KMS_DIR)]);
+        assert_eq!(a.1, None, "user scope is off in multiuser");
+        assert_eq!(b, vec![bob.path().join(PROJECT_KMS_DIR)]);
     }
 }

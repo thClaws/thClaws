@@ -41,9 +41,16 @@ impl Tool for EditTool {
         true
     }
 
+    fn forces_approval(&self, input: &Value) -> bool {
+        input
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(crate::sandbox::Sandbox::forces_instructions_approval)
+    }
+
     async fn call(&self, input: Value) -> Result<String> {
         let raw_path = req_str(&input, "path")?;
-        let path = crate::sandbox::Sandbox::check_write(raw_path)?;
+        let path = crate::sandbox::Sandbox::check_write_approved(raw_path)?;
         // Same rationale as Write: lead is a coordinator, never the author.
         // Narrow exception for active merge-conflict resolution — see
         // write.rs for the full reasoning.

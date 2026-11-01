@@ -504,6 +504,39 @@ pub fn direct_command(program: &str) -> std::process::Command {
     c
 }
 
+/// `git` for the engine's own calls (prompt context, team worktrees and
+/// merges). Those run unconfined, in a repo whose `.git/config` an agent or
+/// a cloned project controls, so the settings that make git execute
+/// repo-chosen programs are overridden: an fsmonitor hook runs on every
+/// `git status`, and hooks run on commit/merge/checkout (audit 2026-11-01
+/// #4). System config stays on — Git for Windows keeps `core.autocrlf`
+/// there, and worktree checkouts must match the user's.
+pub fn engine_git() -> std::process::Command {
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+    let mut c = std::process::Command::new("git");
+    c.args(ENGINE_GIT_SAFETY_ARGS);
+    #[cfg(target_os = "windows")]
+    c.creation_flags(0x08000000);
+    c
+}
+
+pub const ENGINE_GIT_SAFETY_ARGS: [&str; 4] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    if cfg!(windows) {
+        "core.hooksPath=NUL"
+    } else {
+        "core.hooksPath=/dev/null"
+    },
+];
+
+/// cmd.exe looks for a bare program name (`git`, `npm`) in the current
+/// directory before PATH, so a `git.bat` planted in the workspace ran in
+/// place of git. With this set cmd.exe searches PATH only.
+#[cfg(target_os = "windows")]
+const NO_CWD_IN_EXE_PATH: &str = "NoDefaultCurrentDirectoryInExePath";
+
 /// Build a sync `std::process::Command` that runs a shell-string in
 /// the platform's default shell. On Windows this is `cmd.exe /C
 /// <cmd>`; on Unix it's `/bin/sh -c <cmd>`. Centralized here so the
@@ -529,6 +562,7 @@ pub fn shell_command_sync(command: &str) -> std::process::Command {
         }
         // hide the console window
         c.creation_flags(0x08000000);
+        c.env(NO_CWD_IN_EXE_PATH, "1");
     }
 
     c
@@ -688,6 +722,7 @@ pub fn shell_command_async(command: &str) -> tokio::process::Command {
         }
         // hide the console window
         c.creation_flags(0x08000000);
+        c.env(NO_CWD_IN_EXE_PATH, "1");
     }
 
     c
@@ -709,6 +744,91 @@ pub(crate) fn shell_invocation() -> (String, String) {
         ("cmd".to_string(), "/C".to_string())
     } else {
         ("/bin/sh".to_string(), "-c".to_string())
+    }
+}
+
+/// A Job Object holding one shell child and everything it starts.
+///
+/// Windows has no process groups to signal, so killing `cmd.exe` left its
+/// children running after Stop or a timeout (audit 2026-11-01, Windows).
+/// The job is created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`: dropping
+/// it kills the whole tree, [`KillOnCloseJob::release`] lets the tree outlive
+/// it (a background server). Processes the child starts before it is
+/// assigned escape the job; for `cmd /C` that window is its own startup.
+#[cfg(target_os = "windows")]
+pub struct KillOnCloseJob(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: a job handle is a kernel object reference, usable from any thread.
+#[cfg(target_os = "windows")]
+unsafe impl Send for KillOnCloseJob {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for KillOnCloseJob {}
+
+#[cfg(target_os = "windows")]
+impl KillOnCloseJob {
+    pub fn for_child(child: &tokio::process::Child) -> Option<Self> {
+        Self::for_process(child.raw_handle()? as windows_sys::Win32::Foundation::HANDLE)
+    }
+
+    fn for_process(process: windows_sys::Win32::Foundation::HANDLE) -> Option<Self> {
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        // SAFETY: plain Win32 calls; the handle is owned by `Self` from here
+        // and closed exactly once in `Drop`.
+        unsafe {
+            let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if h.is_null() {
+                return None;
+            }
+            let job = Self(h);
+            if !job.set_kill_on_close(true) || AssignProcessToJobObject(job.0, process) == 0 {
+                return None;
+            }
+            Some(job)
+        }
+    }
+
+    fn set_kill_on_close(&self, on: bool) -> bool {
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        // SAFETY: a zeroed JOBOBJECT_EXTENDED_LIMIT_INFORMATION is a valid
+        // "no limits" value, and the pointer/length pair describes it.
+        unsafe {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            if on {
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            }
+            SetInformationJobObject(
+                self.0,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+        }
+    }
+
+    /// Kill every process in the job now.
+    pub fn kill(self) {
+        // SAFETY: valid job handle; closing follows in Drop.
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1);
+        }
+    }
+
+    /// Close the job without killing what is in it.
+    pub fn release(self) {
+        self.set_kill_on_close(false);
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for KillOnCloseJob {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateJobObjectW and is closed once.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
     }
 }
 

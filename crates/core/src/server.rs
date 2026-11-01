@@ -33,7 +33,7 @@ use crate::providers::provider_has_credentials;
 use crate::session::SessionStore;
 use crate::shared_session::{SharedSessionHandle, ShellInput, ViewEvent};
 use crate::uploads::{
-    ensure_target_dir, ensure_uploads_dir, render_upload_message, unique_path, UploadedFile,
+    ensure_target_dir, ensure_uploads_dir, render_upload_message, write_unique, UploadedFile,
     UPLOADS_DIRNAME, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES,
 };
 use axum::body::{Body, Bytes};
@@ -217,7 +217,7 @@ fn desktop_internal_serve(bind: &SocketAddr) -> bool {
     desktop_internal_serve_with(
         bind,
         std::env::var("THCLAWS_SUPERVISED").ok().as_deref(),
-        std::env::var("THCLAWS_SERVE_TOKEN").ok().as_deref(),
+        serve_token().as_deref(),
     ) && parent_is_this_binary()
 }
 
@@ -658,8 +658,26 @@ pub async fn run_with_engine(
     // two differ, and the banner used to print `:0`.
     let bound = listener.local_addr().unwrap_or(config.bind);
     let app = loopback_guarded(app, &bound);
+    if is_loopback(&bound) {
+        crate::confine::register_engine_port(bound.port());
+    }
+    // The minted token is process-global; under the test harness every
+    // `run_on` shares one process, and one test's token would gate the rest.
+    let minted = if cfg!(test) {
+        None
+    } else {
+        ensure_loopback_token(
+            &bound,
+            config.multi_tenant.is_some() || config.gui_shell.is_some(),
+        )
+    };
     if config.gui_shell.is_none() {
         eprintln!("\x1b[36m[serve] thClaws listening on http://{bound}\x1b[0m");
+        if let Some(t) = &minted {
+            eprintln!(
+                "\x1b[36m[serve] open http://{bound}/?token={t} (no THCLAWS_SERVE_TOKEN was set, so this one is per launch)\x1b[0m"
+            );
+        }
         eprintln!("\x1b[36m[serve] open the URL above in your browser (over an SSH tunnel for remote access)\x1b[0m");
     }
     publish_bound_addr(bound);
@@ -1309,6 +1327,14 @@ pub async fn run_supervisor_on(listener: tokio::net::TcpListener) -> crate::erro
         .local_addr()
         .map_err(|e| crate::error::Error::Tool(format!("listener address: {e}")))?;
     eprintln!("\x1b[36m[serve] thClaws host listening on http://{bound}\x1b[0m");
+    if is_loopback(&bound) {
+        crate::confine::register_engine_port(bound.port());
+    }
+    if let Some(t) = ensure_loopback_token(&bound, false) {
+        eprintln!(
+            "\x1b[36m[serve] open http://{bound}/?token={t} (no THCLAWS_SERVE_TOKEN was set, so this one is per launch)\x1b[0m"
+        );
+    }
     publish_bound_addr(bound);
     axum::serve(listener, loopback_guarded(supervisor_router(sup), &bound))
         .await
@@ -1390,7 +1416,9 @@ async fn supervisor_ws(
     ws: WebSocketUpgrade,
     State(sup): State<Arc<crate::bots::supervisor::BotSupervisor>>,
     Query(q): Query<BotQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
+    let origin = headers.get(axum::http::header::ORIGIN).cloned();
     // dev-plan/59 §6.3: the UI holds one socket per bot, so the slug travels
     // in the URL rather than in every frame. No `?bot=` is the plain
     // single-bot case and the pre-UI default.
@@ -1403,7 +1431,7 @@ async fn supervisor_ws(
     let counter = host_ws_connections();
     ws.on_upgrade(move |socket| async move {
         let _guard = WsGuard::new(counter);
-        crate::bots::proxy::relay(socket, bot).await
+        crate::bots::proxy::relay(socket, bot, origin).await
     })
 }
 
@@ -2655,7 +2683,6 @@ async fn serve_upload(
             .map(|s| s.to_string())
             .unwrap_or_else(|| "upload".to_string());
         let media_type = field.content_type().map(|s| s.to_string());
-        let dest = unique_path(&uploads_dir, &filename);
         let bytes = match field.bytes().await {
             Ok(b) => b,
             Err(e) => {
@@ -2682,16 +2709,19 @@ async fn serve_upload(
             )
                 .into_response();
         }
-        if let Err(e) = std::fs::write(&dest, &bytes) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("write {}: {e}", dest.display()),
-                })),
-            )
-                .into_response();
-        }
+        let dest = match write_unique(&uploads_dir, &filename, &bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("write {filename}: {e}"),
+                    })),
+                )
+                    .into_response();
+            }
+        };
         let relative_path = dest
             .strip_prefix(workspace)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -2779,7 +2809,25 @@ async fn ws_handler(
         Ok(handle) => handle,
         Err(status) => return status.into_response(),
     };
-    ws.on_upgrade(move |socket| handle_socket(socket, state, resolved_shared))
+    let browser = browser_client(&headers);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, resolved_shared, browser))
+}
+
+/// #3 defense in depth: a browser always sends `Origin` on a WebSocket
+/// handshake; a bare client (curl, a script an agent wrote) need not. The PTY
+/// and the shell-tab switch open a shell outside the Bash sandbox, so they
+/// want a browser tab or the desktop window. This is not authentication — a
+/// local process holding the token can forge the header, and nothing on a
+/// loopback socket proves which process is on the other end. It turns a
+/// stolen token into a socket that can drive the agent (which still asks for
+/// approval) rather than one that gets a shell outright. On a loopback bind
+/// `serve_loopback_guard` has already refused any non-loopback Origin.
+fn browser_client(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .is_some_and(|o| !o.is_empty() && o != "null")
 }
 
 /// dev-plan/35 Tier 1: verify HMAC headers + confirm the requested
@@ -2846,17 +2894,30 @@ fn verify_file_asset_for_user(
 /// supervisor runs several engines on loopback for different bots, because
 /// then any one of them is reachable by anything else on the machine.
 ///
-/// Configured by `THCLAWS_SERVE_TOKEN`, deliberately an env var and NOT a
-/// flag: argv is world-readable through `ps`, while the environment of a
-/// process is not readable by other users on either macOS or Linux.
-///
-/// **Unset or empty = no auth = exactly today's behaviour.** This is
-/// additive; an existing `--serve` user sees no change unless they opt in.
+/// A user may set `THCLAWS_SERVE_TOKEN` (an env var, not a flag: argv is
+/// world-readable through `ps`). A supervisor hands its child the token over
+/// stdin instead, and a loopback serve with none mints one at startup
+/// ([`ensure_loopback_token`]) — both held in-process, never in the env.
 fn serve_token() -> Option<String> {
-    std::env::var("THCLAWS_SERVE_TOKEN")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    crate::api_v1::guard::serve_token()
+}
+
+/// Loopback single-user `--serve` with no bearer accepted every local process,
+/// including an agent's own confined Bash. Mint one and print the URL that
+/// carries it, which is how the web UI picks it up (`?token=`). Skipped when
+/// something else authenticates: a proxy in front, multiuser HMAC, or a bound
+/// gui-shell's own token. Returns the minted token.
+fn ensure_loopback_token(bind: &SocketAddr, own_auth: bool) -> Option<String> {
+    if serve_token().is_some()
+        || own_auth
+        || !bind.ip().is_loopback()
+        || crate::api_v1::guard::serve_behind_proxy()
+    {
+        return None;
+    }
+    let token = crate::bots::supervisor::mint_token();
+    crate::api_v1::guard::set_serve_token(Some(token.clone()));
+    Some(token)
 }
 
 /// Constant-time compare so a wrong token cannot be recovered byte by byte
@@ -2961,7 +3022,12 @@ fn resolve_session_handle(
 /// alongside the snapshot frame. SERVE2's WS is half-duplex (inbound
 /// only) so the IpcContext + handle_ipc plumbing can be smoke-tested
 /// before the rendering layer is wired.
-async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedSessionHandle>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: ServeState,
+    shared: Arc<SharedSessionHandle>,
+    browser: bool,
+) {
     // Tick the cloud-heartbeat counter for the lifetime of this socket.
     // `_ws_guard` decrements on drop so panics / early returns can't
     // leak a stale count. The cloud heartbeat task reads this to
@@ -3206,7 +3272,10 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
         }
     });
 
-    let ipc_root = member_workspace_root(&shared);
+    // The dev-plan/35 layout has no per-member folder; its members share the
+    // pod root by design, so frames scope to that instead of failing closed.
+    let ipc_root = member_workspace_root(&shared)
+        .or_else(|| crate::workdir::is_multiuser().then(crate::workdir::workspace_root));
     // Inbound reader loop.
     while let Some(frame) = stream.next().await {
         match frame {
@@ -3214,6 +3283,13 @@ async fn handle_socket(socket: WebSocket, state: ServeState, shared: Arc<SharedS
                 let Ok(msg) = serde_json::from_str::<serde_json::Value>(text.as_str()) else {
                     continue;
                 };
+                if !browser {
+                    let ty = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    if let Some(reason) = crate::ipc::browser_only_refusal(ty) {
+                        (ctx.dispatch)(crate::ipc::refusal_frame(ty, &msg, reason));
+                        continue;
+                    }
+                }
                 // Web has no fall-through transport — anything
                 // handle_ipc doesn't recognize is silently dropped.
                 // Multiuser: every file op in the frame resolves inside the
@@ -4332,6 +4408,74 @@ mod tests {
             Some(x) => std::env::set_var("THCLAWS_SERVE_TOKEN", x),
             None => std::env::remove_var("THCLAWS_SERVE_TOKEN"),
         }
+    }
+
+    /// #3: a token handed over in-process wins over the env, and a loopback
+    /// serve with neither mints one instead of accepting every local process.
+    #[test]
+    fn loopback_serve_mints_a_token_unless_one_is_configured() {
+        let _g = crate::kms::test_env_lock();
+        let keys = [
+            "THCLAWS_SERVE_TOKEN",
+            "THCLAWS_SERVE_BEHIND_PROXY",
+            "THCLAWS_HOSTED",
+            "KUBERNETES_SERVICE_HOST",
+        ];
+        let prev: Vec<_> = keys.iter().map(|k| std::env::var(k).ok()).collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        let lo: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let public: SocketAddr = "0.0.0.0:0".parse().unwrap();
+
+        crate::api_v1::guard::set_serve_token(None);
+        assert!(ensure_loopback_token(&public, false).is_none());
+        assert!(ensure_loopback_token(&lo, true).is_none());
+        assert!(serve_token().is_none());
+        let minted = ensure_loopback_token(&lo, false).expect("minted");
+        assert_eq!(serve_token().as_deref(), Some(minted.as_str()));
+        assert!(!serve_token_ok(&axum::http::HeaderMap::new(), None));
+        assert!(serve_token_ok(
+            &axum::http::HeaderMap::new(),
+            Some(&format!("token={minted}"))
+        ));
+        assert!(
+            ensure_loopback_token(&lo, false).is_none(),
+            "one per launch"
+        );
+
+        std::env::set_var("THCLAWS_SERVE_TOKEN", "from-env");
+        assert_eq!(serve_token().as_deref(), Some(minted.as_str()));
+        crate::api_v1::guard::set_serve_token(None);
+        assert_eq!(serve_token().as_deref(), Some("from-env"));
+        assert!(ensure_loopback_token(&lo, false).is_none());
+        std::env::remove_var("THCLAWS_SERVE_TOKEN");
+
+        std::env::set_var("THCLAWS_SERVE_BEHIND_PROXY", "1");
+        assert!(ensure_loopback_token(&lo, false).is_none());
+
+        crate::api_v1::guard::set_serve_token(None);
+        for (k, v) in keys.iter().zip(prev) {
+            match v {
+                Some(x) => std::env::set_var(k, x),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_browser_origin_counts_as_a_browser() {
+        let with = |o: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            if let Some(o) = o {
+                h.insert(axum::http::header::ORIGIN, o.parse().unwrap());
+            }
+            browser_client(&h)
+        };
+        assert!(with(Some("http://127.0.0.1:8443")));
+        assert!(!with(None));
+        assert!(!with(Some("null")));
+        assert!(!with(Some("  ")));
     }
 
     /// so "no token configured" must behave exactly as before.

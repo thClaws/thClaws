@@ -233,6 +233,10 @@ impl Client {
             .get("x-agent-uuid")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        let official = res
+            .headers()
+            .get("x-agent-official")
+            .is_some_and(|v| v.as_bytes() == b"1");
         let bytes = res
             .bytes()
             .await
@@ -242,6 +246,7 @@ impl Client {
             version,
             sha256,
             uuid,
+            official,
             bytes,
         })
     }
@@ -680,5 +685,8 @@ pub struct DownloadResult {
     /// Preferred over peeking inside the tarball — the on-disk
     /// manifest.json may pre-date the Option-A identity split.
     pub uuid: Option<String>,
+    /// `X-Agent-Official: 1`: owned by the platform publisher. An older
+    /// server sends nothing, which reads as not official.
+    pub official: bool,
     pub bytes: Vec<u8>,
 }

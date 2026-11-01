@@ -913,6 +913,10 @@ async fn main() {
     thclaws_core::audit::init();
 
     let cli = Cli::parse();
+    #[cfg(feature = "gui")]
+    if cli.serve {
+        thclaws_core::bots::supervisor::take_handover_from_stdin();
+    }
 
     // clap's `requires = "serve"` does not fire for a flag: `--serve` has an
     // implicit `false` default, which counts as present. Without this check
@@ -1415,10 +1419,9 @@ async fn main() {
                     }
                 };
                 let token = thclaws_core::bots::supervisor::mint_token();
-                // Read by the host when it authenticates, and inherited by
-                // every child — which re-mints its own, so this never becomes
-                // a child's.
-                std::env::set_var("THCLAWS_SERVE_TOKEN", &token);
+                // In-process, not the env: a child inherits the env at exec,
+                // where any same-user process can read it back.
+                thclaws_core::api_v1::guard::set_serve_token(Some(token.clone()));
                 let cwd = std::env::current_dir().unwrap_or_default();
                 let default_bot = thclaws_core::bots::BotsConfig::load(&cwd)
                     .ok()

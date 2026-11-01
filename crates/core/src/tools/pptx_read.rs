@@ -43,7 +43,7 @@ impl Tool for PptxReadTool {
         let raw_path = req_str(&input, "path")?;
         let validated = crate::sandbox::Sandbox::check(raw_path)?;
         let path_clone = validated.clone();
-        tokio::task::spawn_blocking(move || extract_pptx(&path_clone))
+        crate::workdir::spawn_blocking_scoped(move || extract_pptx(&path_clone))
             .await
             .map_err(|e| Error::Tool(format!("PPTX worker join failed: {e}")))?
     }

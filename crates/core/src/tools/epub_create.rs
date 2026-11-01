@@ -197,9 +197,10 @@ impl Tool for EpubCreateTool {
             image_base,
         };
 
-        let (n_chapters, n_images) = tokio::task::spawn_blocking(move || render_epub(spec))
-            .await
-            .map_err(|e| Error::Tool(format!("EPUB worker join failed: {e}")))??;
+        let (n_chapters, n_images) =
+            crate::workdir::spawn_blocking_scoped(move || render_epub(spec))
+                .await
+                .map_err(|e| Error::Tool(format!("EPUB worker join failed: {e}")))??;
 
         Ok(format!(
             "Wrote EPUB to {} ({} chapter{}, {} image{})",

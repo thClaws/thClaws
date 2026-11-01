@@ -130,7 +130,7 @@ impl Tool for DocxCreateTool {
         let path_clone = validated.clone();
         let content_clone = content.to_string();
 
-        let bytes = tokio::task::spawn_blocking(move || -> Result<usize> {
+        let bytes = crate::workdir::spawn_blocking_scoped(move || -> Result<usize> {
             render_docx(&path_clone, &content_clone, body_pt)
         })
         .await

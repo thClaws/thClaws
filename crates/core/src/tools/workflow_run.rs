@@ -294,7 +294,7 @@ impl Tool for WorkflowRunTool {
                 Vec<crate::providers::Usage>,
             ),
             tokio::task::JoinError,
-        > = tokio::task::spawn_blocking(move || {
+        > = crate::workdir::spawn_blocking_scoped(move || {
             crate::workflow::set_task_tool(task_tool);
             crate::workflow::set_usage_sink(true);
             #[cfg(feature = "gui")]

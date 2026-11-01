@@ -215,20 +215,15 @@ pub fn start(script: &str, budget_usd: f64, resume: bool) -> Result<String> {
         // gateway call in run_job attaches X-Thclaws-Member — otherwise
         // the most expensive media path (FilmGenerate) spends entirely
         // unattributed and escapes the per-member daily cap.
-        let member = crate::multi_tenant::current_member_id();
+        // The workdir scope is lost the same way, and without it every file
+        // the job writes would resolve against the shared pod root.
+        let scope = crate::workdir::Scope::capture();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            let outcome = rt.block_on(async {
-                match member {
-                    Some(m) => {
-                        crate::multi_tenant::scope_member(m, run_job(&jid, &script, &flag)).await
-                    }
-                    None => run_job(&jid, &script, &flag).await,
-                }
-            });
+            let outcome = rt.block_on(scope.run(run_job(&jid, &script, &flag)));
             let mut st = JobState::load(&jid).unwrap_or(state);
             match outcome {
                 Ok(()) => st.state = STATE_DONE.into(),

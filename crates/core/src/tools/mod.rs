@@ -148,6 +148,13 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Ask even when the mode would not (auto), like a tool named in
+    /// `askTools`. Write/Edit use it for the workspace's `AGENTS.md` /
+    /// `CLAUDE.md`, which every later system prompt loads.
+    fn forces_approval(&self, _input: &Value) -> bool {
+        false
+    }
+
     /// One short line the approval prompt shows alongside the tool name, for
     /// the case where the tool name alone does not tell the user what they
     /// are agreeing to. `PdfRead` uses it to say that the file is about to
