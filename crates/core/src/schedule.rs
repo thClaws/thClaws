@@ -2229,6 +2229,7 @@ mod tests {
         None
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_watch_event_fires_the_schedule() {
         let bin_dir = tempfile::tempdir().unwrap();

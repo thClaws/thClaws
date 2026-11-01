@@ -181,11 +181,29 @@ pub fn ensure_target_dir(workspace: &Path, rel: &str) -> std::io::Result<PathBuf
     let candidate = Path::new(rel);
     let unsafe_component = candidate
         .components()
-        .any(|c| !matches!(c, std::path::Component::Normal(_)));
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        || rel.split(['/', '\\']).any(|c| {
+            crate::sandbox::windows_component_problem(c).is_some()
+                || crate::sandbox::looks_like_short_name(c)
+        });
     if unsafe_component {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsafe upload dir: {rel}"),
+        ));
+    }
+    // `?dir=.thclaws/gui-shell/x` would plant a shell with its own manifest.
+    let protected = match (
+        workspace.canonicalize(),
+        crate::sandbox::Sandbox::check_in(workspace, rel),
+    ) {
+        (Ok(root), Ok(landing)) => crate::sandbox::protected_match(&root, &landing),
+        _ => None,
+    };
+    if let Some(hit) = protected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("upload dir {rel} is inside the protected path {}", hit.rel),
         ));
     }
     contained_dir(workspace, rel)
@@ -317,6 +335,30 @@ mod tests {
         for bad in ["../escape", "raw/../../etc", "..", "  "] {
             assert!(ensure_target_dir(ws, bad).is_err(), "should reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn ensure_target_dir_refuses_protected_and_windows_unsafe_dirs() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path();
+        for bad in [
+            ".thclaws/gui-shell/x",
+            ".THCLAWS",
+            ".claude",
+            ".git/hooks",
+            ".Git/Info/x",
+            "raw:stream",
+            "C:evil",
+            "NUL",
+            "raw/com1.d",
+            "raw.",
+            "THCLAW~1/gui-shell",
+        ] {
+            assert!(ensure_target_dir(ws, bad).is_err(), "should reject {bad:?}");
+        }
+        assert!(!ws.join(".thclaws").exists());
+        assert!(ensure_target_dir(ws, "raw/2026-11 notes").is_ok());
+        assert!(ensure_target_dir(ws, ".github/data").is_ok());
     }
 
     /// M-d: a planted dangling symlink at the upload name (or at the target

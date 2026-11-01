@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.152.0] — 2026-11-02
+
+**A security release for `--serve` and Windows.** If you run `thclaws --serve`, upgrade: v0.151.0 stored the server token in a cookie that the browser also sent to every other port on the same host.
+
+### Security
+
+- **`--serve` no longer puts the token in a cookie.** In v0.151.0, opening `/?token=…` stored the raw token in a cookie. Browsers don't separate cookies by port, so any other server on the same host could read it, including a dev server, Jupyter or `python -m http.server`. With it, that server could open the session and upload files. Now:
+  - the page removes `token` from the address bar and keeps it for that tab only;
+  - the cookie holds a hash of the token, is set only when a gui-shell page loads, and lets the browser fetch only that gui-shell's CSS and scripts;
+  - the old cookie is deleted the first time the browser visits an upgraded server.
+  - If you ran v0.151.0 with your own `THCLAWS_SERVE_TOKEN`, change it.
+- **Plugin and skill zips can't install files with unsafe permissions.** setuid, setgid and world-writable bits are dropped.
+- **Lookalike characters can't get around protected paths.** `.thclawſ` (with a long s) opens `.thclaws` on macOS and is now refused the same way.
+- **More environment variables are refused from a project `.env`:** the Windows ones `SystemRoot`, `windir`, `ProgramData`, `PSModulePath` and similar.
+
+### Added
+
+- **Experimental: an LLM second opinion on Bash commands, in shadow mode.** With `THCLAWS_BASH_REVIEW=shadow`, a model rates each Bash command allow, ask or block. It logs the rating next to what you actually decided, in `.thclaws/state/logs/bash-review.jsonl`. It never blocks or delays anything. It uses the session model, or `THCLAWS_BASH_REVIEW_MODEL`, and is off in multiuser servers.
+
+### Changed
+
+- **A team lead can't power off or schedule jobs on macOS and Linux either.** `shutdown`, `reboot`, `crontab`, `at`, `systemd-run`, `launchctl load`/`bootstrap` and `systemctl enable` are refused for the lead, as on Windows. It looks at the command being run, so a commit message containing "shutdown" is fine.
+- **Windows: Bash and hooks can't read the clipboard** or change display or system settings. Writing to the clipboard with `| clip` still works.
+- **Windows: the destructive-command warning understands cmd.exe and PowerShell.** Examples are `rd /s`, `del /s`, `format` and `Remove-Item -Recurse`, including aliases and flags in any order.
+- **Windows: file tools refuse names Windows treats specially.** These are alternate data streams (`a:b`), short `8.3` names, device names (`CON`, `NUL`, `COM1`…), and names ending in a dot or space.
+
+### Fixed
+
+- **Windows: quoted arguments in Bash commands arrive intact.** `git commit -m "a b"` reached git as `\"a` and `b\"`.
+- **Windows: an app started from Bash keeps running** after the command finishes (`start <url>`, `code .`). Stop and timeouts still end everything the command started.
+- **Windows: a command that starts an app no longer hangs the turn** until you close the app.
+- **Bash output is capped at 16 MiB in memory** while a command runs, so a command that floods output can't exhaust memory.
+- **A deeply nested `cmd /c` or `powershell -c` command can't crash thClaws.**
+- **Elixir's `iex` is no longer flagged** as PowerShell's `Invoke-Expression` outside Windows.
+
 ## [0.151.0] — 2026-11-01
 
 **Fixes for Anthropic sessions and for gui-shells on a server that uses a token.**

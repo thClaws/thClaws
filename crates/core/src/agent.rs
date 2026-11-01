@@ -956,7 +956,7 @@ pub struct Agent {
 /// when that provider has no usable credential — all cases where the
 /// caller should keep the session's provider and let the model string
 /// stand on its own.
-fn provider_for_model(model: &str) -> Option<Arc<dyn Provider>> {
+pub(crate) fn provider_for_model(model: &str) -> Option<Arc<dyn Provider>> {
     let mut cfg = crate::config::AppConfig::load().ok()?;
     let current = cfg.detect_provider_kind().ok();
     cross_provider_kind(current, model)?;
@@ -1413,6 +1413,7 @@ impl Agent {
         // `current_mode()` above).
         let ask_tools = self.ask_tools.clone();
         let approver = self.approver.clone();
+        let review_model = self.model.clone();
         let history = self.history.clone();
         let cancel = self.cancel.clone();
         let hooks = self.hooks.clone();
@@ -2296,6 +2297,21 @@ impl Agent {
                     let needs_approval = force_ask
                         || (permission_mode.asks_for_approval() && tool.requires_approval(input));
                     let mut audit_decision = (crate::audit::record::Decision::Allow, "auto");
+                    let review_shadow = name == "Bash" && crate::bash_review::shadow_enabled();
+                    if review_shadow {
+                        if let Some(cmd) = input.get("command").and_then(|c| c.as_str()) {
+                            let user = history
+                                .lock()
+                                .map(|h| crate::bash_review::recent_user_text(&h))
+                                .unwrap_or_default();
+                            crate::bash_review::spawn_shadow(
+                                id.clone(),
+                                cmd.to_string(),
+                                user,
+                                review_model.clone(),
+                            );
+                        }
+                    }
                     if needs_approval {
                         let req = ApprovalRequest {
                             tool_name: name.clone(),
@@ -2321,6 +2337,11 @@ impl Agent {
                             // approver Deny lands here.
                             if let Some(h) = &hooks {
                                 crate::hooks::fire_permission_denied(h, &name);
+                            }
+                            if review_shadow {
+                                crate::bash_review::record_outcome(
+                                    &id, &format!("{permission_mode:?}"), true, "deny", None,
+                                );
                             }
                             let denied = format!("denied by user: {name}");
                             crate::audit::record_denied(
@@ -2388,6 +2409,17 @@ impl Agent {
                             true,
                         ),
                     };
+                    if review_shadow {
+                        let outcome = match (&hook_denied, needs_approval) {
+                            (Some(_), _) => "hook_denied",
+                            (None, true) => "approved",
+                            (None, false) => "auto",
+                        };
+                        crate::bash_review::record_outcome(
+                            &id, &format!("{permission_mode:?}"), needs_approval, outcome,
+                            Some(is_error),
+                        );
+                    }
                     // Anthropic (and some other providers) reject
                     //   user messages must have non-empty content
                     // when a tool result is empty (e.g. a successful

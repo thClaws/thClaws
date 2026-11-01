@@ -551,7 +551,15 @@ const NO_CWD_IN_EXE_PATH: &str = "NoDefaultCurrentDirectoryInExePath";
 /// for the override path.
 pub fn shell_command_sync(command: &str) -> std::process::Command {
     let (shell, flag) = shell_invocation();
-    let mut c = std::process::Command::new(shell);
+    let mut c = std::process::Command::new(&shell);
+    #[cfg(target_os = "windows")]
+    if is_default_cmd(&shell, &flag) {
+        use std::os::windows::process::CommandExt as _;
+        c.args(["/S", "/C"]).raw_arg(cmd_s_c_arg(command));
+    } else {
+        c.arg(flag).arg(command);
+    }
+    #[cfg(not(target_os = "windows"))]
     c.arg(flag).arg(command);
 
     #[cfg(target_os = "windows")]
@@ -709,7 +717,14 @@ pub fn reexec_self() -> std::io::Error {
 /// tool). Same shell-resolution logic as [`shell_command_sync`].
 pub fn shell_command_async(command: &str) -> tokio::process::Command {
     let (shell, flag) = shell_invocation();
-    let mut c = tokio::process::Command::new(shell);
+    let mut c = tokio::process::Command::new(&shell);
+    #[cfg(target_os = "windows")]
+    if is_default_cmd(&shell, &flag) {
+        c.args(["/S", "/C"]).raw_arg(cmd_s_c_arg(command));
+    } else {
+        c.arg(flag).arg(command);
+    }
+    #[cfg(not(target_os = "windows"))]
     c.arg(flag).arg(command);
 
     #[cfg(target_os = "windows")]
@@ -726,6 +741,20 @@ pub fn shell_command_async(command: &str) -> tokio::process::Command {
     }
 
     c
+}
+
+/// `cmd /C` with a normally escaped argument turns every `"` into `\"`,
+/// which cmd does not understand, so `git commit -m "a b"` arrived as
+/// `\"a` and `b\"`. `/S /C "<command>"` makes cmd strip exactly the outer
+/// pair and run the rest verbatim.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_default_cmd(shell: &str, flag: &str) -> bool {
+    shell.eq_ignore_ascii_case("cmd") && flag.eq_ignore_ascii_case("/C")
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn cmd_s_c_arg(command: &str) -> String {
+    format!("\"{command}\"")
 }
 
 /// Resolve `(shell, flag)` for the current host. Honors
@@ -745,6 +774,11 @@ pub(crate) fn shell_invocation() -> (String, String) {
     } else {
         ("/bin/sh".to_string(), "-c".to_string())
     }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+thread_local! {
+    pub static TEST_UI_MASK: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
 /// A Job Object holding one shell child and everything it starts.
@@ -783,7 +817,48 @@ impl KillOnCloseJob {
             if !job.set_kill_on_close(true) || AssignProcessToJobObject(job.0, process) == 0 {
                 return None;
             }
+            // UI limits are extra; failing them (e.g. inside a host's own job)
+            // must not cost the tree kill.
+            if !job.restrict_ui() {
+                eprintln!("[bash] could not apply Job UI limits; continuing without them");
+            }
             Some(job)
+        }
+    }
+
+    /// Keep the tree off the clipboard's contents, desktops, global atoms,
+    /// system parameters, display settings and logoff/shutdown. Writing the
+    /// clipboard stays allowed (`clip`). Other windows are NOT fenced off
+    /// (UILIMIT_HANDLES broke `start <url>`); SendInput is never limited by a job.
+    fn restrict_ui(&self) -> bool {
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicUIRestrictions, SetInformationJobObject, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+            JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+            JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS,
+            JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+        };
+        #[allow(unused_mut)]
+        let mut mask = JOB_OBJECT_UILIMIT_READCLIPBOARD
+            | JOB_OBJECT_UILIMIT_DESKTOP
+            | JOB_OBJECT_UILIMIT_GLOBALATOMS
+            | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+            | JOB_OBJECT_UILIMIT_EXITWINDOWS
+            | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS;
+        #[cfg(test)]
+        if let Some(m) = TEST_UI_MASK.with(|m| m.get()) {
+            mask = m;
+        }
+        let info = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+            UIRestrictionsClass: mask,
+        };
+        // SAFETY: valid job handle; the pointer/length pair describes `info`.
+        unsafe {
+            SetInformationJobObject(
+                self.0,
+                JobObjectBasicUIRestrictions,
+                &info as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+            ) != 0
         }
     }
 

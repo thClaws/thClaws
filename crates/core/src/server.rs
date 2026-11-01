@@ -1877,32 +1877,116 @@ fn publish_bound_addr(bound: SocketAddr) {
 /// multiuser pod is skipped: `multiuser_auth` already proves identity
 /// there and the supervisor never runs one as a child.
 async fn serve_token_gate(State(single_user): State<bool>, req: Request, next: Next) -> Response {
-    if single_user && !serve_token_ok(req.headers(), req.uri().query()) {
+    // v0.151.0 stored the raw token in this cookie; expire it wherever it
+    // shows up so it stops being sent to every other port on this host.
+    let expire_raw = match (single_user, serve_token()) {
+        (true, Some(t)) => {
+            let name = serve_cookie_name(req.headers());
+            raw_cookie_present(req.headers(), &name, &t)
+                .then(|| format!("{name}=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/"))
+        }
+        _ => None,
+    };
+    if single_user
+        && !public_index(&req)
+        && !serve_token_ok(req.headers(), req.uri().query())
+        && !cookie_asset_ok(&req)
+    {
         eprintln!(
             "\x1b[33m[serve] {} rejected: bad or missing bearer\x1b[0m",
             req.uri().path()
         );
-        return StatusCode::UNAUTHORIZED.into_response();
+        let mut r = StatusCode::UNAUTHORIZED.into_response();
+        if let Some(c) = expire_raw.and_then(|c| axum::http::HeaderValue::from_str(&c).ok()) {
+            r.headers_mut().append(axum::http::header::SET_COOKIE, c);
+        }
+        return r;
     }
-    // A page opened with `?token=` loads its relative assets (a gui-shell's
-    // style.css / main.js, images) without the query; remember the token in
-    // a cookie so those requests pass too.
+    // A gui-shell page opened with `?token=` loads its relative assets
+    // (style.css, main.js) without the query. A cookie covers those GETs
+    // only. Cookies are not scoped by port, so any other server on this host
+    // the browser visits receives it: it carries a digest, never the token,
+    // and authorises nothing but gui-shell asset reads.
+    let token_in_query = query_token(req.uri().query()).is_some();
     let set_cookie = match (single_user, serve_token()) {
         (true, Some(t))
-            if query_token(req.uri().query()).is_some_and(|q| token_matches(&t, &q)) =>
+            if req.uri().path().starts_with("/gui-shell/")
+                && query_token(req.uri().query()).is_some_and(|q| token_matches(&t, &q)) =>
         {
             Some(format!(
-                "{}={t}; HttpOnly; SameSite=Strict; Path=/",
-                serve_cookie_name(req.headers())
+                "{}={}; HttpOnly; SameSite=Strict; Path=/",
+                serve_cookie_name(req.headers()),
+                asset_cookie_value(&t)
             ))
         }
         _ => None,
     };
     let mut resp = next.run(req).await;
+    let set_cookie = set_cookie.or(expire_raw);
     if let Some(c) = set_cookie.and_then(|c| axum::http::HeaderValue::from_str(&c).ok()) {
         resp.headers_mut().append(axum::http::header::SET_COOKIE, c);
     }
+    if token_in_query {
+        resp.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
     resp
+}
+
+fn raw_cookie_present(headers: &axum::http::HeaderMap, name: &str, token: &str) -> bool {
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().split_once('='))
+        .any(|(k, v)| k == name && token_matches(token, v))
+}
+
+fn asset_cookie_value(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(format!("thclaws-serve-asset-cookie\0{token}").as_bytes());
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The asset cookie: a plain GET/HEAD for a gui-shell file, nothing else.
+/// The webapp strips `?token=` from the address bar and keeps it in
+/// sessionStorage, so a reload asks for `/` bare. That page is the bundle
+/// compiled into the binary, the same for every caller, so it stays open;
+/// everything it then reaches (`/ws`, uploads, files, sync) is still gated.
+fn public_index(req: &Request) -> bool {
+    matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && req.uri().path() == "/"
+        && !req.headers().contains_key(axum::http::header::UPGRADE)
+}
+
+fn cookie_asset_ok(req: &Request) -> bool {
+    let Some(t) = serve_token() else {
+        return false;
+    };
+    let get = matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    );
+    if !get
+        || req.headers().contains_key(axum::http::header::UPGRADE)
+        || !req.uri().path().starts_with("/gui-shell/")
+    {
+        return false;
+    }
+    let want = asset_cookie_value(&t);
+    let name = serve_cookie_name(req.headers());
+    req.headers()
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().split_once('='))
+        .any(|(k, v)| k == name && token_matches(&want, v))
 }
 
 /// Cookies are scoped by host, not port, so two `--serve` on one machine
@@ -2990,17 +3074,7 @@ fn serve_token_ok(headers: &axum::http::HeaderMap, query: Option<&str>) -> bool 
             }
         }
     }
-    if query_token(query).is_some_and(|t| token_matches(&expected, &t)) {
-        return true;
-    }
-    let name = serve_cookie_name(headers);
-    headers
-        .get_all(axum::http::header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .filter_map(|c| c.trim().split_once('='))
-        .any(|(k, v)| k == name && token_matches(&expected, v))
+    query_token(query).is_some_and(|t| token_matches(&expected, &t))
 }
 
 fn resolve_session_handle(
@@ -4189,8 +4263,8 @@ mod tests {
         }
 
         std::env::set_var("THCLAWS_SERVE_TOKEN", "host-secret");
+        assert_eq!(status(&app, "/", None).await, StatusCode::OK);
         for uri in [
-            "/",
             "/ws",
             "/bots",
             "/bots/research",
@@ -4391,8 +4465,8 @@ mod tests {
         }
 
         std::env::set_var("THCLAWS_SERVE_TOKEN", "route-secret");
+        assert_eq!(status(&app, "GET", "/", None).await, StatusCode::OK);
         for (m, u) in [
-            ("GET", "/"),
             ("GET", "/ws"),
             ("POST", "/upload"),
             ("GET", "/file-asset/no-such-file"),
@@ -4561,20 +4635,93 @@ mod tests {
 
         // Cookie form — set after `?token=` so a gui-shell's relative assets
         // load; named per port so two servers on one host don't collide.
+        // The cookie is a digest and opens gui-shell asset GETs only; it is
+        // never a credential for the API, uploads or a WebSocket.
+        let digest = asset_cookie_value("s3cret-value");
+        assert_ne!(digest, "s3cret-value");
+        let req = |method: &str, path: &str, host: &str, cookie: &str, upgrade: bool| {
+            let mut b = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(axum::http::header::HOST, host)
+                .header(axum::http::header::COOKIE, cookie);
+            if upgrade {
+                b = b.header(axum::http::header::UPGRADE, "websocket");
+            }
+            b.body(axum::body::Body::empty()).unwrap()
+        };
+        let good = format!("a=1; thclaws_serve_8460={digest}");
+        assert!(cookie_asset_ok(&req(
+            "GET",
+            "/gui-shell/x/style.css",
+            "box:8460",
+            &good,
+            false
+        )));
+        assert!(!cookie_asset_ok(&req(
+            "GET",
+            "/gui-shell/x/style.css",
+            "box:8470",
+            &good,
+            false
+        )));
+        assert!(!cookie_asset_ok(&req(
+            "GET",
+            "/api/egress",
+            "box:8460",
+            &good,
+            false
+        )));
+        assert!(!cookie_asset_ok(&req(
+            "POST",
+            "/gui-shell/x/a",
+            "box:8460",
+            &good,
+            false
+        )));
+        assert!(!cookie_asset_ok(&req(
+            "GET",
+            "/gui-shell/x/a",
+            "box:8460",
+            &good,
+            true
+        )));
+        assert!(!cookie_asset_ok(&req(
+            "GET",
+            "/gui-shell/x/a",
+            "box:8460",
+            "thclaws_serve_8460=s3cret-value",
+            false
+        )));
+        assert!(public_index(&req("GET", "/", "box:8460", "", false)));
+        assert!(!public_index(&req("GET", "/", "box:8460", "", true)));
+        assert!(!public_index(&req("POST", "/", "box:8460", "", false)));
+        assert!(!public_index(&req("GET", "/ws", "box:8460", "", false)));
+        assert!(!public_index(&req(
+            "GET",
+            "/api/egress",
+            "box:8460",
+            "",
+            false
+        )));
         let mut ck = axum::http::HeaderMap::new();
-        ck.insert(axum::http::header::HOST, "box:8460".parse().unwrap());
-        ck.insert(
-            axum::http::header::COOKIE,
-            "a=1; thclaws_serve_8460=s3cret-value".parse().unwrap(),
-        );
-        assert!(serve_token_ok(&ck, None));
-        ck.insert(axum::http::header::HOST, "box:8470".parse().unwrap());
+        ck.insert(axum::http::header::COOKIE, good.parse().unwrap());
         assert!(!serve_token_ok(&ck, None));
-        ck.insert(
+        let mut old = axum::http::HeaderMap::new();
+        old.insert(
             axum::http::header::COOKIE,
-            "thclaws_serve_8470=nope".parse().unwrap(),
+            "thclaws_serve_8460=s3cret-value".parse().unwrap(),
         );
-        assert!(!serve_token_ok(&ck, None));
+        assert!(raw_cookie_present(
+            &old,
+            "thclaws_serve_8460",
+            "s3cret-value"
+        ));
+        assert!(!raw_cookie_present(
+            &ck,
+            "thclaws_serve_8460",
+            "s3cret-value"
+        ));
 
         // Query form — a browser WebSocket cannot set headers.
         assert!(serve_token_ok(

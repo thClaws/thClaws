@@ -132,13 +132,41 @@ export function basePath(): string {
  * Bearer for a host that was started with one (dev-plan/59 Step 2). It rides
  * in the page URL. A plain `--serve` has none and this returns "".
  */
+const TOKEN_KEY = "thclaws_serve_token";
+let cachedToken: string | null = null;
+
+// The token arrives once in the page URL. Keep it for this tab and take it
+// out of the address bar, so it doesn't sit in history, screenshots or
+// copied links.
 export function serveToken(): string {
+  if (cachedToken !== null) return cachedToken;
+  let t = "";
   try {
-    return new URLSearchParams(window.location.search).get("token") ?? "";
+    const url = new URL(window.location.href);
+    t = url.searchParams.get("token") ?? "";
+    if (t) {
+      try {
+        sessionStorage.setItem(TOKEN_KEY, t);
+      } catch {
+        /* storage blocked: the in-memory copy still serves this page */
+      }
+      url.searchParams.delete("token");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    } else {
+      try {
+        t = sessionStorage.getItem(TOKEN_KEY) ?? "";
+      } catch {
+        t = "";
+      }
+    }
   } catch {
-    return "";
+    t = "";
   }
+  cachedToken = t;
+  return t;
 }
+
+serveToken();
 
 /** Query string carrying the bot and token, for WS URLs and fetches. */
 export function botQuery(slug?: string | null): string {

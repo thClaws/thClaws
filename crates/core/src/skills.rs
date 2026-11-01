@@ -1007,8 +1007,10 @@ pub(crate) fn extract_zip(bytes: &[u8], dest: &Path) -> Result<()> {
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = entry.unix_mode() {
-                    let _ =
-                        std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+                    let _ = std::fs::set_permissions(
+                        &out_path,
+                        std::fs::Permissions::from_mode(mode & 0o755),
+                    );
                 }
             }
         }

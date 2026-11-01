@@ -109,7 +109,10 @@ function relayTarget(
     return segs[1] === shellId && segs.length > 2 ? target : null;
   }
   if (segs[0] === "file-asset") {
-    if (segs.slice(1).some((s) => s.startsWith("."))) return null;
+    // Windows reaches `.thclaws` as `THCLAW~1` or `.thclaws.`, and `.env::$DATA`.
+    const hidden = (s: string) =>
+      s.startsWith(".") || s.includes(":") || /[. ]$/.test(s) || /~\d/.test(s);
+    if (segs.slice(1).some(hidden)) return null;
     return segs.length > 1 ? target : null;
   }
   return null;

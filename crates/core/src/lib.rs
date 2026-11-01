@@ -25,6 +25,7 @@ pub mod audit;
 /// ended session as a page in a dedicated KMS and periodically
 /// reconciles it. See `dev-plan/27-self-improving-agent.md`.
 pub mod auto_learn;
+pub mod bash_review;
 pub mod branding;
 pub mod cancel;
 mod cli_completer;

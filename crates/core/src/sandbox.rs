@@ -271,6 +271,7 @@ impl Sandbox {
         // is inside the sandbox) yet points outside. Normalizing first means
         // the eventual ancestor check is meaningful.
         let resolved = lexical_normalize(&initial);
+        refuse_windows_names(path, &resolved)?;
 
         // Existing path: canonicalize so symlinks pointing outside are caught.
         if let Ok(canonical) = resolved.canonicalize() {
@@ -445,10 +446,97 @@ pub fn is_windows_device_name(component: &str) -> bool {
         .unwrap_or("")
         .trim_end()
         .to_ascii_uppercase();
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.len() == 4
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let mut chars = stem.chars();
+    let head: String = chars.by_ref().take(3).collect();
+    let digit = chars.next();
+    (head == "COM" || head == "LPT")
+        && chars.next().is_none()
+        && digit.is_some_and(|d| matches!(d, '1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'))
+}
+
+/// `PROGRA~1`, `THCLAW~1`: the shape of an 8.3 short name, which Windows
+/// resolves to the long name it abbreviates (`.thclaws`), so a check that
+/// compares names sees a harmless folder.
+pub fn looks_like_short_name(component: &str) -> bool {
+    let b = component.as_bytes();
+    b.windows(2).any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+}
+
+/// Why `component` names something other than itself on Windows: `a:b` is
+/// an alternate data stream of `a`, a trailing dot or space is stripped
+/// (`.git.` is `.git`), and a device name opens the device. Short names are
+/// left to [`looks_like_short_name`]: they are fine once they resolve.
+pub fn windows_component_problem(component: &str) -> Option<&'static str> {
+    if component.is_empty() || component == "." || component == ".." {
+        return None;
+    }
+    if component.contains(':') {
+        return Some("an alternate data stream or drive-relative name (':')");
+    }
+    if component.ends_with('.') || component.ends_with(' ') {
+        return Some("a name ending in a dot or space, which Windows strips");
+    }
+    if is_windows_device_name(component) {
+        return Some("a reserved device name (CON, NUL, COM1, ...)");
+    }
+    None
+}
+
+/// [`windows_component_problem`] over a whole tool path, past the drive
+/// (`C:\`) and verbatim (`\\?\C:\`) prefixes. A drive-relative `C:x`
+/// resolves against that drive's own cwd, not the tool's, so it is refused.
+pub fn windows_path_problem(raw: &str) -> Option<&'static str> {
+    let sep = |c: char| c == '\\' || c == '/';
+    let mut rest = raw;
+    for verbatim in [r"\\?\", "//?/", r"\\.\", "//./"] {
+        if let Some(r) = rest.strip_prefix(verbatim) {
+            rest = r;
+            break;
+        }
+    }
+    let b = rest.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        match rest[2..].chars().next() {
+            Some(c) if sep(c) => rest = &rest[2..],
+            None => return None,
+            Some(_) => return Some("a drive-relative path (C:name)"),
+        }
+    }
+    rest.split(sep).find_map(windows_component_problem)
+}
+
+fn refuse_windows_names(path: &str, resolved: &Path) -> Result<()> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    if let Some(why) = windows_path_problem(path) {
+        return Err(Error::Tool(format!(
+            "access denied: '{path}' is {why}. Use a plain file name."
+        )));
+    }
+    // An existing short name canonicalizes to its long name before any
+    // comparison; one that does not exist yet cannot be resolved.
+    let mut prefix = PathBuf::new();
+    for comp in resolved.components() {
+        prefix.push(comp);
+        if let std::path::Component::Normal(name) = comp {
+            let name = name.to_string_lossy();
+            if looks_like_short_name(&name) && !prefix.exists() {
+                return Err(Error::Tool(format!(
+                    "access denied: '{path}' contains an 8.3 short name ('{name}') that \
+                     does not exist, so it cannot be resolved to its long name. Use the \
+                     full name."
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether an archive entry name is unsafe to join onto an extraction root.
@@ -491,7 +579,20 @@ pub fn protected_match(root: &Path, path: &Path) -> Option<&'static ProtectedPat
     let rel = path.strip_prefix(root).ok()?;
     let parts: Vec<String> = rel
         .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .map(|c| {
+            // APFS/NTFS fold these two to ASCII, so `.thclawſ` opens `.thclaws`.
+            let name = c
+                .as_os_str()
+                .to_string_lossy()
+                .replace('\u{17f}', "s")
+                .replace('\u{212a}', "k")
+                .to_ascii_lowercase();
+            let name = name.split(':').next().unwrap_or("");
+            match name.trim_end_matches(['.', ' ']) {
+                "" => name.to_string(),
+                t => t.to_string(),
+            }
+        })
         .collect();
     PROTECTED_PATHS.iter().find(|p| {
         let rel = p.rel.to_ascii_lowercase();
@@ -598,6 +699,7 @@ mod tests {
     /// `canonicalize` refuses it, so treating the non-existent tail as
     /// symlink-free let a write leave the workspace entirely. Reproduced
     /// against the real binary before this fix: the file landed outside.
+    #[cfg(unix)]
     #[test]
     fn a_dangling_symlink_cannot_carry_a_write_out_of_the_sandbox() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1001,13 +1103,15 @@ mod tests {
             ("./", true),
             ("./.thclaws/skills/", true),
             ("dir/", true),
-            ("a:b.txt", false),
             ("console.log", true),
             ("COM10", true),
             ("LPT", true),
         ] {
             assert!(!is_unsafe_archive_entry(raw, windows), "{raw} ({windows})");
         }
+        // `a:` is a drive prefix to a Windows host's own path parser, so the
+        // name is refused there even for a POSIX archive.
+        assert_eq!(is_unsafe_archive_entry("a:b.txt", false), cfg!(windows));
     }
 
     #[test]
@@ -1018,6 +1122,76 @@ mod tests {
         for n in ["CONFIG", "com0", "COM10", "lpt", "nul_", "x.nul"] {
             assert!(!is_windows_device_name(n), "{n}");
         }
+        for n in ["COM\u{b9}", "lpt\u{b3}.txt", "CONIN$", "conout$.log"] {
+            assert!(is_windows_device_name(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn windows_path_problems_are_recognised_on_every_os() {
+        for bad in [
+            "a.txt:evil",
+            ".env::$DATA",
+            "C:evil.bat",
+            "src\\NUL.txt",
+            "out/con",
+            ".git./config",
+            "notes.txt ",
+            r"C:\ws\com1.log",
+            r"\\?\C:\ws\x.txt:s",
+        ] {
+            assert!(windows_path_problem(bad).is_some(), "{bad}");
+        }
+        for ok in [
+            "src/main.rs",
+            r"C:\Users\me\ws\file.txt",
+            r"\\?\C:\ws\a\b.rs",
+            "C:/ws/.env.example",
+            "../x/./y",
+            "console.log",
+            "C:",
+            "PROGRA~1/x",
+        ] {
+            assert!(windows_path_problem(ok).is_none(), "{ok}");
+        }
+        assert!(looks_like_short_name("THCLAW~1"));
+        assert!(looks_like_short_name("git~12"));
+        assert!(!looks_like_short_name("a~b"));
+        assert!(!looks_like_short_name("backup~"));
+    }
+
+    #[test]
+    fn protected_match_sees_through_stream_and_trailing_dot_suffixes() {
+        let root = Path::new("/ws");
+        for rel in [
+            ".env::$DATA",
+            ".env.",
+            ".THCLAWS./settings.json",
+            ".Git /Config",
+            ".mcp.json:x",
+            ".ENV",
+        ] {
+            assert!(protected_match(root, &root.join(rel)).is_some(), "{rel}");
+        }
+        assert!(protected_match(root, &root.join(".env.example.")).is_none());
+        assert!(protected_match(root, &root.join(".thclaw\u{17f}/gui-shell/x")).is_some());
+        assert!(protected_match(root, &root.join(".git/hoo\u{212a}s/pre-commit")).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unresolvable_short_names_and_streams_are_refused_on_windows() {
+        with_sandbox(|root| {
+            let v = |p: &str| Sandbox::validate_against(root, root, p);
+            assert!(v("NOSUCH~1/x.txt").is_err());
+            assert!(v("a.txt:evil").is_err());
+            assert!(v("nul.txt").is_err());
+            assert!(v("ok.txt").is_ok());
+            std::fs::create_dir_all(root.join(".thclaws")).unwrap();
+            if let Ok(p) = v("THCLAW~1") {
+                assert!(Sandbox::enforce_write_policy(root, p.join("x")).is_err());
+            }
+        });
     }
 
     #[test]
