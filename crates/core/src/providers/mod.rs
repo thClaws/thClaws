@@ -62,6 +62,7 @@ pub enum ProviderKind {
     AtlasCloud,
     Unifically,
     Requesty,
+    Runcrate,
     MetaAi,
     NineRouter,
     AgentSdk,
@@ -274,6 +275,7 @@ impl ProviderKind {
         Self::AtlasCloud,
         Self::Unifically,
         Self::Requesty,
+        Self::Runcrate,
         Self::MetaAi,
         Self::NineRouter,
         Self::AgentSdk,
@@ -312,6 +314,7 @@ impl ProviderKind {
             Self::AtlasCloud => "atlascloud",
             Self::Unifically => "unifically",
             Self::Requesty => "requesty",
+            Self::Runcrate => "runcrate",
             Self::MetaAi => "meta",
             Self::NineRouter => "9router",
             Self::AgentSdk => "anthropic-agent",
@@ -351,6 +354,7 @@ impl ProviderKind {
             Self::AtlasCloud => "atlascloud/qwen/qwen3.5-flash",
             Self::Unifically => "unifically/google/gemini-3.5-flash",
             Self::Requesty => "requesty/openai/gpt-4o-mini",
+            Self::Runcrate => "runcrate/deepseek-ai/DeepSeek-V4.1-Flash",
             // muse-spark reasons before it answers, so it needs a large
             // output budget — see the catalogue's max_output note.
             Self::MetaAi => "meta/muse-spark-1.2",
@@ -478,6 +482,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("ATLASCLOUD_BASE_URL"),
             Self::Unifically => Some("UNIFICALLY_BASE_URL"),
             Self::Requesty => Some("REQUESTY_BASE_URL"),
+            Self::Runcrate => Some("RUNCRATE_BASE_URL"),
             Self::MetaAi => Some("META_BASE_URL"),
             Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
@@ -560,6 +565,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("https://api.atlascloud.ai/v1"),
             Self::Unifically => Some("https://api.unifically.com/v1"),
             Self::Requesty => Some("https://router.requesty.ai/v1"),
+            Self::Runcrate => Some("https://api.runcrate.ai/v1"),
             Self::MetaAi => Some("https://api.meta.ai/v1"),
             // Self-hosted router; localhost default. Override per user via
             // NINEROUTER_BASE_URL for a remote / non-default-port instance.
@@ -672,6 +678,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("ATLASCLOUD_API_KEY"),
             Self::Unifically => Some("UNIFICALLY_API_KEY"),
             Self::Requesty => Some("REQUESTY_API_KEY"),
+            Self::Runcrate => Some("RUNCRATE_API_KEY"),
             Self::MetaAi => Some("META_API_KEY"),
             Self::NineRouter => Some("NINEROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
@@ -781,6 +788,7 @@ impl ProviderKind {
             | Self::AtlasCloud
             | Self::Unifically
             | Self::Requesty
+            | Self::Runcrate
             | Self::MetaAi
             // 9router uses full `9router/<alias>/<model>` ids; no short-alias
             // table (the alias segment is 9router's own, typed explicitly).
@@ -827,6 +835,8 @@ impl ProviderKind {
             Some(Self::Unifically)
         } else if model.starts_with("requesty/") {
             Some(Self::Requesty)
+        } else if model.starts_with("runcrate/") {
+            Some(Self::Runcrate)
         } else if model.starts_with("meta/") {
             // Meta AI (api.meta.ai) — BYOK only, no gateway route. Ids look
             // like meta/muse-spark-1.2; the prefix is stripped before the
@@ -3115,6 +3125,7 @@ mod tests {
             ProviderKind::AtlasCloud,
             ProviderKind::Unifically,
             ProviderKind::Requesty,
+            ProviderKind::Runcrate,
             ProviderKind::NineRouter,
             ProviderKind::QwenCloud,
             ProviderKind::ThaiLLM,
@@ -3420,6 +3431,39 @@ mod tests {
         assert_eq!(
             ProviderKind::Requesty.default_model(),
             "requesty/openai/gpt-4o-mini"
+        );
+    }
+
+    #[test]
+    fn detect_runcrate_prefix_routes_to_runcrate_provider() {
+        assert_eq!(
+            ProviderKind::detect("runcrate/deepseek-ai/DeepSeek-V4.1-Flash"),
+            Some(ProviderKind::Runcrate)
+        );
+        assert_eq!(
+            ProviderKind::detect("runcrate/openai/gpt-oss-120b"),
+            Some(ProviderKind::Runcrate)
+        );
+        assert_eq!(
+            ProviderKind::detect("runcrate/moonshotai/Kimi-K3"),
+            Some(ProviderKind::Runcrate)
+        );
+        assert_eq!(
+            ProviderKind::Runcrate.api_key_env(),
+            Some("RUNCRATE_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::Runcrate.endpoint_env(),
+            Some("RUNCRATE_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::Runcrate.default_endpoint(),
+            Some("https://api.runcrate.ai/v1")
+        );
+        assert_eq!(ProviderKind::Runcrate.name(), "runcrate");
+        assert_eq!(
+            ProviderKind::Runcrate.default_model(),
+            "runcrate/deepseek-ai/DeepSeek-V4.1-Flash"
         );
     }
 
