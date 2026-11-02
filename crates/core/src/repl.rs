@@ -5174,6 +5174,24 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("requesty/"),
             ))
         }
+        ProviderKind::Runcrate => {
+            // Runcrate serves open-weight models through an OpenAI-compatible
+            // API. Ids use the `runcrate/<id>` routing prefix locally,
+            // stripped before the upstream request so Runcrate sees
+            // `deepseek-ai/DeepSeek-V4.1-Flash`.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "RUNCRATE_BASE_URL",
+                "https://api.runcrate.ai/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("runcrate/"),
+            ))
+        }
         ProviderKind::MetaAi => {
             // Meta AI (api.meta.ai) — OpenAI-compatible chat/completions.
             // BYOK only: there is no gateway segment for it, so a hosted

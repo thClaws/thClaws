@@ -100,6 +100,7 @@ pub enum ProviderKind {
     AtlasCloud,
     Unifically,
     Requesty,
+    Runcrate,
     MetaAi,
     NineRouter,
     AgentSdk,
@@ -166,6 +167,7 @@ pub enum ProviderKind {
 | `AtlasCloud` | OpenAI Chat Completions | `atlascloud/qwen/qwen3.5-flash` | `atlascloud/` | `ATLASCLOUD_API_KEY` | `ATLASCLOUD_BASE_URL` | https://api.atlascloud.ai/v1 | no |
 | `Unifically` | OpenAI Chat Completions | `unifically/google/gemini-3.5-flash` | `unifically/` | `UNIFICALLY_API_KEY` | `UNIFICALLY_BASE_URL` | https://api.unifically.com/v1 | no |
 | `Requesty` | OpenAI Chat Completions | `requesty/openai/gpt-4o-mini` | `requesty/` | `REQUESTY_API_KEY` | `REQUESTY_BASE_URL` | https://router.requesty.ai/v1 | no |
+| `Runcrate` | OpenAI Chat Completions | `runcrate/deepseek-ai/DeepSeek-V4.1-Flash` | `runcrate/` | `RUNCRATE_API_KEY` | `RUNCRATE_BASE_URL` | https://api.runcrate.ai/v1 | no |
 | `MetaAi` | OpenAI Chat Completions | `meta/muse-spark-1.2` | `meta/` | `META_API_KEY` | `META_BASE_URL` | https://api.meta.ai/v1 | no |
 | `NineRouter` | OpenAI Chat Completions | `9router/anthropic/claude-sonnet-4.5` | `9router/` | `NINEROUTER_API_KEY` | `NINEROUTER_BASE_URL` | http://localhost:20128/v1 | yes |
 | `LiteLlm` | OpenAI Chat Completions | `litellm/gpt-4o-mini` | `litellm/` | `LITELLM_API_KEY` | `LITELLM_BASE_URL` | http://localhost:4000/v1 | yes |

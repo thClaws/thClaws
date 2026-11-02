@@ -11748,6 +11748,60 @@
         }
       }
     },
+    "runcrate": {
+      "list_url": "https://api.runcrate.ai/v1/models",
+      "default_context": 131072,
+      "models": {
+        "runcrate/deepseek-ai/DeepSeek-V4.1-Flash": {
+          "context": 1048576,
+          "max_output": 1048576,
+          "source": "https://api.runcrate.ai/v1/models (context_length, max_output_length)",
+          "verified_at": "2026-11-02"
+        },
+        "runcrate/moonshotai/Kimi-K3": {
+          "context": 1048576,
+          "max_output": 943718,
+          "source": "https://api.runcrate.ai/v1/models (context_length, max_output_length)",
+          "verified_at": "2026-11-02"
+        },
+        "runcrate/openai/gpt-oss-120b": {
+          "context": 131072,
+          "max_output": 117964,
+          "source": "https://api.runcrate.ai/v1/models (context_length, max_output_length)",
+          "verified_at": "2026-11-02"
+        },
+        "runcrate/Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo": {
+          "context": 262144,
+          "max_output": 65536,
+          "source": "https://api.runcrate.ai/v1/models (context_length, max_output_length)",
+          "verified_at": "2026-11-02"
+        },
+        "runcrate/Qwen/Qwen3.5-397B-A17B": {
+          "context": 262144,
+          "max_output": 81920,
+          "source": "https://api.runcrate.ai/v1/models (context_length, max_output_length)",
+          "verified_at": "2026-11-02"
+        },
+        "runcrate/Qwen/Qwen3.6-35B-A3B": {
+          "context": 262144,
+          "max_output": 65536,
+          "source": "https://api.runcrate.ai/v1/models (context_length, max_output_length)",
+          "verified_at": "2026-11-02"
+        },
+        "runcrate/zai-org/GLM-5.3": {
+          "context": 1048576,
+          "max_output": 1048576,
+          "source": "https://api.runcrate.ai/v1/models (context_length, max_output_length)",
+          "verified_at": "2026-11-02"
+        },
+        "runcrate/zai-org/GLM-5.3-Flash": {
+          "context": 1048576,
+          "max_output": 1048576,
+          "source": "https://api.runcrate.ai/v1/models (context_length, max_output_length)",
+          "verified_at": "2026-11-02"
+        }
+      }
+    },
     "meta": {
       "list_url": "https://api.meta.ai/v1/models",
       "default_context": 1048576,

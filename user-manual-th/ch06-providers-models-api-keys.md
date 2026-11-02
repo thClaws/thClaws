@@ -15,6 +15,7 @@ thClaws คุยกับ **provider ได้ทั้งหมดสามส
 | AtlasCloud | `atlascloud/*` | `ATLASCLOUD_API_KEY` | router แบบ OpenAI-compatible ที่โฮสต์ให้; ค่าเริ่มต้น `atlascloud/qwen/qwen3.5-flash` |
 | Unifically | `unifically/*` | `UNIFICALLY_API_KEY` | router แบบ OpenAI-compatible ที่โฮสต์ให้; ค่าเริ่มต้น `unifically/google/gemini-3.5-flash` |
 | Requesty | `requesty/*` | `REQUESTY_API_KEY` | router แบบ OpenAI-compatible ที่โฮสต์ให้; ค่าเริ่มต้น `requesty/openai/gpt-4o-mini` |
+| Runcrate | `runcrate/*` | `RUNCRATE_API_KEY` | โมเดล open-weight ที่โฮสต์ให้ผ่าน API แบบ OpenAI-compatible; ค่าเริ่มต้น `runcrate/deepseek-ai/DeepSeek-V4.1-Flash` |
 | Meta | `meta/*` | `META_API_KEY` | API ที่ Meta โฮสต์เอง; ค่าเริ่มต้น `meta/muse-spark-1.2` |
 | 9router | `9router/*` | `NINEROUTER_API_KEY` | router แบบ **self-host** — ตั้ง `NINEROUTER_BASE_URL` (ค่าเริ่มต้น `http://localhost:20128/v1`) แก้ base URL ได้ใน Settings |
 | Qwen Cloud | `qwen-cloud/*` | `QWENCLOUD_API_KEY` | บริการ Qwen ที่โฮสต์โดย Alibaba |
