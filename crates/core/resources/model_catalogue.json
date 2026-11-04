@@ -11748,6 +11748,108 @@
         }
       }
     },
+    "opper": {
+      "list_url": "https://api.opper.ai/v3/compat/models",
+      "default_context": 128000,
+      "models": {
+        "opper/claude-haiku-4-5": {
+          "context": 200000,
+          "max_output": 64000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/claude-opus-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/claude-sonnet-4-6": {
+          "context": 1000000,
+          "max_output": 64000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/claude-sonnet-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/claude-sonnet-5-5": {
+          "context": 1000000,
+          "max_output": 128000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/deepseek-v4-flash": {
+          "context": 1048576,
+          "max_output": 384000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/deepseek-v4-pro": {
+          "context": 1000000,
+          "max_output": 65536,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/gemini-3.1-pro-preview": {
+          "context": 1048576,
+          "max_output": 65536,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/gemini-3.5-flash": {
+          "context": 1048576,
+          "max_output": 65536,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/gemini-3.8-flash": {
+          "context": 1048576,
+          "max_output": 65536,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/gpt-5.4": {
+          "context": 272000,
+          "max_output": 128000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/gpt-5.4-mini": {
+          "context": 272000,
+          "max_output": 128000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/gpt-5.5": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/gpt-6-luna": {
+          "context": 1050000,
+          "max_output": 128000,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/kimi-k3": {
+          "context": 250000,
+          "max_output": 65536,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        },
+        "opper/mistral-large-2512": {
+          "context": 256000,
+          "max_output": 8192,
+          "source": "https://api.opper.ai/v3/models (context_window, max_output_tokens; lowest across the pool's routes)",
+          "verified_at": "2026-11-03"
+        }
+      }
+    },
     "meta": {
       "list_url": "https://api.meta.ai/v1/models",
       "default_context": 1048576,

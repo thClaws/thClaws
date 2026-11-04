@@ -15,6 +15,7 @@ chip in the sidebar (Desktop GUI, v0.7.2+).
 | AtlasCloud | `atlascloud/*` | `ATLASCLOUD_API_KEY` | Hosted OpenAI-compatible router; `atlascloud/qwen/qwen3.5-flash` default |
 | Unifically | `unifically/*` | `UNIFICALLY_API_KEY` | Hosted OpenAI-compatible router; `unifically/google/gemini-3.5-flash` default |
 | Requesty | `requesty/*` | `REQUESTY_API_KEY` | Hosted OpenAI-compatible router; `requesty/openai/gpt-4o-mini` default, set `REQUESTY_BASE_URL=https://router.eu.requesty.ai/v1` for EU routing |
+| Opper | `opper/*` | `OPPER_API_KEY` | Hosted OpenAI-compatible European AI gateway; `opper/gpt-5.4-mini` default |
 | Meta | `meta/*` | `META_API_KEY` | Meta's hosted API; `meta/muse-spark-1.2` default |
 | 9router | `9router/*` | `NINEROUTER_API_KEY` | **Self-hosted** router — set `NINEROUTER_BASE_URL` (default `http://localhost:20128/v1`); the base URL is editable in Settings |
 | Anthropic | `claude-*` | `ANTHROPIC_API_KEY` | Extended thinking, prompt caching (system + tools) |

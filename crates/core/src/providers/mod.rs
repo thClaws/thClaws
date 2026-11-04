@@ -62,6 +62,7 @@ pub enum ProviderKind {
     AtlasCloud,
     Unifically,
     Requesty,
+    Opper,
     MetaAi,
     NineRouter,
     AgentSdk,
@@ -274,6 +275,7 @@ impl ProviderKind {
         Self::AtlasCloud,
         Self::Unifically,
         Self::Requesty,
+        Self::Opper,
         Self::MetaAi,
         Self::NineRouter,
         Self::AgentSdk,
@@ -312,6 +314,7 @@ impl ProviderKind {
             Self::AtlasCloud => "atlascloud",
             Self::Unifically => "unifically",
             Self::Requesty => "requesty",
+            Self::Opper => "opper",
             Self::MetaAi => "meta",
             Self::NineRouter => "9router",
             Self::AgentSdk => "anthropic-agent",
@@ -351,6 +354,7 @@ impl ProviderKind {
             Self::AtlasCloud => "atlascloud/qwen/qwen3.5-flash",
             Self::Unifically => "unifically/google/gemini-3.5-flash",
             Self::Requesty => "requesty/openai/gpt-4o-mini",
+            Self::Opper => "opper/gpt-5.4-mini",
             // muse-spark reasons before it answers, so it needs a large
             // output budget — see the catalogue's max_output note.
             Self::MetaAi => "meta/muse-spark-1.2",
@@ -478,6 +482,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("ATLASCLOUD_BASE_URL"),
             Self::Unifically => Some("UNIFICALLY_BASE_URL"),
             Self::Requesty => Some("REQUESTY_BASE_URL"),
+            Self::Opper => Some("OPPER_BASE_URL"),
             Self::MetaAi => Some("META_BASE_URL"),
             Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
@@ -560,6 +565,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("https://api.atlascloud.ai/v1"),
             Self::Unifically => Some("https://api.unifically.com/v1"),
             Self::Requesty => Some("https://router.requesty.ai/v1"),
+            Self::Opper => Some("https://api.opper.ai/v3/compat"),
             Self::MetaAi => Some("https://api.meta.ai/v1"),
             // Self-hosted router; localhost default. Override per user via
             // NINEROUTER_BASE_URL for a remote / non-default-port instance.
@@ -672,6 +678,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("ATLASCLOUD_API_KEY"),
             Self::Unifically => Some("UNIFICALLY_API_KEY"),
             Self::Requesty => Some("REQUESTY_API_KEY"),
+            Self::Opper => Some("OPPER_API_KEY"),
             Self::MetaAi => Some("META_API_KEY"),
             Self::NineRouter => Some("NINEROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
@@ -781,6 +788,7 @@ impl ProviderKind {
             | Self::AtlasCloud
             | Self::Unifically
             | Self::Requesty
+            | Self::Opper
             | Self::MetaAi
             // 9router uses full `9router/<alias>/<model>` ids; no short-alias
             // table (the alias segment is 9router's own, typed explicitly).
@@ -827,6 +835,8 @@ impl ProviderKind {
             Some(Self::Unifically)
         } else if model.starts_with("requesty/") {
             Some(Self::Requesty)
+        } else if model.starts_with("opper/") {
+            Some(Self::Opper)
         } else if model.starts_with("meta/") {
             // Meta AI (api.meta.ai) — BYOK only, no gateway route. Ids look
             // like meta/muse-spark-1.2; the prefix is stripped before the
@@ -3115,6 +3125,7 @@ mod tests {
             ProviderKind::AtlasCloud,
             ProviderKind::Unifically,
             ProviderKind::Requesty,
+            ProviderKind::Opper,
             ProviderKind::NineRouter,
             ProviderKind::QwenCloud,
             ProviderKind::ThaiLLM,
@@ -3421,6 +3432,26 @@ mod tests {
             ProviderKind::Requesty.default_model(),
             "requesty/openai/gpt-4o-mini"
         );
+    }
+
+    #[test]
+    fn detect_opper_prefix_routes_to_opper_provider() {
+        assert_eq!(
+            ProviderKind::detect("opper/gpt-5.4-mini"),
+            Some(ProviderKind::Opper)
+        );
+        assert_eq!(
+            ProviderKind::detect("opper/aws/claude-sonnet-4-6-eu"),
+            Some(ProviderKind::Opper)
+        );
+        assert_eq!(ProviderKind::Opper.api_key_env(), Some("OPPER_API_KEY"));
+        assert_eq!(ProviderKind::Opper.endpoint_env(), Some("OPPER_BASE_URL"));
+        assert_eq!(
+            ProviderKind::Opper.default_endpoint(),
+            Some("https://api.opper.ai/v3/compat")
+        );
+        assert_eq!(ProviderKind::Opper.name(), "opper");
+        assert_eq!(ProviderKind::Opper.default_model(), "opper/gpt-5.4-mini");
     }
 
     #[test]

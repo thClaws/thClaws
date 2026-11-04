@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Opper: a new BYOK provider with an OpenAI-compatible API.** Models use the `opper/<id>` prefix and the key is read from `OPPER_API_KEY`.
+
 ## [0.152.0] — 2026-11-02
 
 **A security release for `--serve` and Windows.** If you run `thclaws --serve`, upgrade: v0.151.0 stored the server token in a cookie that the browser also sent to every other port on the same host.

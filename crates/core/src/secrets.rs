@@ -121,6 +121,7 @@ const MANAGED: &[ProviderKind] = &[
     ProviderKind::AtlasCloud,
     ProviderKind::Unifically,
     ProviderKind::Requesty,
+    ProviderKind::Opper,
     ProviderKind::MetaAi,
     ProviderKind::NineRouter,
     ProviderKind::Gemini,
