@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.153.0] — 2026-11-06
+
+A release for agent payments and for hardening the GUI, browser and `--serve` paths. It also makes `thclaws -p` reproducible and machine-readable, and fixes how reasoning, cookies, uploads and spreadsheets behave.
+
+### Security
+
+- **`--serve` and the desktop GUI no longer share the session token across origins.** GUI shells now get an opaque origin like `--serve`, closing the channel that let any other page on the same host read the tab's token.
+- **The desktop GUI refuses every IPC message from a subframe.** Browser IPCs are refused in multiuser servers, and the address bar accepts only `http(s)` targets.
+- **The browser keeps its cookie jar and profile owner-only.** There's no launch into a held DevTools port, and `/file-asset` withholds the profile and `.home` paths.
+- **`calamine` is bumped to 0.38** (RUSTSEC-2026-0436) to stop a malformed `.xls` from exhausting memory in the OLE2 parser.
+
+### Added
+
+- **Agent payments arrive behind the Payments settings.** Transactions carry a user-approval gate, a ledger, monthly caps and allowed payment sources, with a Payments section in the sidebar (dev-plan/74).
+- **`thclaws -p` becomes reproducible and machine-readable.** `--request-log` records each reply's reasoning, tool calls and finish reason; `--bare`, `THCLAWS_FIXED_DATE`, `--seed` and `--prompt-file` pin a reproducible prompt; JSON output, a timeout and real exit codes are added.
+
+### Fixed
+
+- **`--serve`: chat-tab uploads carry the bot and token** with a loopback origin when the upload is forwarded over HTTP.
+- **OpenRouter vLLM reasoning is read from `delta.reasoning`**, so thinking output from a reasoning parser no longer goes missing.
+- **The spreadsheet hint works without XlsxRead** by looking at the raw rows before choosing a header.
+- **The chatbot shell's token/cost footer sits on its own line** under the reply instead of running into it.
+- **Browser sandbox upload paths and filenames are fixed**, and uploads always ask before writing.
+
+### Security
+
+- **gui-shells on the desktop run in their own origin**, as they already did on `--serve`. Before, a shell, whether agent-authored or from a cloned project, shared the app's origin: through the page it could answer approval prompts, read the Browser tab and drive the managed browser. Shells now reach the app only through the bridge's allowlist. Their own CSS and JS are inlined, and storage and fetch are relayed by the bridge, so existing shells keep working.
+- **Pages inside the desktop window can no longer talk to the engine directly.** A gui-shell, an MCP-App widget or an HTML file previewed in Files could post IPC messages straight to the engine. These included answering approval prompts, typing into the chat, and driving the managed browser. Only the window's own page is accepted now.
+- **The managed browser follows the file rules:**
+  - `browser_file_upload` can only upload files inside the workspace, never `.env`, `.thclaws/` or other protected paths, and always asks first, even in auto mode.
+  - Files the browser saves (`filename:` on snapshots, screenshots and logs) obey the same write rules as Write.
+- **Playwright MCP is pinned** (0.0.84) instead of `@latest`, so a new upstream tool can't reach the model unreviewed.
+- **Browser cookies are owner-only on disk.** The saved cookie jar is 0600 and the profile folder 0700. On a cloud runner, `/file-asset` refuses the browser profile and `$HOME`.
+- **The Browser tab's address bar opens http(s) pages only.**
+- **The browser won't launch into a DevTools port another process already holds**, so it can't hand that process the cookie jar.
+- **The system prompt now says page content is data, not instructions.**
+
+### Added
+
+- **Agent payments (testnet, off by default).** Agents can pay per use for web pages and APIs that answer `402 Payment Required` (x402 on Base Sepolia, test USDC only; no real money moves, and mainnet networks are refused).
+  - **A payment always needs a reason to go ahead:** a standing mandate in settings (`paymentMandates`: total, daily, monthly, per-payment cap, payees, sources) or a person.
+  - **The approval prompt offers approve once, allow within a budget, or deny.** There is no "always allow".
+  - **`thclaws -p` never pays without a mandate**, and no headless or team agent pays outside one.
+  - **`WebFetch` pays a paywalled page through the same gate**, and a new `PaidFetch` tool handles POST and APIs.
+  - **`paymentAllowedSources` refuses any other source before a prompt is shown**, and `paymentAgents` limits which agents may pay.
+  - **Every attempt, paid or refused, goes to `.thclaws/state/payments/ledger.jsonl`**, and the desktop shows a Payments panel with what is left on each budget.
+  - **Enterprise policies gain a `payments` block** (`allowed_sources`, `max_per_request`, `monthly_budget`, `agents`). Inside it the agent pays without asking; outside it the payment is refused. A policy without the block refuses every payment.
+  - **Turn it on** with `paymentsEnabled: true` and a testnet key in `THCLAWS_X402_TEST_KEY` (or the keychain entry `x402-testnet`).
+- **`thclaws -p` for scripts and batch runs (training rollouts, evals, CI):**
+  - `--output-format json` prints one object at the end: `result`, `stop_reason`, `exit_code`, `iterations`, `tool_calls`, `usage`, `elapsed_ms` and `session_id`.
+  - `--timeout <secs>` stops the turn, saves the session and exits 124.
+  - `--temperature` and `--top-p` (or `THCLAWS_TEMPERATURE` / `THCLAWS_TOP_P`) are sent by OpenAI-compatible providers (`oai/`, `vllm/`, OpenAI). `--max-tokens` overrides `maxTokens` for the run.
+  - `--seed <n>` (or `THCLAWS_SEED`) is sent alongside temperature for repeatable samples.
+  - `--bare` (or `THCLAWS_BARE=1`) builds the system prompt from the base prompt, the date and the working directory only. It leaves out git, CLAUDE.md/AGENTS.md, memory, KMS, skills, MCP and host-detected sections, so runs in different folders or machines send the same prompt. `THCLAWS_FIXED_DATE=YYYY-MM-DD` freezes the date the prompt states.
+  - `--prompt-file <path>` and `--system-prompt-file <path>` read text from a file, or from stdin with `-`.
+  - `--request-log <file>` (or `THCLAWS_REQUEST_LOG`) records the whole trajectory as JSONL with timestamps. A `request` line has each body sent to the model, exactly as sent (system prompt, tool schemas, messages); headers and keys are not written. A `response` line follows with the reply as the model produced it: content, reasoning, tool calls with their raw arguments, `finish_reason` and usage. OpenAI-compatible providers only.
+
+### Fixed
+
+- **Thinking from vLLM is no longer dropped.** vLLM with a reasoning parser streams it as `delta.reasoning`, not `delta.reasoning_content`. This covers the AI Server Suite's Qwen and OpenRouter. It now shows as thinking and is kept in the session.
+- **Reading a spreadsheet without XlsxRead** gets a working suggestion: look at the raw rows with pandas `header=None` before picking the header row, since title rows often sit above it.
+
+### Changed
+
+- **`thclaws -p` exit codes:** 3 when the turn hits `--max-iterations`, 4 when it stops on a repeated tool loop, 124 on `--timeout`. These used to exit 0. A provider error still exits 1, and the session is now saved before it exits.
+
 ## [0.152.0] — 2026-11-02
 
 **A security release for `--serve` and Windows.** If you run `thclaws --serve`, upgrade: v0.151.0 stored the server token in a cookie that the browser also sent to every other port on the same host.

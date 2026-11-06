@@ -1976,6 +1976,7 @@ impl Agent {
                     let all_parallelizable = exec.len() >= 2
                         && exec.iter().all(|(_, name, _)| {
                             tools.get(name).map(|t| t.parallelizable()).unwrap_or(false)
+                                && !crate::payments::is_payment_tool(name)
                         });
                     if all_parallelizable {
                         let futs = exec.into_iter().map(|(id, name, input)| {
@@ -2383,12 +2384,45 @@ impl Agent {
                     // dispatch site here just runs the call (unless the
                     // pre_tool_use gate denied it).
                     let started = std::time::Instant::now();
-                    let tool_result = match &hook_denied {
-                        Some(reason) => {
+                    // Payments (dev-plan/74) are authorised inside the call:
+                    // `PaidFetch` learns the price only from the 402, and a
+                    // settings-tagged tool that pays by itself is gated here.
+                    let pay_ctx = crate::payments::PaymentContext {
+                        approver: approver.clone(),
+                        originator: origin.clone(),
+                        tool_name: name.clone(),
+                        ledger_path: crate::payments::default_ledger_path(),
+                        mandates: None,
+                        governance: None,
+                    };
+                    let external_pay = if hook_denied.is_none()
+                        && crate::payments::is_payment_tool(&name)
+                    {
+                        let q = crate::payments::external_quote(&name, input);
+                        Some((crate::payments::authorize_external(&pay_ctx, &q).await, q))
+                    } else {
+                        None
+                    };
+                    let tool_result = match (&hook_denied, &external_pay) {
+                        (Some(reason), _) => {
                             Err(crate::error::Error::Tool(format!("blocked by policy: {reason}")))
                         }
-                        None => tool.call_multimodal(input.clone()).await,
+                        (None, Some((Err(denied), _))) => {
+                            Err(crate::error::Error::Tool(denied.clone()))
+                        }
+                        (None, _) => {
+                            crate::payments::scope(pay_ctx.clone(), tool.call_multimodal(input.clone()))
+                                .await
+                        }
                     };
+                    if let Some((Ok(auth), q)) = &external_pay {
+                        crate::payments::settle_external(
+                            &pay_ctx,
+                            q,
+                            auth,
+                            tool_result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
+                        );
+                    }
                     let duration_ms = started.elapsed().as_millis() as u64;
 
                     let (content, is_error) = match &tool_result {

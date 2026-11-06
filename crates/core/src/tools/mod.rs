@@ -33,6 +33,7 @@ pub mod kms;
 pub mod ls;
 pub mod md_tables;
 pub mod memory;
+pub mod paid_fetch;
 pub mod pdf_create;
 pub mod pdf_read;
 pub mod plan;
@@ -79,6 +80,7 @@ pub use kms::{
 };
 pub use ls::LsTool;
 pub use memory::{MemoryAppendTool, MemoryReadTool, MemoryWriteTool};
+pub use paid_fetch::PaidFetchTool;
 pub use pdf_create::PdfCreateTool;
 pub use pdf_read::PdfReadTool;
 pub use plan::{EnterPlanModeTool, ExitPlanModeTool, SubmitPlanTool, UpdatePlanStepTool};
@@ -439,6 +441,9 @@ impl ToolRegistry {
         r.register(Arc::new(PdfReadTool));
         r.register(Arc::new(DocConvertTool));
         r.register(Arc::new(WebFetchTool::new()));
+        if crate::payments::tool_enabled() {
+            r.register(Arc::new(PaidFetchTool::new()));
+        }
         r.register(Arc::new(FetchImagesTool::new()));
         r.register(Arc::new(FolderIndexTool));
         r.register(Arc::new(WebSearchTool::default()));

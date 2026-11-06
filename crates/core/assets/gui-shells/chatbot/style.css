@@ -196,7 +196,7 @@ button { font: inherit; cursor: pointer; }
   white-space: pre-wrap; word-wrap: break-word;
 }
 
-.msg.bot { gap: 12px; align-items: flex-start; }
+.msg.bot { column-gap: 12px; align-items: flex-start; flex-wrap: wrap; }
 .msg.bot .avatar {
   flex: 0 0 auto;
   display: inline-grid; place-items: center;
@@ -646,6 +646,10 @@ pre.code:hover .code-copy, .code-copy:focus { opacity: 1; }
   margin-top: 6px; font-size: 11px; color: var(--text-dim);
   opacity: .75; font-variant-numeric: tabular-nums;
 }
+/* Its own line under the reply, aligned with the text (avatar 28px + gap
+   12px): appended to the flex row, it used to sit beside the reply as a
+   third column and squeeze the answer into a narrow strip. */
+.msg.bot > .usage { flex-basis: 100%; padding-left: 40px; overflow-wrap: anywhere; }
 
 /* Edit on a user bubble. */
 .msg-edit {

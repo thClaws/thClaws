@@ -36,6 +36,7 @@ import { useTheme } from "./hooks/useTheme";
 import { Sidebar } from "./components/Sidebar";
 import { PlanSidebar } from "./components/PlanSidebar";
 import { GoalSidebar } from "./components/GoalSidebar";
+import { PaymentsSidebar } from "./components/PaymentsSidebar";
 import { TodoSidebar } from "./components/TodoSidebar";
 import { ResearchSidebar } from "./components/ResearchSidebar";
 import { BackgroundAgentsSidebar } from "./components/BackgroundAgentsSidebar";
@@ -1398,6 +1399,9 @@ export default function App() {
             when no /goal is active. Independent from plan-state — a
             session can carry both, one, or neither. */}
         <GoalSidebar />
+        {/* dev-plan/74 Payments panel: budgets left and recent paid /
+            refused attempts. Hidden while payments are off or empty. */}
+        <PaymentsSidebar />
         {/* Todo-list sidebar. Mirrors PlanSidebar's right-edge layout
             but displays the `TodoWrite` scratchpad; its one action is
             Clear. Hidden while the list is empty; the engine re-sends

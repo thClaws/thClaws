@@ -215,8 +215,8 @@ pub fn serve_project_asset(
             .or_else(|_| crate::sandbox::Sandbox::check_in(workspace, &decoded))
     };
     let resolved = match resolved {
-        Ok(p) => p,
-        Err(_) => {
+        Ok(p) if !is_private_asset(workspace, &p) => p,
+        _ => {
             return Response::builder()
                 .status(StatusCode::FORBIDDEN)
                 .body(Body::from("forbidden"))
@@ -474,6 +474,31 @@ fn local_asset_path(raw: &str) -> Option<String> {
 /// and skip the Mode B WS-URL injection entirely (no relative-path
 /// games for `/__bridge.js` when the workspace lives under a traefik
 /// strip-prefix).
+/// Paths inside the workspace that `/file-asset` must not hand to a page,
+/// even an authenticated one: anything a same-origin script can fetch, an
+/// HTML file previewed in Files or a gui-shell can too.
+/// - `.thclaws/state/browser-profile/`: the managed browser's profile on a
+///   cloud runner, with its cookie jar and saved logins.
+/// - `.home/`: the runner's `$HOME` (same PVC, second mount), holding
+///   gui-shell tokens and user config.
+fn is_private_asset(workspace: &std::path::Path, resolved: &std::path::Path) -> bool {
+    let root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let Ok(rel) = resolved
+        .strip_prefix(&root)
+        .or_else(|_| resolved.strip_prefix(workspace))
+    else {
+        return false;
+    };
+    let rel = rel
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let under = |p: &str| rel == p || rel.starts_with(&format!("{p}/"));
+    under(".thclaws/state/browser-profile") || under(".home")
+}
+
 pub fn serve_shell_index_inline(shell: &ShellRef) -> Response<Body> {
     let (bytes, _mime) = match shell.read_asset("index.html") {
         Ok(pair) => pair,
@@ -638,6 +663,23 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_asset_withholds_the_browser_profile_and_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().canonicalize().unwrap();
+        for (rel, private) in [
+            ("images/a.png", false),
+            (".thclaws/state/browser-output/page.png", false),
+            (".thclaws/state/browser-profile/thclaws-cookies.json", true),
+            (".thclaws/state/browser-profile", true),
+            (".home/.config/thclaws/settings.json", true),
+            (".HOME/x", true),
+            (".homepage.html", false),
+        ] {
+            assert_eq!(is_private_asset(&ws, &ws.join(rel)), private, "{rel}");
+        }
+    }
 
     /// The shell's own `style.css` and `main.js` are same-origin requests
     /// that carry no `?bot=`, and under a workspace host

@@ -249,6 +249,28 @@ mod tests {
         }
     }
 
+    /// A hosted host's browser Origin is its public name; carried as-is it
+    /// trips the child's loopback guard and every chat-tab upload 403s.
+    #[tokio::test]
+    async fn a_forwarded_upload_passes_the_childs_loopback_guard() {
+        let child = serve(
+            Router::new()
+                .route("/upload", axum::routing::post(|| async { "ok" }))
+                .layer(axum::middleware::from_fn(
+                    crate::api_v1::guard::serve_loopback_guard,
+                )),
+        )
+        .await;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header(axum::http::header::ORIGIN, "https://pbru.thclaws.ai")
+            .body(axum::body::Body::from("x"))
+            .unwrap();
+        let resp = forward_http(&child, TOKEN, req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
     /// A browser that connects to a parked bot is told why instead of being
     /// left on a socket that will never carry anything.
     #[tokio::test]
@@ -327,6 +349,13 @@ async fn forward(
         if matches!(name.as_str(), "host" | "content-length" | "connection")
             || (token.is_some() && name == axum::http::header::AUTHORIZATION)
         {
+            continue;
+        }
+        // Same as the WS hop: the host already checked the browser's Origin,
+        // and a hosted host's public Origin would trip the child's loopback
+        // guard (403 on every chat-tab upload on cloud).
+        if name == axum::http::header::ORIGIN && value.as_bytes() != b"null" {
+            out = out.header(name, format!("http://{addr}"));
             continue;
         }
         out = out.header(name, value);

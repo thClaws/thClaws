@@ -65,6 +65,17 @@ fn document_reader_hint(path: &std::path::Path) -> Option<String> {
             "{name} is an EPUB (a zip of XHTML chapters) that Read cannot open as text. \
              List and extract its chapters with Bash (`unzip -l`, `unzip -p`)."
         ),
+        // Spreadsheets often carry title or note rows above the real header.
+        // A toolset without XlsxRead (a restricted batch run) was pointed at a
+        // tool it did not have, and pandas' default header=0 then took the
+        // title row as the column names.
+        "XlsxRead" => format!(
+            "{name} is a spreadsheet that Read cannot open — use XlsxRead, which shows the \
+             raw rows from A1. Without XlsxRead, look at the raw rows first with Bash: \
+             `python3 -c \"import pandas as pd; print(pd.read_excel('{name}', header=None, \
+             nrows=15).to_string())\"` — title or note rows often sit above the real header, \
+             so pick the header row (`header=N`) from what you see."
+        ),
         t => format!("{name} is a binary document that Read cannot open — use {t} instead."),
     })
 }
@@ -442,6 +453,9 @@ mod tests {
             let err = read(&p).await;
             assert!(err.contains(tool), "{name}: {err}");
             assert!(!err.contains("UTF-8"), "{name}: {err}");
+            if tool == "XlsxRead" {
+                assert!(err.contains("header=None"), "{name}: {err}");
+            }
         }
     }
 

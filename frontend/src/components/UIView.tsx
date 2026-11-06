@@ -37,17 +37,15 @@ const TIER1_SESSION_ID = "tier1";
 // handles them directly on the window.
 const PARENT_ONLY_TYPES = new Set(["ready", "hotkey", "ui"]);
 
-// In a browser (--serve / cloud) the shell is agent-supplied script on the
-// same origin as this app — on a path-scheme install, the origin whose
-// localStorage holds the platform JWT. Without allow-same-origin it gets an
-// opaque origin and reaches us only through postMessage (the server also
-// sends `CSP: sandbox` for the shell, which covers a shell opened as a link).
-// The desktop webview keeps allow-same-origin until the opaque-origin shell
-// has been run against the thclaws:// scheme on all three platforms.
-const SHELL_SANDBOX =
-  typeof window !== "undefined" && window.ipc
-    ? "allow-scripts allow-same-origin"
-    : "allow-scripts";
+// A shell is agent-supplied script. With allow-same-origin it would share
+// this page's origin: in a browser (--serve / cloud) the origin whose
+// localStorage holds the platform JWT, and on the desktop the one holding
+// `window.ipc`, from which it could answer approvals and drive the user's
+// browser. Without it the shell gets an opaque origin and reaches us only
+// through postMessage; the bridge detects that and relays fetch and storage
+// (gui-shell-bridge.js). The server also sends `CSP: sandbox` for a shell
+// opened as a link, and the desktop inlines the shell's own CSS/JS.
+const SHELL_SANDBOX = "allow-scripts";
 
 const RELAY_METHODS = new Set(["GET", "HEAD", "POST"]);
 const RELAY_REQUEST_HEADERS = new Set(["accept", "content-type", "range"]);

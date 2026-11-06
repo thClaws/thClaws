@@ -862,12 +862,40 @@ const SHARED_SHELL_REFUSAL: &str =
     "The shell tab isn't available in shared workspaces — a pod shell can read every member's folder.";
 const SHARED_SETTING_REFUSAL: &str =
     "This setting is shared by every member of this workspace and can't be changed from here.";
+const SHARED_BROWSER_REFUSAL: &str =
+    "The managed browser is off in a shared workspace — each member would see and drive the same one.";
 const SHARED_INSTALL_REFUSAL: &str =
     "Installing plugins or skills isn't available in shared workspaces — an install can start programs outside your folder.";
 
 /// C2: IPC arms that act on pod-global state (a shell, secrets, settings,
 /// the owner's connectors) and so must not run for one member of a
 /// multiuser pod.
+/// The Browser tab's address bar navigates the agent's browser, which holds
+/// the user's logged-in sessions; `file://`, `chrome://` and `javascript:`
+/// are not pages a person types there, and in that browser they read local
+/// files or run script. A bare host (`example.com`) is fine: playwright-mcp
+/// adds the scheme.
+pub(crate) fn takeover_url_ok(url: &str) -> bool {
+    let u = url.trim();
+    match u.split_once(':') {
+        Some((scheme, rest)) => {
+            let scheme = scheme.to_ascii_lowercase();
+            if scheme == "http" || scheme == "https" {
+                return true;
+            }
+            // `localhost:3000` / `example.com:8080` — a port, not a scheme.
+            !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                && scheme.contains(['.'])
+                || (scheme == "localhost"
+                    && rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        }
+        None => !u.is_empty(),
+    }
+}
+
 fn multiuser_refusal(ty: &str) -> Option<&'static str> {
     match ty {
         "pty_open" | "pty_input" | "pty_resize" | "pty_close" | "shell_tab_enabled_set" => {
@@ -910,6 +938,14 @@ fn multiuser_refusal(ty: &str) -> Option<&'static str> {
         | "workspace_trust"
         | "workspace_trust_apply" => Some(SHARED_SETTING_REFUSAL),
         "gui_shell_plugin_install" | "gui_shell_skill_install" => Some(SHARED_INSTALL_REFUSAL),
+        // The browser is off in a shared workspace (config.rs); these would
+        // only fail later, but one browser's frames and input must never be
+        // reachable from another member's socket.
+        "browser_screencast_start"
+        | "browser_screencast_stop"
+        | "browser_tab_select"
+        | "browser_cdp_input"
+        | "browser_input_call" => Some(SHARED_BROWSER_REFUSAL),
         _ => None,
     }
 }
@@ -947,11 +983,6 @@ pub(crate) fn is_top_frame_uri(uri: &str) -> bool {
         .next()
         .unwrap_or("");
     matches!(scheme, "thclaws" | "http" | "https") && matches!(path, "/" | "" | "/index.html")
-}
-
-/// Frames only the user may send, never a page inside the window.
-pub(crate) fn top_frame_only(ty: &str) -> bool {
-    ty == "workspace_trust"
 }
 
 /// Read once per process (Bash confinement) or per window open (the
@@ -1158,17 +1189,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             // before the remounted App's modal subscribes, and the turn then
             // waits forever. The modal drops ids it already holds.
             for req in ctx.approver.unresolved_requests() {
-                (ctx.dispatch)(
-                    serde_json::json!({
-                        "type": "approval_request",
-                        "id": req.id,
-                        "tool_name": req.tool_name,
-                        "input": req.input,
-                        "summary": req.summary,
-                        "originator": req.originator,
-                    })
-                    .to_string(),
-                );
+                (ctx.dispatch)(req.frame(false).to_string());
             }
             let dispatch = ctx.dispatch.clone();
             crate::desktop_update::listen(
@@ -1226,17 +1247,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         }
 
         "approval_response" => {
-            let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-            let decision_str = msg
-                .get("decision")
-                .and_then(|v| v.as_str())
-                .unwrap_or("deny");
-            let decision = match decision_str {
-                "allow" => crate::permissions::ApprovalDecision::Allow,
-                "allow_for_session" => crate::permissions::ApprovalDecision::AllowForSession,
-                _ => crate::permissions::ApprovalDecision::Deny,
-            };
-            ctx.approver.resolve(id, decision);
+            ctx.approver.resolve_frame(&msg);
+        }
+
+        // dev-plan/74 Payments panel: mandates with what is left, and the
+        // latest paid / refused attempts from this workspace's ledger.
+        "payments_status" => {
+            let budgets = crate::permissions::ApprovalSink::payment_budgets(&*ctx.approver)
+                .map(|b| b.list())
+                .unwrap_or_default();
+            (ctx.dispatch)(
+                crate::payments::status_frame(&crate::payments::default_ledger_path(), &budgets)
+                    .to_string(),
+            );
         }
 
         // dev-plan/32 Tier 3 workflow approval response. Frontend posts
@@ -5876,6 +5899,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                             }
                             return Ok(());
                         }
+                        if tool == "browser_navigate" {
+                            let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                            if !takeover_url_ok(url) {
+                                return Err("the address bar opens http(s) pages only".into());
+                            }
+                        }
                         rt.block_on(client.call_tool(&tool, args))
                             .map_err(|e| e.to_string())?;
                         Ok(())
@@ -8218,6 +8247,30 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn takeover_address_bar_is_web_only() {
+        for ok in [
+            "https://example.com",
+            "HTTP://x.test/a",
+            "example.com",
+            "example.com:8080/x",
+            "localhost:3000",
+        ] {
+            assert!(takeover_url_ok(ok), "{ok}");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "chrome://settings",
+            "javascript:alert(1)",
+            "view-source:https://x",
+            "data:text/html,<b>x</b>",
+            "about:blank",
+            "",
+        ] {
+            assert!(!takeover_url_ok(bad), "{bad}");
+        }
+    }
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// IpcContext can be constructed with stub closures for tests.
@@ -8557,7 +8610,6 @@ mod tests {
         ] {
             assert!(!is_top_frame_uri(uri), "{uri}");
         }
-        assert!(top_frame_only("workspace_trust"));
         assert!(browser_only_refusal("workspace_trust").is_some());
     }
 

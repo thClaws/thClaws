@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.152.0"
+version = "0.153.0"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -48,6 +48,9 @@ rustyline = "14"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 sha2 = "0.10"
+# x402 test payments (dev-plan/74): EIP-712 hashing + secp256k1 signing.
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+sha3 = "0.10"
 tar = "0.4"
 # Gzip codec for the thClaws.cloud agent package format (dev-plan/34).
 # `tar` alone produces uncompressed archives; pairing with flate2 gives
@@ -123,7 +126,7 @@ csv = "1"
 # (no formula evaluation) — values are pulled per-cell as their raw
 # Excel-typed form (Number / String / Bool / DateTime) and serialized
 # to CSV or JSON depending on the tool's `format` argument.
-calamine = "0.36"
+calamine = "0.38"
 # XLSX read+modify+write used by XlsxEdit. Purpose-built for round-trip
 # format preservation: load a file, mutate specific cells / sheets, save
 # without touching unrelated formatting (the XLSX skill's headline

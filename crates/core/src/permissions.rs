@@ -259,6 +259,21 @@ pub trait ApprovalSink: Send + Sync {
     fn audit_kind(&self) -> &'static str {
         "policy"
     }
+
+    /// A payment no mandate covers (dev-plan/74). Separate from `approve`
+    /// so a sink that auto-approves tools never auto-approves money: the
+    /// default is Deny, and only sinks with a human behind them override it.
+    async fn approve_payment(
+        &self,
+        _req: &crate::payments::PaymentApprovalRequest,
+    ) -> crate::payments::PaymentDecision {
+        crate::payments::PaymentDecision::Deny
+    }
+
+    /// Budgets granted through this sink, scoped to its session.
+    fn payment_budgets(&self) -> Option<Arc<crate::payments::Budgets>> {
+        None
+    }
 }
 
 /// Always-allow sink. Matches `PermissionMode::Auto` behavior but can also be
@@ -291,19 +306,49 @@ impl ApprovalSink for DenyApprover {
 pub struct ScriptedApprover {
     decisions: std::sync::Mutex<std::collections::VecDeque<ApprovalDecision>>,
     session_allowed: AtomicBool,
+    payments: std::sync::Mutex<std::collections::VecDeque<crate::payments::PaymentDecision>>,
+    /// Every payment prompt this sink was shown, for assertions.
+    pub payment_asks: std::sync::Mutex<Vec<crate::payments::PaymentApprovalRequest>>,
+    budgets: Arc<crate::payments::Budgets>,
 }
 
 impl ScriptedApprover {
     pub fn new(decisions: Vec<ApprovalDecision>) -> Arc<Self> {
+        Self::with_payments(decisions, Vec::new())
+    }
+
+    pub fn with_payments(
+        decisions: Vec<ApprovalDecision>,
+        payments: Vec<crate::payments::PaymentDecision>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             decisions: std::sync::Mutex::new(decisions.into()),
             session_allowed: AtomicBool::new(false),
+            payments: std::sync::Mutex::new(payments.into()),
+            payment_asks: Default::default(),
+            budgets: crate::payments::Budgets::new(),
         })
     }
 }
 
 #[async_trait]
 impl ApprovalSink for ScriptedApprover {
+    async fn approve_payment(
+        &self,
+        req: &crate::payments::PaymentApprovalRequest,
+    ) -> crate::payments::PaymentDecision {
+        self.payment_asks.lock().unwrap().push(req.clone());
+        self.payments
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(crate::payments::PaymentDecision::Deny)
+    }
+
+    fn payment_budgets(&self) -> Option<Arc<crate::payments::Budgets>> {
+        Some(self.budgets.clone())
+    }
+
     async fn approve(&self, _req: &ApprovalRequest) -> ApprovalDecision {
         if self.session_allowed.load(Ordering::Relaxed) {
             return ApprovalDecision::Allow;
@@ -327,13 +372,12 @@ impl ApprovalSink for ScriptedApprover {
 /// `tokio::task::spawn_blocking` so the blocking I/O doesn't starve other tasks.
 pub struct ReplApprover {
     session_allowed: AtomicBool,
+    budgets: Arc<crate::payments::Budgets>,
 }
 
 impl ReplApprover {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            session_allowed: AtomicBool::new(false),
-        })
+        Arc::new(Self::default())
     }
 }
 
@@ -341,6 +385,7 @@ impl Default for ReplApprover {
     fn default() -> Self {
         Self {
             session_allowed: AtomicBool::new(false),
+            budgets: crate::payments::Budgets::new(),
         }
     }
 }
@@ -353,6 +398,29 @@ impl ApprovalSink for ReplApprover {
 
     fn reset_session_flag(&self) {
         self.session_allowed.store(false, Ordering::Relaxed);
+        self.budgets.clear();
+    }
+
+    fn payment_budgets(&self) -> Option<Arc<crate::payments::Budgets>> {
+        Some(self.budgets.clone())
+    }
+
+    async fn approve_payment(
+        &self,
+        req: &crate::payments::PaymentApprovalRequest,
+    ) -> crate::payments::PaymentDecision {
+        let prompt = crate::payments::cli_prompt(req);
+        let answer = tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, Write};
+            let _ = std::io::stdout().write_all(prompt.as_bytes());
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            let _ = std::io::stdin().lock().read_line(&mut line);
+            line
+        })
+        .await
+        .unwrap_or_default();
+        crate::payments::parse_cli_answer(&answer, &req.quote)
     }
 
     async fn approve(&self, req: &ApprovalRequest) -> ApprovalDecision {
@@ -406,6 +474,33 @@ pub struct GuiApprovalRequest {
     /// Carried through from `ApprovalRequest.originator`. Frontend
     /// renders "Main" vs "translator (side)" based on this.
     pub originator: AgentOrigin,
+    /// Set for a payment prompt (dev-plan/74): the frontend shows the
+    /// payment modal (once / within a budget / deny) instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment: Option<Value>,
+}
+
+impl GuiApprovalRequest {
+    /// The `approval_request` frame every surface dispatches.
+    pub fn frame(&self, redact: bool) -> Value {
+        let input = if redact {
+            crate::tool_display::redact_json_value(&self.input)
+        } else {
+            self.input.clone()
+        };
+        let mut v = serde_json::json!({
+            "type": "approval_request",
+            "id": self.id,
+            "tool_name": self.tool_name,
+            "input": input,
+            "summary": self.summary,
+            "originator": self.originator,
+        });
+        if let Some(p) = &self.payment {
+            v["payment"] = p.clone();
+        }
+        v
+    }
 }
 
 /// Bridge between the agent's async `approve()` call and the GUI
@@ -426,9 +521,20 @@ pub struct GuiApprovalRequest {
 pub struct GuiApprover {
     tx: mpsc::UnboundedSender<GuiApprovalRequest>,
     pending: Mutex<HashMap<u64, oneshot::Sender<ApprovalDecision>>>,
+    #[allow(clippy::type_complexity)]
+    pending_pay: Mutex<
+        HashMap<
+            u64,
+            (
+                oneshot::Sender<crate::payments::PaymentDecision>,
+                crate::payments::Quote,
+            ),
+        >,
+    >,
     unresolved: Mutex<HashMap<u64, GuiApprovalRequest>>,
     next_id: AtomicU64,
     session_allowed: AtomicBool,
+    budgets: Arc<crate::payments::Budgets>,
 }
 
 impl GuiApprover {
@@ -439,9 +545,11 @@ impl GuiApprover {
         let approver = Arc::new(Self {
             tx,
             pending: Mutex::new(HashMap::new()),
+            pending_pay: Mutex::new(HashMap::new()),
             unresolved: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             session_allowed: AtomicBool::new(false),
+            budgets: crate::payments::Budgets::new(),
         });
         (approver, rx)
     }
@@ -457,6 +565,34 @@ impl GuiApprover {
         if let Some(responder) = responder {
             let _ = responder.send(decision);
         }
+    }
+
+    /// Routes an `approval_response` frame: a payment prompt takes
+    /// `once` / `budget` (+ `budget: {total, per_tx}`) / `deny`; any other
+    /// prompt takes `allow` / `allow_for_session` / `deny`.
+    pub fn resolve_frame(&self, msg: &Value) {
+        let id = msg.get("id").and_then(Value::as_u64).unwrap_or(0);
+        let decision = msg
+            .get("decision")
+            .and_then(Value::as_str)
+            .unwrap_or("deny");
+        let pay = self.pending_pay.lock().ok().and_then(|mut m| m.remove(&id));
+        if let Some((responder, quote)) = pay {
+            if let Ok(mut u) = self.unresolved.lock() {
+                u.remove(&id);
+            }
+            let d = crate::payments::parse_gui_decision(decision, msg.get("budget"), &quote);
+            let _ = responder.send(d);
+            return;
+        }
+        self.resolve(
+            id,
+            match decision {
+                "allow" => ApprovalDecision::Allow,
+                "allow_for_session" => ApprovalDecision::AllowForSession,
+                _ => ApprovalDecision::Deny,
+            },
+        );
     }
 
     /// Snapshot of still-unresolved requests. The GUI forwarder polls
@@ -478,6 +614,45 @@ impl ApprovalSink for GuiApprover {
 
     fn reset_session_flag(&self) {
         self.session_allowed.store(false, Ordering::Relaxed);
+        self.budgets.clear();
+    }
+
+    fn payment_budgets(&self) -> Option<Arc<crate::payments::Budgets>> {
+        Some(self.budgets.clone())
+    }
+
+    async fn approve_payment(
+        &self,
+        req: &crate::payments::PaymentApprovalRequest,
+    ) -> crate::payments::PaymentDecision {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (resp_tx, resp_rx) = oneshot::channel();
+        if let Ok(mut pending) = self.pending_pay.lock() {
+            pending.insert(id, (resp_tx, req.quote.clone()));
+        }
+        let out = GuiApprovalRequest {
+            id,
+            tool_name: req.tool_name.clone(),
+            input: serde_json::to_value(&req.quote).unwrap_or_default(),
+            summary: Some(crate::payments::summary_line(req)),
+            originator: req.originator.clone(),
+            payment: Some(crate::payments::gui_payload(req)),
+        };
+        if let Ok(mut u) = self.unresolved.lock() {
+            u.insert(id, out.clone());
+        }
+        if self.tx.send(out).is_err() {
+            if let Ok(mut p) = self.pending_pay.lock() {
+                p.remove(&id);
+            }
+            if let Ok(mut u) = self.unresolved.lock() {
+                u.remove(&id);
+            }
+            return crate::payments::PaymentDecision::Deny;
+        }
+        resp_rx
+            .await
+            .unwrap_or(crate::payments::PaymentDecision::Deny)
     }
 
     async fn approve(&self, req: &ApprovalRequest) -> ApprovalDecision {
@@ -497,6 +672,7 @@ impl ApprovalSink for GuiApprover {
             input: req.input.clone(),
             summary: req.summary.clone(),
             originator: req.originator.clone(),
+            payment: None,
         };
         if let Ok(mut u) = self.unresolved.lock() {
             u.insert(id, out.clone());

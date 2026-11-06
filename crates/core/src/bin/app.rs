@@ -77,8 +77,9 @@ struct Cli {
     #[arg(long)]
     no_session: bool,
 
-    /// Output format: text (default), stream-json
-    #[arg(long, default_value = "text")]
+    /// Print mode output: text (default) streams the answer; json prints one
+    /// object at the end (result, stop_reason, exit_code, usage, timing)
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     output_format: String,
 
     /// Comma-separated list of allowed tool names
@@ -89,9 +90,55 @@ struct Cli {
     #[arg(long)]
     disallowed_tools: Option<String>,
 
-    /// Max agent loop iterations per turn (0 = unlimited, default 200)
+    /// Max agent loop iterations per turn (0 = unlimited; default from
+    /// maxIterations, 50). In print mode, hitting it exits 3.
     #[arg(long)]
     max_iterations: Option<usize>,
+
+    /// Print mode: stop the turn after this many seconds, save the session
+    /// and exit 124
+    #[arg(long, value_name = "SECS")]
+    timeout: Option<u64>,
+
+    /// Print mode: sampling temperature, sent by OpenAI-compatible providers
+    /// (env THCLAWS_TEMPERATURE)
+    #[arg(long)]
+    temperature: Option<f64>,
+
+    /// Print mode: nucleus sampling top_p, sent by OpenAI-compatible
+    /// providers (env THCLAWS_TOP_P)
+    #[arg(long)]
+    top_p: Option<f64>,
+
+    /// Print mode: sampling seed, sent by OpenAI-compatible providers
+    /// (env THCLAWS_SEED)
+    #[arg(long)]
+    seed: Option<u64>,
+
+    /// Read the prompt from this file ("-" = stdin) instead of the
+    /// positional arguments
+    #[arg(long, value_name = "PATH")]
+    prompt_file: Option<std::path::PathBuf>,
+
+    /// Read the system prompt from this file ("-" = stdin)
+    #[arg(long, value_name = "PATH")]
+    system_prompt_file: Option<std::path::PathBuf>,
+
+    /// System prompt from the base prompt, date and working directory only:
+    /// no git, project instructions, memory, KMS, skills or MCP sections
+    /// (env THCLAWS_BARE=1). Pair with THCLAWS_FIXED_DATE=YYYY-MM-DD for a
+    /// prompt that is the same on every run
+    #[arg(long)]
+    bare: bool,
+
+    /// Max output tokens per model call (overrides maxTokens)
+    #[arg(long)]
+    max_tokens: Option<u32>,
+
+    /// Print mode: append every request body sent to the model to this
+    /// JSONL file (env THCLAWS_REQUEST_LOG). Created 0600
+    #[arg(long, value_name = "PATH")]
+    request_log: Option<std::path::PathBuf>,
 
     /// Run as a team agent
     #[arg(long)]
@@ -1470,6 +1517,32 @@ async fn main() {
     if let Some(ref sp) = cli.system_prompt {
         config.system_prompt = sp.clone();
     }
+    if let Some(ref path) = cli.system_prompt_file {
+        let stdin_twice = path.as_os_str() == "-"
+            && cli
+                .prompt_file
+                .as_ref()
+                .is_some_and(|p| p.as_os_str() == "-");
+        if stdin_twice {
+            eprintln!(
+                "\x1b[31m--prompt-file and --system-prompt-file can't both read stdin\x1b[0m"
+            );
+            std::process::exit(1);
+        }
+        match read_text_arg(path) {
+            Ok(sp) => config.system_prompt = sp,
+            Err(e) => {
+                eprintln!(
+                    "\x1b[31m--system-prompt-file {}: {e}\x1b[0m",
+                    path.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+    if cli.bare {
+        std::env::set_var("THCLAWS_BARE", "1");
+    }
     if let Some(ref tools) = cli.allowed_tools {
         config.allowed_tools = Some(tools.split(',').map(|s| s.trim().to_string()).collect());
     }
@@ -1481,6 +1554,9 @@ async fn main() {
     }
     if let Some(n) = cli.max_iterations {
         config.max_iterations = n;
+    }
+    if let Some(n) = cli.max_tokens {
+        config.max_tokens = n;
     }
     if let Some(ref agent_name) = cli.team_agent {
         let team_dir = cli.team_dir.as_deref().unwrap_or(".thclaws/state/team");
@@ -1514,17 +1590,47 @@ async fn main() {
             std::process::exit(1);
         }
     } else if cli.print {
-        let prompt = cli.prompt.join(" ");
+        let prompt = match &cli.prompt_file {
+            Some(path) if !cli.prompt.is_empty() => {
+                eprintln!(
+                    "\x1b[31m--prompt-file {} and a positional prompt: pick one\x1b[0m",
+                    path.display()
+                );
+                std::process::exit(1);
+            }
+            Some(path) => match read_text_arg(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("\x1b[31m--prompt-file {}: {e}\x1b[0m", path.display());
+                    std::process::exit(1);
+                }
+            },
+            None => cli.prompt.join(" "),
+        };
         if prompt.is_empty() {
             eprintln!("\x1b[31m--print requires a prompt argument\x1b[0m");
             std::process::exit(1);
         }
-        if let Err(e) =
-            thclaws_core::repl::run_print_mode_with(config, &prompt, cli.verbose, !cli.no_session)
-                .await
-        {
-            eprintln!("\n\x1b[31merror: {e}\x1b[0m");
-            std::process::exit(1);
+        let opts = thclaws_core::repl::PrintOptions {
+            verbose: cli.verbose,
+            save_session: !cli.no_session,
+            json: cli.output_format == "json",
+            timeout: cli.timeout.map(std::time::Duration::from_secs),
+            temperature: cli.temperature,
+            top_p: cli.top_p,
+            seed: cli.seed,
+            request_log: cli.request_log.clone(),
+        };
+        let code = match thclaws_core::repl::run_print_mode_opts(config, &prompt, opts).await {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("\n\x1b[31merror: {e}\x1b[0m");
+                std::process::exit(1);
+            }
+        };
+        if code != 0 {
+            thclaws_core::audit::shutdown();
+            std::process::exit(code);
         }
         thclaws_core::audit::shutdown();
     } else {
@@ -2706,5 +2812,16 @@ async fn run_shell_subcommand(cmd: ShellCmd) -> i32 {
                 }
             }
         }
+    }
+}
+
+/// A `--…-file` argument: the file's text, or stdin for "-".
+fn read_text_arg(path: &std::path::Path) -> std::io::Result<String> {
+    if path.as_os_str() == "-" {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+        Ok(s)
+    } else {
+        std::fs::read_to_string(path)
     }
 }
