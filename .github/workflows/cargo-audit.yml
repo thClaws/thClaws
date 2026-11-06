@@ -52,4 +52,8 @@ jobs:
         # RUSTSEC-2026-0429 (zip: ZipArchive::extract aborts on a symlink entry
         # with a large declared size): same extract API, same reasoning; zip 2.x
         # and 7.x stay pinned by umya-spreadsheet and rust_xlsxwriter.
-        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0204 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429
+        # RUSTSEC-2026-0387 (crypto-bigint 0.5 timing variability) via k256 0.13,
+        # used only to sign opt-in x402 payments locally on the user's machine
+        # after a mandate or human approval; no remote timing oracle. Fix is
+        # k256 0.14 (API port), tracked after v0.153.0.
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0204 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429 --ignore RUSTSEC-2026-0387
