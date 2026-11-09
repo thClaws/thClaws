@@ -63,6 +63,7 @@ pub enum ProviderKind {
     AtlasCloud,
     Unifically,
     Requesty,
+    StandardCompute,
     MetaAi,
     NineRouter,
     AgentSdk,
@@ -275,6 +276,7 @@ impl ProviderKind {
         Self::AtlasCloud,
         Self::Unifically,
         Self::Requesty,
+        Self::StandardCompute,
         Self::MetaAi,
         Self::NineRouter,
         Self::AgentSdk,
@@ -313,6 +315,7 @@ impl ProviderKind {
             Self::AtlasCloud => "atlascloud",
             Self::Unifically => "unifically",
             Self::Requesty => "requesty",
+            Self::StandardCompute => "standardcompute",
             Self::MetaAi => "meta",
             Self::NineRouter => "9router",
             Self::AgentSdk => "anthropic-agent",
@@ -352,6 +355,7 @@ impl ProviderKind {
             Self::AtlasCloud => "atlascloud/qwen/qwen3.5-flash",
             Self::Unifically => "unifically/google/gemini-3.5-flash",
             Self::Requesty => "requesty/openai/gpt-4o-mini",
+            Self::StandardCompute => "standardcompute/StandardCompute",
             // muse-spark reasons before it answers, so it needs a large
             // output budget — see the catalogue's max_output note.
             Self::MetaAi => "meta/muse-spark-1.2",
@@ -479,6 +483,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("ATLASCLOUD_BASE_URL"),
             Self::Unifically => Some("UNIFICALLY_BASE_URL"),
             Self::Requesty => Some("REQUESTY_BASE_URL"),
+            Self::StandardCompute => Some("STANDARDCOMPUTE_BASE_URL"),
             Self::MetaAi => Some("META_BASE_URL"),
             Self::NineRouter => Some("NINEROUTER_BASE_URL"),
             Self::DashScope => Some("DASHSCOPE_BASE_URL"),
@@ -561,6 +566,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("https://api.atlascloud.ai/v1"),
             Self::Unifically => Some("https://api.unifically.com/v1"),
             Self::Requesty => Some("https://router.requesty.ai/v1"),
+            Self::StandardCompute => Some("https://api.stdcmpt.com/v1"),
             Self::MetaAi => Some("https://api.meta.ai/v1"),
             // Self-hosted router; localhost default. Override per user via
             // NINEROUTER_BASE_URL for a remote / non-default-port instance.
@@ -673,6 +679,7 @@ impl ProviderKind {
             Self::AtlasCloud => Some("ATLASCLOUD_API_KEY"),
             Self::Unifically => Some("UNIFICALLY_API_KEY"),
             Self::Requesty => Some("REQUESTY_API_KEY"),
+            Self::StandardCompute => Some("STANDARDCOMPUTE_API_KEY"),
             Self::MetaAi => Some("META_API_KEY"),
             Self::NineRouter => Some("NINEROUTER_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
@@ -782,6 +789,7 @@ impl ProviderKind {
             | Self::AtlasCloud
             | Self::Unifically
             | Self::Requesty
+            | Self::StandardCompute
             | Self::MetaAi
             // 9router uses full `9router/<alias>/<model>` ids; no short-alias
             // table (the alias segment is 9router's own, typed explicitly).
@@ -828,6 +836,8 @@ impl ProviderKind {
             Some(Self::Unifically)
         } else if model.starts_with("requesty/") {
             Some(Self::Requesty)
+        } else if model.starts_with("standardcompute/") {
+            Some(Self::StandardCompute)
         } else if model.starts_with("meta/") {
             // Meta AI (api.meta.ai) — BYOK only, no gateway route. Ids look
             // like meta/muse-spark-1.2; the prefix is stripped before the
@@ -3116,6 +3126,7 @@ mod tests {
             ProviderKind::AtlasCloud,
             ProviderKind::Unifically,
             ProviderKind::Requesty,
+            ProviderKind::StandardCompute,
             ProviderKind::NineRouter,
             ProviderKind::QwenCloud,
             ProviderKind::ThaiLLM,
@@ -3421,6 +3432,35 @@ mod tests {
         assert_eq!(
             ProviderKind::Requesty.default_model(),
             "requesty/openai/gpt-4o-mini"
+        );
+    }
+
+    #[test]
+    fn detect_standardcompute_prefix_routes_to_standardcompute_provider() {
+        assert_eq!(
+            ProviderKind::detect("standardcompute/StandardCompute"),
+            Some(ProviderKind::StandardCompute)
+        );
+        assert_eq!(
+            ProviderKind::detect("standardcompute/deepseek/deepseek-v4-flash"),
+            Some(ProviderKind::StandardCompute)
+        );
+        assert_eq!(
+            ProviderKind::StandardCompute.api_key_env(),
+            Some("STANDARDCOMPUTE_API_KEY")
+        );
+        assert_eq!(
+            ProviderKind::StandardCompute.endpoint_env(),
+            Some("STANDARDCOMPUTE_BASE_URL")
+        );
+        assert_eq!(
+            ProviderKind::StandardCompute.default_endpoint(),
+            Some("https://api.stdcmpt.com/v1")
+        );
+        assert_eq!(ProviderKind::StandardCompute.name(), "standardcompute");
+        assert_eq!(
+            ProviderKind::StandardCompute.default_model(),
+            "standardcompute/StandardCompute"
         );
     }
 

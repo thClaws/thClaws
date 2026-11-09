@@ -5174,6 +5174,24 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn Provider>> {
                     .with_strip_model_prefix("requesty/"),
             ))
         }
+        ProviderKind::StandardCompute => {
+            // Standard Compute is an OpenAI-compatible router. Ids use the
+            // `standardcompute/<id>` routing prefix locally, stripped before
+            // the upstream request so it sees `StandardCompute` (routed) or a
+            // pinned id such as `deepseek/deepseek-v4-flash`.
+            let (key, url) = compat_endpoint(
+                config,
+                kind,
+                "STANDARDCOMPUTE_BASE_URL",
+                "https://api.stdcmpt.com/v1",
+                api_key,
+            );
+            Ok(Arc::new(
+                OpenAIProvider::new(key)
+                    .with_base_url(url)
+                    .with_strip_model_prefix("standardcompute/"),
+            ))
+        }
         ProviderKind::MetaAi => {
             // Meta AI (api.meta.ai) — OpenAI-compatible chat/completions.
             // BYOK only: there is no gateway segment for it, so a hosted

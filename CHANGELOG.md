@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Standard Compute: a new BYOK provider with an OpenAI-compatible API.** Models use the `standardcompute/<id>` prefix and the key is read from `STANDARDCOMPUTE_API_KEY`.
+
 ## [0.153.0] — 2026-11-06
 
 A release for agent payments and for hardening the GUI, browser and `--serve` paths. It also makes `thclaws -p` reproducible and machine-readable, and fixes how reasoning, cookies, uploads and spreadsheets behave.

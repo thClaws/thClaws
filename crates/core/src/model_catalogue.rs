@@ -1150,6 +1150,7 @@ pub fn provider_kind_name(k: crate::providers::ProviderKind) -> &'static str {
         ProviderKind::AtlasCloud => "atlascloud",
         ProviderKind::Unifically => "unifically",
         ProviderKind::Requesty => "requesty",
+        ProviderKind::StandardCompute => "standardcompute",
         ProviderKind::MetaAi => "meta",
         ProviderKind::NineRouter => "9router",
         // Must match `ProviderKind::name()` so a round-trip via
