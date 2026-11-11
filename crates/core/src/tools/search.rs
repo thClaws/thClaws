@@ -6,7 +6,8 @@
 //!   3. SerpAPI (`SERPAPI_API_KEY`) — real Google results as JSON
 //!   4. You.com (`YDC_API_KEY`) — clean JSON, snippets + descriptions
 //!   5. Serply (`SERPLY_API_KEY`) - real Google results as JSON
-//!   6. DuckDuckGo HTML scrape — no key needed, good enough fallback
+//!   6. Sofya (`SOFYA_API_KEY`) - clean JSON, titles + snippets
+//!   7. DuckDuckGo HTML scrape — no key needed, good enough fallback
 //!
 //! Two layers of fallback:
 //! - **Config-time** — a missing API key skips that backend at chain-build
@@ -35,6 +36,8 @@ use std::time::Duration;
 /// agent indefinitely.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+const SOFYA_SEARCH_URL: &str = "https://sofya.co/v1/search";
+
 /// One concrete backend candidate produced by [`WebSearchTool::resolve_candidates`].
 /// Carries the API key inline (when applicable) so the dispatch loop in
 /// `call` doesn't need to re-look-up env vars per attempt.
@@ -44,6 +47,7 @@ enum Backend {
     SerpApi(String),
     YouCom(String),
     Serply(String),
+    Sofya(String),
     Ddg,
 }
 
@@ -57,6 +61,7 @@ impl Backend {
             Backend::SerpApi(_) => "serpapi",
             Backend::YouCom(_) => "youcom",
             Backend::Serply(_) => "serply",
+            Backend::Sofya(_) => "sofya",
             Backend::Ddg => "duckduckgo",
         }
     }
@@ -71,6 +76,7 @@ impl Backend {
             Backend::SerpApi(_) => "SerpAPI (Google)",
             Backend::YouCom(_) => "You.com",
             Backend::Serply(_) => "Serply (Google)",
+            Backend::Sofya(_) => "Sofya",
             Backend::Ddg => "DuckDuckGo",
         }
     }
@@ -86,12 +92,12 @@ pub struct WebSearchTool {
     // `crate::tools::gateway_route`.
     gateway: Option<crate::tools::GatewayRoute>,
     // Gateway-locked install: search only through the gateway. A direct
-    // backend (DDG, BYOK You.com/Serply) would send the query outside it.
+    // backend (DDG, BYOK You.com/Serply/Sofya) would send the query outside it.
     locked: bool,
 }
 
 impl WebSearchTool {
-    /// `engine`: `"auto"` (detect from env), `"tavily"`, `"brave"`, `"serpapi"`, `"youcom"`, `"serply"`, `"duckduckgo"`/`"ddg"`.
+    /// `engine`: `"auto"` (detect from env), `"tavily"`, `"brave"`, `"serpapi"`, `"youcom"`, `"serply"`, `"sofya"`, `"duckduckgo"`/`"ddg"`.
     pub fn new(engine: &str) -> Self {
         // M6.23 BUG WT1: explicit timeout on the shared client; all
         // three backends (Tavily/Brave/DDG) inherit it.
@@ -113,12 +119,13 @@ impl WebSearchTool {
     /// is the universal floor for any non-`"duckduckgo"`-pinned config.
     ///
     /// Pin behavior:
-    /// - `"auto"` / unset → Tavily (if key) → Brave (if key) → SerpAPI (if key) → You.com (if key) → Serply (if key) → DDG
+    /// - `"auto"` / unset → Tavily (if key) → Brave (if key) → SerpAPI (if key) → You.com (if key) → Serply (if key) → Sofya (if key) → DDG
     /// - `"tavily"` → Tavily (if key) → DDG
     /// - `"brave"` → Brave (if key) → DDG
     /// - `"serpapi"` → SerpAPI (if key) → DDG
     /// - `"youcom"` → You.com (if key) → DDG
     /// - `"serply"` → Serply (if key) → DDG
+    /// - `"sofya"` → Sofya (if key) → DDG
     /// - `"duckduckgo"` / `"ddg"` → DDG only (no fallback; user explicitly
     ///   chose the bottom of the chain)
     /// A local search key, never on a gateway-locked install: signed out
@@ -139,6 +146,7 @@ impl WebSearchTool {
         let try_serpapi = matches!(engine, "auto" | "" | "serpapi");
         let try_youcom = !self.locked && matches!(engine, "auto" | "" | "youcom" | "you.com");
         let try_serply = !self.locked && matches!(engine, "auto" | "" | "serply");
+        let try_sofya = !self.locked && matches!(engine, "auto" | "" | "sofya");
         // DDG is the universal fallback for everything except a DDG pin
         // (where it's already the only candidate, no need to fall back to
         // itself) and... well, only that.
@@ -183,6 +191,14 @@ impl WebSearchTool {
             if let Ok(key) = std::env::var("SERPLY_API_KEY") {
                 if !key.is_empty() {
                     out.push(Backend::Serply(key));
+                }
+            }
+        }
+        // Sofya is BYOK-only too (no gateway route); absence skips it.
+        if try_sofya {
+            if let Ok(key) = std::env::var("SOFYA_API_KEY") {
+                if !key.is_empty() {
+                    out.push(Backend::Sofya(key));
                 }
             }
         }
@@ -551,6 +567,69 @@ impl WebSearchTool {
         }
     }
 
+    async fn search_sofya(
+        &self,
+        endpoint: &str,
+        query: &str,
+        max: usize,
+        key: &str,
+        freshness: Option<&str>,
+    ) -> Result<String> {
+        // Sofya: POST /v1/search with a bearer key. `snippets` depth
+        // returns titles, URLs and snippets only (WebFetch reads full
+        // pages). `freshness` is passed through as day / week / month /
+        // year; the API caps `max_results` at 20.
+        let mut body = json!({
+            "query": query,
+            "search_depth": "snippets",
+            "max_results": max.clamp(1, 20),
+        });
+        if let Some(f) = freshness {
+            body["freshness"] = json!(f);
+        }
+        let resp = self
+            .client
+            .post(endpoint)
+            .bearer_auth(key)
+            .header("user-agent", concat!("thclaws/", env!("CARGO_PKG_VERSION")))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("sofya: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::Tool(format!("sofya HTTP {status}: {text}")));
+        }
+
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("sofya json: {e}")))?;
+
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(results) = v.get("results").and_then(Value::as_array) {
+            for (i, r) in results.iter().take(max).enumerate() {
+                let title = r.get("title").and_then(Value::as_str).unwrap_or("");
+                let url = r.get("url").and_then(Value::as_str).unwrap_or("");
+                let snippet = r
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .filter(|c| !c.is_empty())
+                    .or_else(|| r.get("description").and_then(Value::as_str))
+                    .unwrap_or("");
+                parts.push(format!("{}. {} ({})\n   {}", i + 1, title, url, snippet));
+            }
+        }
+
+        if parts.is_empty() {
+            Ok("No results found.".into())
+        } else {
+            Ok(parts.join("\n\n"))
+        }
+    }
+
     async fn search_ddg(&self, query: &str, max: usize) -> Result<String> {
         let resp = self
             .client
@@ -614,7 +693,7 @@ impl Tool for WebSearchTool {
     fn description(&self) -> &'static str {
         const BASE: &str = "Search the web for information. Auto-selects the best available \
          backend: Tavily (TAVILY_API_KEY), Brave (BRAVE_SEARCH_API_KEY), \
-         SerpAPI/Google (SERPAPI_API_KEY), You.com (YDC_API_KEY), Serply/Google (SERPLY_API_KEY), or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
+         SerpAPI/Google (SERPAPI_API_KEY), You.com (YDC_API_KEY), Serply/Google (SERPLY_API_KEY), Sofya (SOFYA_API_KEY), or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
          The result begins with a `Source: <engine>` line — when summarizing \
          results to the user, mention which engine answered (e.g. \"via Tavily\" \
          or \"ผ่าน Tavily\"); cite the source so they understand the result quality.";
@@ -628,7 +707,7 @@ impl Tool for WebSearchTool {
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
                 "max_results": {"type": "integer", "description": "Max results (default 5)"},
-                "freshness": {"type": "string", "description": "Only recent results: day | week | month | year (Tavily/Brave/You.com/Serply; ignored elsewhere)"}
+                "freshness": {"type": "string", "description": "Only recent results: day | week | month | year (Tavily/Brave/You.com/Serply/Sofya; ignored elsewhere)"}
             },
             "required": ["query"]
         })
@@ -685,6 +764,10 @@ impl Tool for WebSearchTool {
                 }
                 Backend::Serply(key) => {
                     self.search_serply(query, max, key, freshness.as_deref())
+                        .await
+                }
+                Backend::Sofya(key) => {
+                    self.search_sofya(SOFYA_SEARCH_URL, query, max, key, freshness.as_deref())
                         .await
                 }
                 Backend::Ddg => self.search_ddg(query, max).await,
@@ -749,6 +832,7 @@ mod tests {
         prev_brave: Option<String>,
         prev_youcom: Option<String>,
         prev_serply: Option<String>,
+        prev_sofya: Option<String>,
     }
 
     impl Drop for EnvGuard {
@@ -769,6 +853,10 @@ mod tests {
                 Some(v) => std::env::set_var("SERPLY_API_KEY", v),
                 None => std::env::remove_var("SERPLY_API_KEY"),
             }
+            match &self.prev_sofya {
+                Some(v) => std::env::set_var("SOFYA_API_KEY", v),
+                None => std::env::remove_var("SOFYA_API_KEY"),
+            }
         }
     }
 
@@ -783,12 +871,15 @@ mod tests {
         // Same treatment for SERPLY_API_KEY.
         let prev_serply = std::env::var("SERPLY_API_KEY").ok();
         std::env::remove_var("SERPLY_API_KEY");
+        let prev_sofya = std::env::var("SOFYA_API_KEY").ok();
+        std::env::remove_var("SOFYA_API_KEY");
         EnvGuard {
             _lock: lock,
             prev_tavily: std::env::var("TAVILY_API_KEY").ok(),
             prev_brave: std::env::var("BRAVE_SEARCH_API_KEY").ok(),
             prev_youcom,
             prev_serply,
+            prev_sofya,
         }
     }
 
@@ -1041,6 +1132,147 @@ mod tests {
     }
 
     #[test]
+    fn auto_with_only_sofya_key_places_it_before_ddg() {
+        let _e = scoped_env();
+        std::env::remove_var("TAVILY_API_KEY");
+        std::env::remove_var("BRAVE_SEARCH_API_KEY");
+        std::env::set_var("SOFYA_API_KEY", "f");
+        let tool = WebSearchTool::new("auto");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["sofya", "duckduckgo"]);
+    }
+
+    #[test]
+    fn auto_orders_sofya_after_serply() {
+        let _e = scoped_env();
+        std::env::remove_var("TAVILY_API_KEY");
+        std::env::remove_var("BRAVE_SEARCH_API_KEY");
+        std::env::set_var("SERPLY_API_KEY", "s");
+        std::env::set_var("SOFYA_API_KEY", "f");
+        let tool = WebSearchTool::new("auto");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["serply", "sofya", "duckduckgo"]);
+    }
+
+    #[test]
+    fn pinned_sofya_with_key_falls_back_to_ddg() {
+        let _e = scoped_env();
+        std::env::set_var("TAVILY_API_KEY", "t");
+        std::env::set_var("SOFYA_API_KEY", "f");
+        let tool = WebSearchTool::new("sofya");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["sofya", "duckduckgo"]);
+    }
+
+    #[test]
+    fn pinned_sofya_without_key_uses_only_ddg() {
+        let _e = scoped_env();
+        let tool = WebSearchTool::new("sofya");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["duckduckgo"]);
+    }
+
+    #[test]
+    fn empty_sofya_key_treated_as_absent() {
+        let _e = scoped_env();
+        std::env::set_var("SOFYA_API_KEY", "");
+        let tool = WebSearchTool::new("auto");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert_eq!(chain, vec!["duckduckgo"]);
+    }
+
+    #[tokio::test]
+    async fn sofya_sends_snippets_request_and_parses_results() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(header("authorization", "Bearer k"))
+            .and(body_json(json!({
+                "query": "rust async",
+                "search_depth": "snippets",
+                "max_results": 20,
+                "freshness": "week",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query": "rust async",
+                "answer": null,
+                "results": [
+                    {"title": "A", "url": "https://a.example", "content": "first", "description": "d1"},
+                    {"title": "B", "url": "https://b.example", "content": "", "description": "second"},
+                ],
+                "credits_used": 1,
+            })))
+            .mount(&server)
+            .await;
+
+        let tool = WebSearchTool::new("sofya");
+        let out = tool
+            .search_sofya(
+                &format!("{}/v1/search", server.uri()),
+                "rust async",
+                25,
+                "k",
+                Some("week"),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(
+            out,
+            "1. A (https://a.example)\n   first\n\n2. B (https://b.example)\n   second"
+        );
+    }
+
+    #[tokio::test]
+    async fn sofya_empty_results_and_http_errors() {
+        use wiremock::matchers::{header, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer bad"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(json!({"detail": "Invalid API key"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer broke"))
+            .respond_with(
+                ResponseTemplate::new(402).set_body_json(json!({"detail": "Insufficient credits"})),
+            )
+            .mount(&server)
+            .await;
+
+        let tool = WebSearchTool::new("sofya");
+        let url = format!("{}/v1/search", server.uri());
+        let out = tool
+            .search_sofya(&url, "q", 5, "empty", None)
+            .await
+            .expect("ok");
+        assert_eq!(out, "No results found.");
+        let err = tool
+            .search_sofya(&url, "q", 5, "bad", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sofya HTTP 401"), "{err}");
+        let err = tool
+            .search_sofya(&url, "q", 5, "broke", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sofya HTTP 402"), "{err}");
+    }
+
+    #[test]
     fn pinned_ddg_uses_only_ddg_no_fallback() {
         // The user explicitly chose the bottom of the chain. There's
         // nothing to fall back to; respect their pin.
@@ -1092,6 +1324,7 @@ mod tests {
             Backend::Serply(String::new()).display_name(),
             "Serply (Google)"
         );
+        assert_eq!(Backend::Sofya(String::new()).display_name(), "Sofya");
         assert_eq!(Backend::Ddg.display_name(), "DuckDuckGo");
         // The short `name()` form is what we emit in error chains
         // (e.g. `tavily: HTTP 429`); keep it lowercase + dash-free
@@ -1100,6 +1333,7 @@ mod tests {
         assert_eq!(Backend::Brave(String::new()).name(), "brave");
         assert_eq!(Backend::YouCom(String::new()).name(), "youcom");
         assert_eq!(Backend::Serply(String::new()).name(), "serply");
+        assert_eq!(Backend::Sofya(String::new()).name(), "sofya");
         assert_eq!(Backend::Ddg.name(), "duckduckgo");
     }
 }
