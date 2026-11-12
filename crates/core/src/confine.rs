@@ -987,11 +987,24 @@ mod linux {
             if fd < 0 {
                 return Ok(true); // nonexistent path — skip
             }
-            // Directory? Non-dirs get the file-only access subset.
-            let is_dir = unsafe {
+            let fmt = unsafe {
                 let mut st: libc::stat = std::mem::zeroed();
-                libc::fstat(fd, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFDIR
+                if libc::fstat(fd, &mut st) == 0 {
+                    st.st_mode & libc::S_IFMT
+                } else {
+                    0
+                }
             };
+            // /dev/stdout and /dev/stderr resolve to a pipe or socket when the
+            // helper's stdio is one — always, under the probe — and Landlock
+            // answers EBADFD for a rule on pipefs/sockfs, failing the whole
+            // ruleset. Skip them: they aren't paths a command could escape by.
+            if fmt == libc::S_IFIFO || fmt == libc::S_IFSOCK {
+                unsafe { libc::close(fd) };
+                return Ok(true);
+            }
+            // Directory? Non-dirs get the file-only access subset.
+            let is_dir = fmt == libc::S_IFDIR;
             let allowed = if is_dir {
                 access
             } else {

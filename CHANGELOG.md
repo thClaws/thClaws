@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.155.0] — 2026-11-12
+
+A security fix for Bash confinement on Linux, plus an opt-in web search backend.
+
+### Security
+
+- **Bash is confined again on Linux hosts that block unprivileged user namespaces**, such as Ubuntu 24.04 and DGX Spark/Station. Two things combined to leave Bash commands and hooks running with the user's full rights, with only the "No OS sandbox on this host" warning:
+  - The Landlock probe ran its helper with piped stdio. `/dev/stdout` and `/dev/stderr` then pointed at a pipe, Landlock refused a rule on it, and the whole ruleset failed.
+  - The bubblewrap fallback is blocked by AppArmor on those hosts.
+
+  Landlock now skips pipe and socket paths, so the workspace sandbox enforces there.
+
+### Added
+
+- **Keenable as an opt-in WebSearch backend** ([#235](https://github.com/thClaws/thClaws/pull/235), thanks @KGKallasmaa). It joins the `auto` chain only when `KEENABLE_API_KEY` is set. With `searchEngine: "keenable"` it uses Keenable's key-free endpoint if no key is set.
+
 ## [0.154.0] — 2026-11-12
 
 A small release. It fixes chat-bridge approvals ([#236](https://github.com/thClaws/thClaws/issues/236)) and brings every thClaws install onto the same version.
