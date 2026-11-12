@@ -69,6 +69,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   serpapi: "SerpAPI (Google Search)",
   youcom: "You.com Search",
   serply: "Serply (Google Search)",
+  keenable: "Keenable (web search for agents)",
   hal: "HAL Public API (YouTube transcript + Web scrape)",
   ltx: "LTX (video generation + native audio)",
   iapp: "iApp (Thai image generation)",

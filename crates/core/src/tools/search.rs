@@ -6,7 +6,9 @@
 //!   3. SerpAPI (`SERPAPI_API_KEY`) — real Google results as JSON
 //!   4. You.com (`YDC_API_KEY`) — clean JSON, snippets + descriptions
 //!   5. Serply (`SERPLY_API_KEY`) - real Google results as JSON
-//!   6. DuckDuckGo HTML scrape — no key needed, good enough fallback
+//!   6. Keenable (`KEENABLE_API_KEY`) — independent index for agents; pinning
+//!      `engine = "keenable"` also works without a key (public endpoint)
+//!   7. DuckDuckGo HTML scrape — no key needed, good enough fallback
 //!
 //! Two layers of fallback:
 //! - **Config-time** — a missing API key skips that backend at chain-build
@@ -44,6 +46,8 @@ enum Backend {
     SerpApi(String),
     YouCom(String),
     Serply(String),
+    /// Empty key = Keenable's key-free public endpoint.
+    Keenable(String),
     Ddg,
 }
 
@@ -57,6 +61,7 @@ impl Backend {
             Backend::SerpApi(_) => "serpapi",
             Backend::YouCom(_) => "youcom",
             Backend::Serply(_) => "serply",
+            Backend::Keenable(_) => "keenable",
             Backend::Ddg => "duckduckgo",
         }
     }
@@ -71,6 +76,7 @@ impl Backend {
             Backend::SerpApi(_) => "SerpAPI (Google)",
             Backend::YouCom(_) => "You.com",
             Backend::Serply(_) => "Serply (Google)",
+            Backend::Keenable(_) => "Keenable",
             Backend::Ddg => "DuckDuckGo",
         }
     }
@@ -91,7 +97,7 @@ pub struct WebSearchTool {
 }
 
 impl WebSearchTool {
-    /// `engine`: `"auto"` (detect from env), `"tavily"`, `"brave"`, `"serpapi"`, `"youcom"`, `"serply"`, `"duckduckgo"`/`"ddg"`.
+    /// `engine`: `"auto"` (detect from env), `"tavily"`, `"brave"`, `"serpapi"`, `"youcom"`, `"serply"`, `"keenable"`, `"duckduckgo"`/`"ddg"`.
     pub fn new(engine: &str) -> Self {
         // M6.23 BUG WT1: explicit timeout on the shared client; all
         // three backends (Tavily/Brave/DDG) inherit it.
@@ -113,12 +119,13 @@ impl WebSearchTool {
     /// is the universal floor for any non-`"duckduckgo"`-pinned config.
     ///
     /// Pin behavior:
-    /// - `"auto"` / unset → Tavily (if key) → Brave (if key) → SerpAPI (if key) → You.com (if key) → Serply (if key) → DDG
+    /// - `"auto"` / unset → Tavily (if key) → Brave (if key) → SerpAPI (if key) → You.com (if key) → Serply (if key) → Keenable (if key) → DDG
     /// - `"tavily"` → Tavily (if key) → DDG
     /// - `"brave"` → Brave (if key) → DDG
     /// - `"serpapi"` → SerpAPI (if key) → DDG
     /// - `"youcom"` → You.com (if key) → DDG
     /// - `"serply"` → Serply (if key) → DDG
+    /// - `"keenable"` → Keenable (keyed if `KEENABLE_API_KEY`, else key-free) → DDG
     /// - `"duckduckgo"` / `"ddg"` → DDG only (no fallback; user explicitly
     ///   chose the bottom of the chain)
     /// A local search key, never on a gateway-locked install: signed out
@@ -139,6 +146,8 @@ impl WebSearchTool {
         let try_serpapi = matches!(engine, "auto" | "" | "serpapi");
         let try_youcom = !self.locked && matches!(engine, "auto" | "" | "youcom" | "you.com");
         let try_serply = !self.locked && matches!(engine, "auto" | "" | "serply");
+        let pin_keenable = engine == "keenable";
+        let try_keenable = !self.locked && (pin_keenable || matches!(engine, "auto" | ""));
         // DDG is the universal fallback for everything except a DDG pin
         // (where it's already the only candidate, no need to fall back to
         // itself) and... well, only that.
@@ -184,6 +193,15 @@ impl WebSearchTool {
                 if !key.is_empty() {
                     out.push(Backend::Serply(key));
                 }
+            }
+        }
+        // Keenable is BYOK (no gateway route). In auto mode it needs a key;
+        // when pinned it falls back to the key-free public endpoint.
+        if try_keenable {
+            match std::env::var("KEENABLE_API_KEY") {
+                Ok(key) if !key.is_empty() => out.push(Backend::Keenable(key)),
+                _ if pin_keenable => out.push(Backend::Keenable(String::new())),
+                _ => {}
             }
         }
         // The DDG pin produces a one-element chain; auto/tavily/brave
@@ -489,6 +507,61 @@ impl WebSearchTool {
         }
     }
 
+    fn keenable_request(&self, query: &str, max: usize, key: &str) -> reqwest::RequestBuilder {
+        // Keenable: POST /v1/search with `X-API-Key`, or the key-free
+        // `/v1/search/public` endpoint identified by `X-Keenable-Title`.
+        let req = if key.is_empty() {
+            self.client
+                .post("https://api.keenable.ai/v1/search/public")
+                .header("X-Keenable-Title", "thClaws")
+        } else {
+            self.client
+                .post("https://api.keenable.ai/v1/search")
+                .header("X-API-Key", key)
+        };
+        req.json(&json!({ "query": query, "max_results": max.clamp(1, 50) }))
+    }
+
+    async fn search_keenable(&self, query: &str, max: usize, key: &str) -> Result<String> {
+        let resp = self
+            .keenable_request(query, max, key)
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("keenable: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::Tool(format!("keenable HTTP {status}: {text}")));
+        }
+
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("keenable json: {e}")))?;
+
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(results) = v.get("results").and_then(Value::as_array) {
+            for (i, r) in results.iter().take(max).enumerate() {
+                let title = r.get("title").and_then(Value::as_str).unwrap_or("");
+                let url = r.get("url").and_then(Value::as_str).unwrap_or("");
+                let snippet = r
+                    .get("snippet")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| r.get("description").and_then(Value::as_str))
+                    .unwrap_or("");
+                parts.push(format!("{}. {} ({})\n   {}", i + 1, title, url, snippet));
+            }
+        }
+
+        if parts.is_empty() {
+            Ok("No results found.".into())
+        } else {
+            Ok(parts.join("\n\n"))
+        }
+    }
+
     async fn search_serply(
         &self,
         query: &str,
@@ -614,7 +687,7 @@ impl Tool for WebSearchTool {
     fn description(&self) -> &'static str {
         const BASE: &str = "Search the web for information. Auto-selects the best available \
          backend: Tavily (TAVILY_API_KEY), Brave (BRAVE_SEARCH_API_KEY), \
-         SerpAPI/Google (SERPAPI_API_KEY), You.com (YDC_API_KEY), Serply/Google (SERPLY_API_KEY), or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
+         SerpAPI/Google (SERPAPI_API_KEY), You.com (YDC_API_KEY), Serply/Google (SERPLY_API_KEY), Keenable (KEENABLE_API_KEY), or DuckDuckGo (no key needed). Returns titles, URLs, and snippets. \
          The result begins with a `Source: <engine>` line — when summarizing \
          results to the user, mention which engine answered (e.g. \"via Tavily\" \
          or \"ผ่าน Tavily\"); cite the source so they understand the result quality.";
@@ -687,6 +760,7 @@ impl Tool for WebSearchTool {
                     self.search_serply(query, max, key, freshness.as_deref())
                         .await
                 }
+                Backend::Keenable(key) => self.search_keenable(query, max, key).await,
                 Backend::Ddg => self.search_ddg(query, max).await,
             };
             match result {
@@ -749,6 +823,7 @@ mod tests {
         prev_brave: Option<String>,
         prev_youcom: Option<String>,
         prev_serply: Option<String>,
+        prev_keenable: Option<String>,
     }
 
     impl Drop for EnvGuard {
@@ -769,6 +844,10 @@ mod tests {
                 Some(v) => std::env::set_var("SERPLY_API_KEY", v),
                 None => std::env::remove_var("SERPLY_API_KEY"),
             }
+            match &self.prev_keenable {
+                Some(v) => std::env::set_var("KEENABLE_API_KEY", v),
+                None => std::env::remove_var("KEENABLE_API_KEY"),
+            }
         }
     }
 
@@ -783,12 +862,16 @@ mod tests {
         // Same treatment for SERPLY_API_KEY.
         let prev_serply = std::env::var("SERPLY_API_KEY").ok();
         std::env::remove_var("SERPLY_API_KEY");
+        // And KEENABLE_API_KEY.
+        let prev_keenable = std::env::var("KEENABLE_API_KEY").ok();
+        std::env::remove_var("KEENABLE_API_KEY");
         EnvGuard {
             _lock: lock,
             prev_tavily: std::env::var("TAVILY_API_KEY").ok(),
             prev_brave: std::env::var("BRAVE_SEARCH_API_KEY").ok(),
             prev_youcom,
             prev_serply,
+            prev_keenable,
         }
     }
 
@@ -1032,6 +1115,45 @@ mod tests {
     }
 
     #[test]
+    fn auto_with_keenable_key_chains_keenable_before_ddg() {
+        let _e = scoped_env();
+        std::env::remove_var("TAVILY_API_KEY");
+        std::env::remove_var("BRAVE_SEARCH_API_KEY");
+        std::env::set_var("KEENABLE_API_KEY", "k");
+        let tool = WebSearchTool::new("auto");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert!(chain.ends_with(&["keenable", "duckduckgo"]), "{chain:?}");
+    }
+
+    #[test]
+    fn auto_without_keenable_key_skips_keenable() {
+        let _e = scoped_env();
+        let tool = WebSearchTool::new("auto");
+        let chain: Vec<&'static str> = tool.resolve_candidates().iter().map(|b| b.name()).collect();
+        assert!(!chain.contains(&"keenable"), "{chain:?}");
+    }
+
+    #[test]
+    fn pinned_keenable_without_key_uses_key_free_endpoint() {
+        let _e = scoped_env();
+        std::env::set_var("TAVILY_API_KEY", "t");
+        let tool = WebSearchTool::new("keenable");
+        let chain = tool.resolve_candidates();
+        let names: Vec<&'static str> = chain.iter().map(|b| b.name()).collect();
+        assert_eq!(names, vec!["keenable", "duckduckgo"]);
+        assert!(matches!(&chain[0], Backend::Keenable(k) if k.is_empty()));
+        let req = tool.keenable_request("q", 5, "").build().unwrap();
+        assert_eq!(
+            req.url().as_str(),
+            "https://api.keenable.ai/v1/search/public"
+        );
+        assert_eq!(req.headers().get("X-Keenable-Title").unwrap(), "thClaws");
+        let req = tool.keenable_request("q", 5, "k").build().unwrap();
+        assert_eq!(req.url().as_str(), "https://api.keenable.ai/v1/search");
+        assert_eq!(req.headers().get("X-API-Key").unwrap(), "k");
+    }
+
+    #[test]
     fn empty_serply_key_treated_as_absent() {
         let _e = scoped_env();
         std::env::set_var("SERPLY_API_KEY", "");
@@ -1092,6 +1214,7 @@ mod tests {
             Backend::Serply(String::new()).display_name(),
             "Serply (Google)"
         );
+        assert_eq!(Backend::Keenable(String::new()).display_name(), "Keenable");
         assert_eq!(Backend::Ddg.display_name(), "DuckDuckGo");
         // The short `name()` form is what we emit in error chains
         // (e.g. `tavily: HTTP 429`); keep it lowercase + dash-free
@@ -1100,6 +1223,7 @@ mod tests {
         assert_eq!(Backend::Brave(String::new()).name(), "brave");
         assert_eq!(Backend::YouCom(String::new()).name(), "youcom");
         assert_eq!(Backend::Serply(String::new()).name(), "serply");
+        assert_eq!(Backend::Keenable(String::new()).name(), "keenable");
         assert_eq!(Backend::Ddg.name(), "duckduckgo");
     }
 }
