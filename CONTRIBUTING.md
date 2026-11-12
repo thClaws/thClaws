@@ -60,6 +60,25 @@ Useful commands:
 5. **Push** and open a PR using the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
 6. **Link issues** — reference any issues the PR closes or relates to.
 
+## New providers and search backends
+
+thClaws already ships more than 40 model providers, and each one is a variant of a closed enum that every provider change has to touch. So we accept a **new native provider** only when it brings something the existing ones can't:
+
+- its own models, or an API that isn't OpenAI-compatible; or
+- a clear benefit for our users, especially in Thailand and Southeast Asia.
+
+A **router or aggregator** with an OpenAI-compatible API already works without new code, through the `openai-compat` provider:
+
+```sh
+OPENAI_COMPAT_BASE_URL=https://api.example.com/v1
+OPENAI_COMPAT_API_KEY=...
+# model: oai/<model-id>
+```
+
+For those, we welcome a **documentation PR** instead: a short section in `thclaws-technical-manual/providers.md` that shows the settings above for your service. Please don't add catalogue rows: a model list without prices or an owner goes stale.
+
+The same applies to **WebSearch backends**: we add one when it gives users something the current chain (Tavily, Brave, SerpAPI, You.com, Serply, DuckDuckGo) doesn't, such as a free tier that needs no key. Please open an issue first to discuss it.
+
 ## Code style
 
 - Default to **no comments**. Only add a comment when the *why* is non-obvious.
