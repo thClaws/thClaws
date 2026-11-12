@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.154.0] — 2026-11-12
+
+A small release. It fixes chat-bridge approvals ([#236](https://github.com/thClaws/thClaws/issues/236)) and brings every thClaws install onto the same version.
+
+### Fixed
+
+- **Connecting LINE, Telegram or Messenger in the desktop app keeps an explicit `permissions: auto`** ([#236](https://github.com/thClaws/thClaws/issues/236)). The bridge used to switch every session to approvals-in-the-chat, so a project set to auto got an approval prompt in the chat for every tool. Now only an explicit `"permissions": "auto"` in `.thclaws/settings.json` stays auto. Without it, approvals still go to the chat. The headless bots already behaved this way (#160).
+
 ## [0.153.0] — 2026-11-06
 
 A release for agent payments and for hardening the GUI, browser and `--serve` paths. It also makes `thclaws -p` reproducible and machine-readable, and fixes how reasoning, cookies, uploads and spreadsheets behave.

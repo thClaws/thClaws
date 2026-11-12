@@ -2794,9 +2794,9 @@ async fn run_worker(
                     state.line_pre_mode = Some(state.agent.permission_mode);
                     state.line_pre_approver = Some(state.approver.clone());
                 }
-                crate::permissions::set_current_mode_and_broadcast(
-                    crate::permissions::PermissionMode::LineGated,
-                );
+                let bridged_mode =
+                    bridge_permission_mode(&state, crate::permissions::PermissionMode::LineGated);
+                crate::permissions::set_current_mode_and_broadcast(bridged_mode);
                 state.approver =
                     handle.approver.clone() as std::sync::Arc<dyn crate::permissions::ApprovalSink>;
                 if let Err(e) = state.rebuild_agent(true) {
@@ -2806,7 +2806,7 @@ async fn run_worker(
                 // this, `rebuild_agent`'s prev_perm restore puts
                 // the agent back into whatever mode it was in
                 // before the connect.
-                state.agent.permission_mode = crate::permissions::PermissionMode::LineGated;
+                state.agent.permission_mode = bridged_mode;
 
                 let payload = serde_json::json!({
                     "type": "line_status",
@@ -2819,7 +2819,11 @@ async fn run_worker(
                 state.line_session = Some(handle);
                 let _ = events_tx.send(ViewEvent::LineStatus(payload.to_string()));
                 let _ = events_tx.send(ViewEvent::SlashOutput(
-                    "[line] bridge connected · permissions routed to LINE".into(),
+                    if bridged_mode == crate::permissions::PermissionMode::Auto {
+                        "[line] bridge connected · permissions: auto (no approval prompts)".into()
+                    } else {
+                        "[line] bridge connected · permissions routed to LINE".into()
+                    },
                 ));
             }
             ShellInput::LineDisconnect => {
@@ -3065,21 +3069,28 @@ async fn run_worker(
                     state.telegram_pre_mode = Some(state.agent.permission_mode);
                     state.telegram_pre_approver = Some(state.approver.clone());
                 }
-                crate::permissions::set_current_mode_and_broadcast(
+                let bridged_mode = bridge_permission_mode(
+                    &state,
                     crate::permissions::PermissionMode::TelegramGated,
                 );
+                crate::permissions::set_current_mode_and_broadcast(bridged_mode);
                 state.approver =
                     handle.approver.clone() as std::sync::Arc<dyn crate::permissions::ApprovalSink>;
                 if let Err(e) = state.rebuild_agent(true) {
                     eprintln!("[telegram] rebuild_agent after mode swap failed: {e}");
                 }
-                state.agent.permission_mode = crate::permissions::PermissionMode::TelegramGated;
+                state.agent.permission_mode = bridged_mode;
 
                 let payload = telegram_status_payload(&handle);
                 state.telegram_session = Some(handle);
                 let _ = events_tx.send(ViewEvent::TelegramStatus(payload.to_string()));
                 let _ = events_tx.send(ViewEvent::SlashOutput(
-                    "[telegram] bridge connected · permissions routed to Telegram".into(),
+                    if bridged_mode == crate::permissions::PermissionMode::Auto {
+                        "[telegram] bridge connected · permissions: auto (no approval prompts)"
+                            .into()
+                    } else {
+                        "[telegram] bridge connected · permissions routed to Telegram".into()
+                    },
                 ));
             }
             ShellInput::TelegramDisconnect => {
@@ -3368,21 +3379,28 @@ async fn run_worker(
                     state.messenger_pre_mode = Some(state.agent.permission_mode);
                     state.messenger_pre_approver = Some(state.approver.clone());
                 }
-                crate::permissions::set_current_mode_and_broadcast(
+                let bridged_mode = bridge_permission_mode(
+                    &state,
                     crate::permissions::PermissionMode::MessengerGated,
                 );
+                crate::permissions::set_current_mode_and_broadcast(bridged_mode);
                 state.approver =
                     handle.approver.clone() as std::sync::Arc<dyn crate::permissions::ApprovalSink>;
                 if let Err(e) = state.rebuild_agent(true) {
                     eprintln!("[messenger] rebuild_agent after mode swap failed: {e}");
                 }
-                state.agent.permission_mode = crate::permissions::PermissionMode::MessengerGated;
+                state.agent.permission_mode = bridged_mode;
 
                 let payload = messenger_status_payload(&handle);
                 state.messenger_session = Some(handle);
                 let _ = events_tx.send(ViewEvent::MessengerStatus(payload.to_string()));
                 let _ = events_tx.send(ViewEvent::SlashOutput(
-                    "[messenger] bridge connected · permissions routed to Messenger".into(),
+                    if bridged_mode == crate::permissions::PermissionMode::Auto {
+                        "[messenger] bridge connected · permissions: auto (no approval prompts)"
+                            .into()
+                    } else {
+                        "[messenger] bridge connected · permissions routed to Messenger".into()
+                    },
                 ));
             }
             ShellInput::MessengerDisconnect => {
@@ -6204,6 +6222,27 @@ mod injection_tests {
             let want: Vec<String> = (0..50).map(|i| format!("m{i}")).collect();
             assert_eq!(all, want);
         }
+    }
+}
+
+/// Mode for a chat bridge (LINE / Telegram / Messenger) while it is
+/// connected: approvals route to the chat, unless the project's
+/// settings.json says `permissions: auto` — then nothing asks, like the
+/// headless bots (#160). The compiled-in default is also "auto", so the
+/// in-memory config can't tell a choice from a default: read the file.
+/// Issue #236: the GUI forced the gated mode even then.
+fn bridge_permission_mode(
+    state: &WorkerState,
+    gated: crate::permissions::PermissionMode,
+) -> crate::permissions::PermissionMode {
+    let explicit_auto = state.config.permissions.eq_ignore_ascii_case("auto")
+        && crate::config::ProjectConfig::load()
+            .and_then(|p| p.permissions)
+            .is_some_and(|p| p.mode().eq_ignore_ascii_case("auto"));
+    if explicit_auto {
+        crate::permissions::PermissionMode::Auto
+    } else {
+        gated
     }
 }
 
