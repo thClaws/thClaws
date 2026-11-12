@@ -508,6 +508,17 @@ fn recently_alive() -> bool {
 /// Blocking — call via `spawn_blocking` from async contexts. Cheap
 /// fast-path when already launched.
 pub fn ensure_up() -> Result<(), String> {
+    // One launch at a time: an MCP tool call and the Browser tab's
+    // screencast could both see `launched == false`, both spawn on the same
+    // profile, and the loser (forwarded to the winner by Chromium's
+    // SingletonLock) was stored as the child — so shutdown killed a dead pid
+    // and the real browser outlived the app with its DevTools port open.
+    static LAUNCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _launch = LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_up_locked()
+}
+
+fn ensure_up_locked() -> Result<(), String> {
     let (port, headless, endpoint, launched) = {
         let guard = state().lock().unwrap();
         let s = guard.as_ref().ok_or("CDP mode not armed")?;
@@ -543,6 +554,18 @@ pub fn ensure_up() -> Result<(), String> {
         // too, as soon as it re-dials.
     }
 
+    // The port was reserved when CDP mode was armed, possibly hours ago, and
+    // it is visible in playwright-mcp's argv. Something already answering on
+    // it now is not our Chromium (ours is not running, or we would have
+    // returned above), and handing it the saved cookie jar or the human's
+    // typing would give them away.
+    if endpoint_alive(&endpoint) {
+        return Err(format!(
+            "DevTools port {port} is already in use by another process — not launching the \
+             browser into it"
+        ));
+    }
+
     let exe = find_chromium().ok_or("no chromium executable")?;
     let profile = profile_dir();
     let endpoint_file = profile.join("devtools-endpoint");
@@ -551,7 +574,7 @@ pub fn ensure_up() -> Result<(), String> {
     // never ride along when a workspace folder is published as an
     // agent or synced. Keyed by cwd so two workspaces don't share
     // logins.
-    let _ = std::fs::create_dir_all(&profile);
+    make_private_dir(&profile);
 
     let mut cmd = std::process::Command::new(&exe);
     let (vw, vh) = crate::config::AppConfig::browser_viewport();
@@ -584,7 +607,7 @@ pub fn ensure_up() -> Result<(), String> {
     }
     cmd.arg("about:blank");
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("launch {}: {e}", exe.display()))?;
 
@@ -597,9 +620,19 @@ pub fn ensure_up() -> Result<(), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !endpoint_alive(&endpoint) {
         if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
             return Err("timed out waiting for DevTools endpoint".into());
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    // Ours exited (handed off to another instance, or failed to bind) yet the
+    // port answers: whoever is there is not the process we launched.
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return Err(format!(
+            "the browser exited but DevTools port {port} still answers — another process \
+             holds it; not using it"
+        ));
     }
     eprintln!(
         "\x1b[2m[browser-cdp] chromium up ({}) — devtools {endpoint}\x1b[0m",
@@ -709,13 +742,38 @@ async fn snapshot_cookies(endpoint: &str) -> Result<(), String> {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        make_private_dir(parent);
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(&cookies).unwrap_or_default())
+    write_private(&tmp, &serde_json::to_vec(&cookies).unwrap_or_default())
         .map_err(|e| format!("write cookies: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename cookies: {e}"))?;
     Ok(())
+}
+
+/// The cookie jar in plaintext: owner-only, so another local user can't
+/// read what Chromium itself keeps encrypted.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let _ = std::fs::remove_file(path);
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path)?.write_all(bytes)
+}
+
+/// The profile holds every logged-in session; keep it owner-only.
+fn make_private_dir(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
 }
 
 async fn restore_cookies(endpoint: &str) -> Result<(), String> {
@@ -1641,6 +1699,24 @@ pub fn input_queued(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cookie_jar_and_profile_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_private_dir(&profile);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&profile), 0o700);
+        let jar = profile.join("thclaws-cookies.json.tmp");
+        std::fs::write(&jar, b"old").unwrap();
+        write_private(&jar, b"[]").unwrap();
+        assert_eq!(mode(&jar), 0o600);
+        assert_eq!(std::fs::read(&jar).unwrap(), b"[]");
+    }
 
     /// A drag is `down`, moves, `up` — relayed on separate threads, the
     /// `up` could land first. The queue keeps arrival order.

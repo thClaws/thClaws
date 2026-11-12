@@ -172,6 +172,28 @@ async fn plain_get(client: &reqwest::Client, url: &str, max_bytes: usize) -> Res
         .map_err(|e| Error::Tool(format!("fetch {url}: {e}")))?;
 
     let status = resp.status();
+    // A paywalled page (x402) goes through the payment gate, so reading the
+    // web keeps working when sites start charging agents (dev-plan/74).
+    if status.as_u16() == 402 {
+        if !crate::payments::tool_enabled() {
+            return Err(Error::Tool(format!(
+                "fetch {url}: HTTP 402 Payment Required (agent payments are off)"
+            )));
+        }
+        let purpose = format!("read {url}");
+        let out = crate::tools::paid_fetch::fetch(
+            client,
+            reqwest::Method::GET,
+            url,
+            None,
+            None,
+            Some(&purpose),
+            None,
+        )
+        .await
+        .map_err(Error::Tool)?;
+        return Ok(truncate_for_bytes(&strip_html_noise(&out), max_bytes));
+    }
     if !status.is_success() {
         return Err(Error::Tool(format!("fetch {url}: HTTP {status}")));
     }

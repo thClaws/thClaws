@@ -114,6 +114,33 @@ pub struct Policies {
     /// Phase 6 — installs come only from the org's private marketplace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marketplace: Option<MarketplacePolicy>,
+    /// dev-plan/74 — pay-per-use for approved sources, inside company limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payments: Option<PaymentsPolicy>,
+}
+
+/// Micropayments only: web reads, APIs, per-call data. A policy without
+/// this block refuses every payment; inside it the agent pays without
+/// asking, and anything outside it is refused, never prompted.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PaymentsPolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Asset the caps are written in (default USDC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset: Option<String>,
+    /// Host globs (`*.example.com`) or URL prefixes. Empty = nothing.
+    #[serde(default)]
+    pub allowed_sources: Vec<String>,
+    /// Hard per-request ceiling, decimal string (e.g. `"0.05"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_request: Option<String>,
+    /// Calendar-month cap, decimal string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_budget: Option<String>,
+    /// Agents that may pay (`main`, or an agent name). Empty = any.
+    #[serde(default)]
+    pub agents: Vec<String>,
 }
 
 /// Skills, plugins, subagents and MCP servers install only by name from
@@ -384,6 +411,13 @@ pub fn runtime() -> Option<&'static RuntimePolicy> {
     active()
         .and_then(|a| a.policy.policies.runtime.as_ref())
         .filter(|r| r.enabled)
+}
+
+/// The active `payments` block, when enabled.
+pub fn payments() -> Option<&'static PaymentsPolicy> {
+    active()
+        .and_then(|a| a.policy.policies.payments.as_ref())
+        .filter(|p| p.enabled)
 }
 
 /// The active `gateway` block when it is the customer's own thClaws
@@ -1513,6 +1547,7 @@ mod tests {
                 audit: None,
                 runtime: None,
                 marketplace: None,
+                payments: None,
             },
             signature: Some("sig".into()),
         };

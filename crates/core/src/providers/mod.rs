@@ -46,6 +46,7 @@ pub mod anthropic;
 pub mod assemble;
 pub mod gateway;
 pub mod gemini;
+pub mod headless;
 pub mod ollama;
 pub mod ollama_cloud;
 pub mod openai;

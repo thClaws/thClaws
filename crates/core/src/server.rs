@@ -423,14 +423,7 @@ pub async fn run_on(
         let approval_broadcast = ask_broadcast.clone();
         tokio::spawn(async move {
             while let Some(req) = approval_rx.recv().await {
-                let payload = serde_json::json!({
-                    "type": "approval_request",
-                    "id": req.id,
-                    "tool_name": req.tool_name,
-                    "input": req.input,
-                    "summary": req.summary,
-                    "originator": req.originator,
-                });
+                let payload = req.frame(false);
                 let _ = approval_broadcast.send(payload.to_string());
             }
         });
@@ -3303,14 +3296,7 @@ async fn handle_socket(
     // stay hung. Replaying the unresolved set lets the reconnected tab
     // approve and unblock it.
     for req in state.approver.unresolved_requests() {
-        let payload = serde_json::json!({
-            "type": "approval_request",
-            "id": req.id,
-            "tool_name": req.tool_name,
-            "input": req.input,
-            "summary": req.summary,
-            "originator": req.originator,
-        });
+        let payload = req.frame(false);
         let _ = out_tx.send(payload.to_string());
     }
 

@@ -79,6 +79,12 @@ impl ProjectContext {
     /// Append runtime-discovered context onto a base system prompt. Sections are
     /// added only when there's something to say; no empty headers.
     pub fn build_system_prompt(&self, base: &str) -> String {
+        self.build_system_prompt_with(base, crate::prompts::bare())
+    }
+
+    /// `bare` keeps the base prompt, the date and the working directory and
+    /// drops what depends on the folder: git state and project instructions.
+    pub fn build_system_prompt_with(&self, base: &str, bare: bool) -> String {
         let mut parts: Vec<String> = Vec::new();
 
         if !base.trim().is_empty() {
@@ -96,7 +102,7 @@ impl ProjectContext {
              prices, releases, versions, who-holds-an-office. For those, use WebSearch / \
              WebFetch (or the browser tools) to get up-to-date information; do NOT answer from \
              memory.",
-            crate::usage::today_str()
+            prompt_date()
         ));
 
         // Under a workspace host the agent's folder and the user's files are
@@ -124,6 +130,10 @@ impl ProjectContext {
             None => parts.push(format!("# Working directory\n{}", self.cwd.display())),
         }
 
+        if bare {
+            return parts.join("\n\n");
+        }
+
         if let Some(git) = &self.git {
             parts.push(format!(
                 "# Git\nBranch: {}\nHEAD:   {}\nStatus: {}",
@@ -136,6 +146,22 @@ impl ProjectContext {
         }
 
         parts.join("\n\n")
+    }
+}
+
+/// The date the system prompt states. `THCLAWS_FIXED_DATE=YYYY-MM-DD`
+/// freezes it, so batch runs and training rollouts see one prompt whatever
+/// day they run; only the prompt changes, not usage accounting.
+pub fn prompt_date() -> String {
+    prompt_date_from(std::env::var("THCLAWS_FIXED_DATE").ok())
+}
+
+fn prompt_date_from(fixed: Option<String>) -> String {
+    match fixed {
+        Some(d) if chrono::NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d").is_ok() => {
+            d.trim().to_string()
+        }
+        _ => crate::usage::today_str(),
     }
 }
 
@@ -560,6 +586,32 @@ mod tests {
 
     /// Audit 2026-11-01 #4: a repo-planted `core.fsmonitor` ran on every
     /// prompt rebuild, because the engine's `git status` is unconfined.
+
+    #[test]
+    fn fixed_date_and_bare_prompt() {
+        assert_eq!(prompt_date_from(Some(" 2026-11-01 ".into())), "2026-11-01");
+        assert_eq!(
+            prompt_date_from(Some("tomorrow".into())),
+            crate::usage::today_str()
+        );
+        assert_eq!(prompt_date_from(None), crate::usage::today_str());
+
+        let ctx = ProjectContext {
+            cwd: std::path::PathBuf::from("/work"),
+            git: Some(GitInfo {
+                branch: "main".into(),
+                head: "abc".into(),
+                is_dirty: false,
+                status_summary: "clean".into(),
+            }),
+            project_instructions: Some("be terse".into()),
+        };
+        let full = ctx.build_system_prompt_with("BASE", false);
+        assert!(full.contains("# Git") && full.contains("be terse"));
+        let bare = ctx.build_system_prompt_with("BASE", true);
+        assert!(bare.starts_with("BASE") && bare.contains("/work"));
+        assert!(!bare.contains("# Git") && !bare.contains("be terse"));
+    }
     #[cfg(unix)]
     #[test]
     fn git_info_does_not_run_a_planted_fsmonitor() {

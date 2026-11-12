@@ -5901,6 +5901,62 @@ pub async fn run_print_mode(config: AppConfig, prompt: &str, verbose: bool) -> R
     run_print_mode_with(config, prompt, verbose, true).await
 }
 
+/// Exit codes of `thclaws -p`, for harnesses that run it in batches.
+pub mod print_exit {
+    pub const OK: i32 = 0;
+    pub const ERROR: i32 = 1;
+    pub const MAX_ITERATIONS: i32 = 3;
+    pub const TOOL_LOOP: i32 = 4;
+    /// Same as GNU `timeout(1)` and `thclaws schedule run`.
+    pub const TIMEOUT: i32 = 124;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PrintOptions {
+    pub verbose: bool,
+    pub save_session: bool,
+    /// `--output-format json`: stdout is one JSON object at the end instead
+    /// of streamed text.
+    pub json: bool,
+    /// Wall-clock limit for the whole turn. On expiry the turn is dropped,
+    /// what history exists is saved, and the exit code is `TIMEOUT`.
+    pub timeout: Option<std::time::Duration>,
+    /// Sent as `temperature` / `top_p` by OpenAI-compatible providers.
+    /// Fallback: `THCLAWS_TEMPERATURE` / `THCLAWS_TOP_P`.
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    /// Sent as `seed` (vLLM, OpenAI). Fallback: `THCLAWS_SEED`.
+    pub seed: Option<u64>,
+    /// JSONL file that gets every request body sent to the model.
+    /// Fallback: `THCLAWS_REQUEST_LOG`.
+    pub request_log: Option<std::path::PathBuf>,
+}
+
+fn env_f64(name: &str) -> Result<Option<f64>> {
+    match std::env::var(name) {
+        Ok(v) if !v.trim().is_empty() => v
+            .trim()
+            .parse()
+            .map(Some)
+            .map_err(|_| crate::error::Error::Config(format!("{name}={v} is not a number"))),
+        _ => Ok(None),
+    }
+}
+
+fn print_exit_code(stop_reason: Option<&str>, timed_out: bool, error: bool) -> i32 {
+    if error {
+        print_exit::ERROR
+    } else if timed_out {
+        print_exit::TIMEOUT
+    } else {
+        match stop_reason {
+            Some("max_iterations") => print_exit::MAX_ITERATIONS,
+            Some("degenerate_tool_loop") => print_exit::TOOL_LOOP,
+            _ => print_exit::OK,
+        }
+    }
+}
+
 /// dev-plan/heartbeat: `-p` upgraded to a full headless surface — Task
 /// (subagents), session persist + `--resume`, and lifecycle hooks, matching
 /// REPL/GUI capability. Pre-upgrade `-p` had none of these: prompts that
@@ -5917,9 +5973,59 @@ pub async fn run_print_mode_with(
     verbose: bool,
     save_session: bool,
 ) -> Result<()> {
+    let opts = PrintOptions {
+        verbose,
+        save_session,
+        ..Default::default()
+    };
+    match run_print_mode_opts(config, prompt, opts).await? {
+        print_exit::OK => Ok(()),
+        code => std::process::exit(code),
+    }
+}
+
+/// `-p` with harness options; returns the process exit code (see
+/// [`print_exit`]). The session is saved before any non-zero code.
+pub async fn run_print_mode_opts(
+    config: AppConfig,
+    prompt: &str,
+    opts: PrintOptions,
+) -> Result<i32> {
+    let PrintOptions {
+        verbose,
+        save_session,
+        json: json_out,
+        timeout,
+        temperature,
+        top_p,
+        seed,
+        request_log,
+    } = opts;
     // Both binaries call THIS, not the `run_print_mode` wrapper — a hook on
     // the wrapper armed nothing and `-p` shipped PII unmasked.
     config.apply_process_globals();
+    crate::providers::headless::set_sampling(crate::providers::headless::Sampling {
+        temperature: temperature.map_or_else(|| env_f64("THCLAWS_TEMPERATURE"), |t| Ok(Some(t)))?,
+        top_p: top_p.map_or_else(|| env_f64("THCLAWS_TOP_P"), |p| Ok(Some(p)))?,
+        seed: match seed {
+            Some(n) => Some(n),
+            None => match std::env::var("THCLAWS_SEED") {
+                Ok(v) if !v.trim().is_empty() => Some(v.trim().parse().map_err(|_| {
+                    crate::error::Error::Config(format!("THCLAWS_SEED={v} is not an integer"))
+                })?),
+                _ => None,
+            },
+        },
+    });
+    if let Some(path) = request_log.or_else(|| {
+        std::env::var_os("THCLAWS_REQUEST_LOG")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    }) {
+        crate::providers::headless::open_request_log(&path).map_err(|e| {
+            crate::error::Error::Config(format!("request log {}: {e}", path.display()))
+        })?;
+    }
     crate::desktop_update::spawn_cli_check();
     let cwd = std::env::current_dir()?;
 
@@ -6203,23 +6309,47 @@ pub async fn run_print_mode_with(
     }
 
     let turn_start = std::time::Instant::now();
+    let mut final_text = String::new();
+    let mut stop_reason: Option<String> = None;
+    let mut last_usage: Option<crate::providers::Usage> = None;
+    let mut error: Option<String> = None;
+    let mut timed_out = false;
+    let mut iterations = 0usize;
+    let mut tool_calls = 0usize;
+    let deadline = tokio::time::sleep(timeout.unwrap_or(std::time::Duration::MAX / 4));
+    tokio::pin!(deadline);
     // Live reasoning is shown only on a TTY. When piped (`-p | jq`) or
     // captured by the scheduler into a run log, streaming the model's
     // thinking onto stdout buries the actual answer and corrupts
     // downstream parsers — so the captured output is just the final text.
-    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout()) && !json_out;
     crate::gateway_turn::set_session(&session.id);
     let mut stream = Box::pin(agent.run_turn(prompt.to_string()));
     let mut last_was_thinking = false;
-    while let Some(ev) = stream.next().await {
+    loop {
+        let ev = tokio::select! {
+            ev = stream.next() => match ev {
+                Some(ev) => ev,
+                None => break,
+            },
+            _ = &mut deadline, if timeout.is_some() => {
+                timed_out = true;
+                eprintln!("\n[timeout] turn stopped after {}", format_duration(turn_start.elapsed()));
+                break;
+            }
+        };
         match ev {
+            Ok(AgentEvent::IterationStart { .. }) => iterations += 1,
             Ok(AgentEvent::Text(s)) => {
                 if last_was_thinking {
                     println!();
                     last_was_thinking = false;
                 }
-                print!("{s}");
-                let _ = std::io::stdout().flush();
+                final_text.push_str(&s);
+                if !json_out {
+                    print!("{s}");
+                    let _ = std::io::stdout().flush();
+                }
             }
             Ok(AgentEvent::Thinking(s)) => {
                 // Reasoning models (DeepSeek v4/r1, OpenAI o-series, NVIDIA NIM
@@ -6242,13 +6372,22 @@ pub async fn run_print_mode_with(
                     println!();
                     last_was_thinking = false;
                 }
+                tool_calls += 1;
+                // Text before a tool call was narration, not the answer.
+                final_text.clear();
                 let raw = input.to_string();
                 let preview: String = raw.chars().take(140).collect();
                 let ellipsis = if raw.chars().count() > 140 { "…" } else { "" };
                 eprintln!("[tool] {name} {preview}{ellipsis}");
             }
-            Ok(AgentEvent::Done { usage, .. }) => {
-                println!();
+            Ok(AgentEvent::Done {
+                usage,
+                stop_reason: reason,
+            }) => {
+                if !json_out {
+                    println!();
+                }
+                stop_reason = reason;
                 // Issue #69: the per-turn token line goes to stderr so
                 // piped consumers (`thclaws -p ... | jq`) get clean stdout.
                 // Emitted on --verbose OR whenever stdout isn't a TTY
@@ -6261,10 +6400,12 @@ pub async fn run_print_mode_with(
                         .unwrap_or_default();
                     eprintln!("[tokens: {}{side} · {elapsed}]", usage.tokens_note());
                 }
+                last_usage = Some(usage);
             }
             Err(e) => {
                 eprintln!("\nerror: {e}");
-                std::process::exit(1);
+                error = Some(e.to_string());
+                break;
             }
             _ => {
                 // Any other event after thinking should also start on a
@@ -6277,6 +6418,7 @@ pub async fn run_print_mode_with(
         }
     }
 
+    drop(stream);
     // dev-plan/heartbeat: persist the turn so the next `-p --resume` (or a
     // schedule with --resume-session) continues this conversation.
     if let Some(ref store) = session_store {
@@ -6290,7 +6432,44 @@ pub async fn run_print_mode_with(
             Err(e) => eprintln!("[session] save failed: {e}"),
         }
     }
-    Ok(())
+    let code = print_exit_code(stop_reason.as_deref(), timed_out, error.is_some());
+    if json_out {
+        let reason = if error.is_some() {
+            "error".to_string()
+        } else if timed_out {
+            "timeout".to_string()
+        } else {
+            stop_reason
+                .clone()
+                .unwrap_or_else(|| "end_turn".to_string())
+        };
+        let usage = last_usage.map(|u| {
+            serde_json::json!({
+                "input_tokens": u.input_tokens,
+                "output_tokens": u.output_tokens,
+                "cache_read_input_tokens": u.cache_read_input_tokens,
+                "cache_creation_input_tokens": u.cache_creation_input_tokens,
+            })
+        });
+        let payments = crate::payments::payments_this_run();
+        let mut out = serde_json::json!({
+            "result": final_text,
+            "stop_reason": reason,
+            "exit_code": code,
+            "error": error,
+            "iterations": iterations,
+            "tool_calls": tool_calls,
+            "usage": usage,
+            "elapsed_ms": turn_start.elapsed().as_millis() as u64,
+            "model": config.model,
+            "session_id": session_store.as_ref().map(|_| session.id.clone()),
+        });
+        if !payments.is_empty() {
+            out["payments"] = serde_json::json!(payments);
+        }
+        println!("{out}");
+    }
+    Ok(code)
 }
 
 /// dev-plan/48.2: run an agent's pre-authored workflow headlessly with the
@@ -13613,6 +13792,26 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn print_exit_codes() {
+        use super::print_exit as x;
+        assert_eq!(print_exit_code(None, false, false), x::OK);
+        assert_eq!(print_exit_code(Some("end_turn"), false, false), x::OK);
+        assert_eq!(
+            print_exit_code(Some("max_iterations"), false, false),
+            x::MAX_ITERATIONS
+        );
+        assert_eq!(
+            print_exit_code(Some("degenerate_tool_loop"), false, false),
+            x::TOOL_LOOP
+        );
+        assert_eq!(
+            print_exit_code(Some("max_iterations"), true, false),
+            x::TIMEOUT
+        );
+        assert_eq!(print_exit_code(None, true, true), x::ERROR);
+    }
 
     /// A KMS name may contain spaces — the sidebar creates them — and
     /// `/kms drop` took only the first token, so deleting "Age of

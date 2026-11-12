@@ -2110,6 +2110,10 @@ mod tests {
     /// of the lock makes it wait and then give up rather than move anything.
     #[test]
     fn auto_migrate_runs_once_and_yields_to_a_holder() {
+        // The host lock lives under $HOME; a parallel test that moves HOME
+        // between the holder's lock and the upgrade's put the two in
+        // different directories, so the upgrade "won" a lock still held.
+        let _env = crate::kms::test_env_lock();
         let (_r, ws) = v2_workspace("proj");
         let wait = Duration::from_millis(200);
         assert!(matches!(
@@ -2144,10 +2148,8 @@ mod tests {
         let (_r2, held) = v2_workspace("held");
         let _holder = super::super::lock_workspace(&held, "a host").unwrap();
         let t0 = Instant::now();
-        assert!(matches!(
-            auto_migrate_with_wait(&held, wait),
-            AutoOutcome::Busy
-        ));
+        let got = auto_migrate_with_wait(&held, wait);
+        assert!(matches!(got, AutoOutcome::Busy), "got {got:?}");
         assert!(
             t0.elapsed() >= wait,
             "it waited for the holder before giving up"

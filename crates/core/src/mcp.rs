@@ -1795,12 +1795,66 @@ impl McpTool {
     /// listens on yet. Raise Chromium before the first browser tool
     /// call connects. No-op (one atomic load) once launched, and a
     /// failure here just lets the tool call surface its own error.
+    fn is_browser(&self) -> bool {
+        self.client.name() == "browser"
+    }
+
+    /// playwright-mcp reads `paths` (file upload) and writes `filename`
+    /// (snapshots, screenshots, logs) on the local disk with nothing between
+    /// the model and the file system. Hold them to the rules Read and Write
+    /// obey: inside the workspace, and no upload of a protected path
+    /// (`.env`, `.thclaws/` incl. the browser profile, `.git/config`, …) or
+    /// write into one.
+    fn browser_path_guard(&self, input: &Value) -> Result<()> {
+        if !self.is_browser() {
+            return Ok(());
+        }
+        browser_path_guard_with(
+            input,
+            crate::sandbox::Sandbox::root(),
+            crate::sandbox::Sandbox::check,
+            crate::sandbox::Sandbox::check_write,
+        )
+    }
+
     async fn lazy_browser_up(&self) {
         if self.client.name() != "browser" || !crate::browser_cdp::cdp_active() {
             return;
         }
         let _ = tokio::task::spawn_blocking(crate::browser_cdp::ensure_up).await;
     }
+}
+
+fn browser_path_guard_with(
+    input: &Value,
+    root: Option<std::path::PathBuf>,
+    check_read: impl Fn(&str) -> Result<std::path::PathBuf>,
+    check_write: impl Fn(&str) -> Result<std::path::PathBuf>,
+) -> Result<()> {
+    if let Some(paths) = input.get("paths").and_then(Value::as_array) {
+        for p in paths {
+            let raw = p.as_str().ok_or_else(|| {
+                crate::error::Error::Tool("browser: every upload path must be a string".into())
+            })?;
+            let resolved = check_read(raw)?;
+            let hit = root.as_deref().and_then(|r| {
+                crate::sandbox::protected_match(r, &resolved)
+                    .filter(|h| h.kind != crate::sandbox::ProtectedKind::Instructions)
+            });
+            if let Some(hit) = hit {
+                return Err(crate::error::Error::Tool(format!(
+                    "access denied: {} is a protected path ({}) and may not be uploaded to a \
+                     web page",
+                    resolved.display(),
+                    hit.rel
+                )));
+            }
+        }
+    }
+    if let Some(name) = input.get("filename").and_then(Value::as_str) {
+        check_write(name)?;
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -1830,6 +1884,7 @@ impl Tool for McpTool {
     }
 
     async fn call(&self, input: Value) -> Result<String> {
+        self.browser_path_guard(&input)?;
         self.lazy_browser_up().await;
         let out = self.client.call_tool(self.bare_name(), input).await?;
         crate::office::apps::after_call(&self.client, self.bare_name(), &out).await;
@@ -1845,6 +1900,7 @@ impl Tool for McpTool {
     /// `call()` behavior; non-multimodal providers still get the text
     /// blocks via `ToolResultContent::to_text()`.
     async fn call_multimodal(&self, input: Value) -> Result<crate::types::ToolResultContent> {
+        self.browser_path_guard(&input)?;
         self.lazy_browser_up().await;
         let result = self.client.call_tool_raw(self.bare_name(), input).await?;
         if crate::office::apps::is_office_server(self.client.name()) {
@@ -1868,6 +1924,31 @@ impl Tool for McpTool {
         // MCP tools can be arbitrary — default to requiring approval until
         // a per-tool allow-list / annotation mechanism lands.
         true
+    }
+
+    /// Uploading a local file to a web page sends it off the machine, under
+    /// the browser's logged-in sessions — ask even in auto mode.
+    fn forces_approval(&self, _input: &Value) -> bool {
+        self.is_browser() && self.bare_name() == "browser_file_upload"
+    }
+
+    fn approval_summary(&self, input: &Value) -> Option<String> {
+        if !(self.is_browser() && self.bare_name() == "browser_file_upload") {
+            return None;
+        }
+        let files: Vec<&str> = input
+            .get("paths")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        Some(format!(
+            "UPLOADS {} to the page open in the browser",
+            if files.is_empty() {
+                "nothing (cancels the file chooser)".to_string()
+            } else {
+                files.join(", ")
+            }
+        ))
     }
 
     async fn fetch_ui_resource(&self) -> Option<crate::tools::UiResource> {
@@ -2379,6 +2460,49 @@ pub async fn reauth_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_uploads_stay_in_the_workspace_and_off_protected_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("report.pdf"), b"x").unwrap();
+        std::fs::write(root.join(".env"), b"KEY=1").unwrap();
+        std::fs::write(root.join("AGENTS.md"), b"x").unwrap();
+        std::fs::create_dir_all(root.join(".thclaws/state/browser-profile")).unwrap();
+        std::fs::write(
+            root.join(".thclaws/state/browser-profile/thclaws-cookies.json"),
+            b"[]",
+        )
+        .unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("id_rsa"), b"k").unwrap();
+
+        let read = |p: &str| crate::sandbox::Sandbox::check_in(&root, p);
+        let write = |p: &str| {
+            let r = crate::sandbox::Sandbox::check_in(&root, p)?;
+            match crate::sandbox::protected_match(&root, &r) {
+                Some(_) => Err(crate::error::Error::Tool("protected".into())),
+                None => Ok(r),
+            }
+        };
+        let guard = |v: Value| browser_path_guard_with(&v, Some(root.clone()), read, write);
+
+        assert!(guard(json!({"paths": ["report.pdf"]})).is_ok());
+        assert!(guard(json!({"paths": ["AGENTS.md"]})).is_ok());
+        assert!(guard(json!({})).is_ok());
+        for bad in [
+            ".env",
+            ".thclaws/state/browser-profile/thclaws-cookies.json",
+            "../etc/passwd",
+        ] {
+            assert!(guard(json!({"paths": [bad]})).is_err(), "{bad}");
+        }
+        let abs = outside.path().join("id_rsa");
+        assert!(guard(json!({"paths": [abs.to_str().unwrap()]})).is_err());
+        assert!(guard(json!({"paths": ["report.pdf", 7]})).is_err());
+        assert!(guard(json!({"filename": "snap.md"})).is_ok());
+        assert!(guard(json!({"filename": ".thclaws/settings.json"})).is_err());
+    }
 
     /// Approving one npx package must not approve the next one.
     #[test]

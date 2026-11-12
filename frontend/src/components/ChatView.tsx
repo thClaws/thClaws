@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { resolveAssetSrc } from "../lib/fileAsset";
 import { Check, Copy, Paperclip } from "lucide-react";
-import { basePath, send, subscribe } from "../hooks/useIPC";
+import { basePath, botQuery, send, subscribe } from "../hooks/useIPC";
 import { useBranding } from "../hooks/useBranding";
 import { promptHistory, recordPrompt } from "../hooks/promptHistory";
 import { useTheme } from "../hooks/useTheme";
@@ -505,7 +505,7 @@ export function ChatView({ active, modalOpen }: Props) {
     }
     setUploading(true);
     try {
-      const resp = await fetch(`${basePath()}upload`, {
+      const resp = await fetch(`${basePath()}upload${botQuery()}`, {
         method: "POST",
         body: form,
       });

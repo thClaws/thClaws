@@ -539,8 +539,14 @@ fn serve_gui_shell_asset(
         // scheme doesn't resolve, so an external bridge script fails to load and
         // `window.thclaws` is undefined — breaking every shell (empty model
         // dropdowns, dead tabs; #184). Inlining works on macOS + Windows alike.
+        //
+        // The shell runs in an opaque-origin iframe (UIView's sandbox has no
+        // allow-same-origin), so its own CSS and JS are inlined here exactly
+        // as the `--serve` mount does: a module script or font loaded from
+        // `thclaws://` by a "null" origin is a CORS request.
+        let inlined = crate::gui_shell::serve::inline_shell_assets(&bytes, &shell);
         Cow::Owned(crate::gui_shell::serve::inject_inline_bridge_with_id(
-            &bytes, shell_id,
+            &inlined, shell_id,
         ))
     } else {
         Cow::Owned(bytes)
@@ -549,6 +555,10 @@ fn serve_gui_shell_asset(
     Response::builder()
         .header("Content-Type", mime)
         .header("X-Content-Type-Options", "nosniff")
+        // What the inlining misses (an image read with fetch, a font, a
+        // dynamic import) is requested from the shell's opaque origin. These
+        // are the shell's own files, already served to the window.
+        .header("Access-Control-Allow-Origin", "*")
         .body(body)
         .expect("build gui-shell asset response")
 }
@@ -1091,27 +1101,13 @@ fn run_gui_inner(
                         continue;
                     }
                     for req in pending {
-                        let payload = serde_json::json!({
-                            "type": "approval_request",
-                            "id": req.id,
-                            "tool_name": req.tool_name,
-                            "input": crate::tool_display::redact_json_value(&req.input),
-                            "summary": req.summary,
-                            "originator": req.originator,
-                        });
+                        let payload = req.frame(true);
                         let _ = proxy_inner.send_event(UserEvent::Dispatch(payload.to_string()));
                     }
                 }
             });
             while let Some(req) = approval_rx.recv().await {
-                let payload = serde_json::json!({
-                    "type": "approval_request",
-                    "id": req.id,
-                    "tool_name": req.tool_name,
-                    "input": crate::tool_display::redact_json_value(&req.input),
-                    "summary": req.summary,
-                    "originator": req.originator,
-                });
+                let payload = req.frame(true);
                 let _ = proxy_for_approval.send_event(UserEvent::Dispatch(payload.to_string()));
             }
         });
@@ -1317,15 +1313,15 @@ fn run_gui_inner(
         .with_devtools(devtools_on)
         .with_ipc_handler(move |req| {
             let body = req.body();
-            let top_frame = crate::ipc::is_top_frame_uri(&req.uri().to_string());
-            if !top_frame
-                && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|m| {
-                    m.get("type")
-                        .and_then(|t| t.as_str())
-                        .is_some_and(crate::ipc::top_frame_only)
-                })
-            {
-                eprintln!("[ipc] refused a trust frame from {}", req.uri());
+            // Only the window's own page talks to the engine. wry delivers
+            // messages from subframes too (a gui-shell, an MCP-App widget,
+            // an HTML file previewed in Files), and every one of those is
+            // page content: none of our own iframes sends IPC directly (the
+            // gui-shell bridge goes through the parent's postMessage
+            // allowlist). Letting them through gave any such page
+            // `approval_response`, `shell_input` and browser takeover.
+            if !crate::ipc::is_top_frame_uri(&req.uri().to_string()) {
+                eprintln!("[ipc] refused a message from a subframe: {}", req.uri());
                 return;
             }
             // dev-plan/59 §7.6 step 3: in host mode every frame belongs to a
@@ -2180,6 +2176,33 @@ mod gui_shell_asset_tests {
                 "rest {rest:?} should be the inline-bridge-injected index.html",
             );
         }
+    }
+
+    /// The desktop shell iframe has an opaque origin, so the shell's own
+    /// `style.css` / `main.js` are inlined (as on `--serve`) and what is
+    /// still fetched carries a CORS header.
+    #[test]
+    fn desktop_shell_html_is_self_contained_for_an_opaque_origin() {
+        let reg = crate::gui_shell::ShellRegistry::builtin_only();
+        let res = serve_gui_shell_asset(&reg, "media-studio/");
+        let html = String::from_utf8_lossy(res.body()).to_string();
+        assert!(
+            !html.contains(r#"src="main.js""#),
+            "main.js should be inlined"
+        );
+        assert!(
+            !html.contains(r#"href="style.css""#),
+            "style.css should be inlined"
+        );
+        assert_eq!(
+            res.headers()
+                .get("Access-Control-Allow-Origin")
+                .map(|v| v.to_str().unwrap()),
+            Some("*")
+        );
+        let css = serve_gui_shell_asset(&reg, "media-studio/style.css");
+        assert_eq!(css.status(), 200);
+        assert!(css.headers().contains_key("Access-Control-Allow-Origin"));
     }
 
     #[test]

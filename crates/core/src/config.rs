@@ -882,6 +882,23 @@ pub struct ProjectConfig {
     /// `AppConfig::ask_tools` docs).
     #[serde(rename = "askTools")]
     pub ask_tools: Option<Vec<String>>,
+    /// Payments (dev-plan/74): show the `PaidFetch` tool.
+    #[serde(rename = "paymentsEnabled")]
+    pub payments_enabled: Option<bool>,
+    /// Extra tools that move money (globs, e.g. `mcp__*__x402_*`): gated by
+    /// mandates, never auto-run headless.
+    #[serde(rename = "paymentTools")]
+    pub payment_tools: Option<Vec<String>>,
+    /// Standing payment mandates: the only way `-p` can pay.
+    #[serde(rename = "paymentMandates")]
+    pub payment_mandates: Option<Vec<crate::payments::MandateConfig>>,
+    /// Only these sources may be paid (host globs or URL prefixes); any
+    /// other is refused before a prompt and logged.
+    #[serde(rename = "paymentAllowedSources")]
+    pub payment_allowed_sources: Option<Vec<String>>,
+    /// Only these agents (`main` or an agent name) may pay.
+    #[serde(rename = "paymentAgents")]
+    pub payment_agents: Option<Vec<String>>,
     /// GUI window width (logical pixels). When `None`, the GUI picks
     /// a size at startup based on the primary monitor's logical
     /// resolution: 1760×962 on workstation-class displays
@@ -1109,6 +1126,11 @@ impl Default for ProjectConfig {
             allowed_tools: None,
             disallowed_tools: None,
             ask_tools: None,
+            payments_enabled: None,
+            payment_tools: None,
+            payment_mandates: None,
+            payment_allowed_sources: None,
+            payment_agents: None,
             window_width: None,
             window_height: None,
             gui_scale: None,
@@ -2275,6 +2297,13 @@ impl ProjectConfig {
         if let Some(ref tools) = self.ask_tools {
             config.ask_tools = Some(tools.clone());
         }
+        crate::payments::merge_settings(
+            self.payments_enabled,
+            self.payment_tools.as_deref(),
+            self.payment_mandates.as_deref(),
+            self.payment_allowed_sources.as_deref(),
+            self.payment_agents.as_deref(),
+        );
         if let Some(ref kms) = self.kms {
             config.kms_active = kms.active.clone();
         }
@@ -3143,13 +3172,21 @@ impl AppConfig {
     /// command line (docs/browser Phase 2 — the cloud runner image
     /// sets `mcp-server-playwright --no-sandbox`, the preinstalled
     /// server, so pod cold starts never hit the npm registry); the
-    /// desktop default is `npx -y @playwright/mcp@latest`.
+    /// desktop default is `npx -y @playwright/mcp@<PLAYWRIGHT_MCP_VERSION>`.
     /// `--headless` is appended when resolved headless and not
     /// already present.
     /// Ceiling on playwright-mcp's automatic output directory. It evicts the
     /// oldest files past this. 64 MiB is ~3000 of the page snapshots measured
     /// in a real session — days of browsing, and nothing on a 1Gi runner.
     pub const BROWSER_OUTPUT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// Pinned, not `@latest`: the model-hidden tool list
+    /// (`mcp::BROWSER_MODEL_HIDDEN_TOOLS`) is a denylist, so a release that
+    /// adds a code-exec or cookie tool would reach the model unreviewed, and
+    /// an unpinned `npx` pulls whatever the registry serves that day. When
+    /// bumping, list the tools the new version exposes under `--caps=vision`
+    /// and check them against that list; the Dockerfile pins the same one.
+    pub const PLAYWRIGHT_MCP_VERSION: &'static str = "0.0.84";
 
     pub fn browser_mcp_config(headless_override: Option<bool>) -> crate::mcp::McpServerConfig {
         let headless = headless_override.unwrap_or_else(|| {
@@ -3171,7 +3208,10 @@ impl AppConfig {
             }
             None => (
                 "npx".to_string(),
-                vec!["-y".to_string(), "@playwright/mcp@latest".to_string()],
+                vec![
+                    "-y".to_string(),
+                    format!("@playwright/mcp@{}", Self::PLAYWRIGHT_MCP_VERSION),
+                ],
             ),
         };
         if headless && !args.iter().any(|a| a == "--headless") {

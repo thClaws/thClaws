@@ -385,6 +385,7 @@ impl OpenAIProvider {
         if let Some(tc) = &self.tool_choice {
             body["tool_choice"] = tc.clone();
         }
+        super::headless::apply_sampling(&mut body);
         body
     }
 
@@ -490,6 +491,7 @@ impl OpenAIProvider {
                 rb = rb.header(k, v);
             }
         }
+        super::headless::log_request(&self.base_url, body);
         rb.json(body)
             .send()
             .await
@@ -1099,7 +1101,7 @@ impl Provider for OpenAIProvider {
             raw.flush();
         };
 
-        Ok(Box::pin(event_stream))
+        Ok(super::headless::log_responses(Box::pin(event_stream)))
     }
 }
 
@@ -1304,7 +1306,15 @@ pub fn parse_chunk(raw: &str, state: &mut ParseState) -> Result<Vec<ProviderEven
         // it as a ThinkingDelta so it gets folded into a Thinking block and
         // can be echoed back on the next turn — the server requires the
         // prior reasoning_content in history or returns 400.
-        if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+        // vLLM with a reasoning parser (the AI Server Suite's Qwen) and
+        // OpenRouter call the same field `reasoning`; read it when
+        // `reasoning_content` is absent so a server that sends both is not
+        // counted twice.
+        let reasoning = delta
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .or_else(|| delta.get("reasoning").and_then(Value::as_str));
+        if let Some(reasoning) = reasoning {
             if !reasoning.is_empty() {
                 out.push(ProviderEvent::ThinkingDelta(reasoning.to_string()));
             }
@@ -3192,6 +3202,26 @@ mod tests {
     /// `delta.reasoning_content` alongside (or before) `delta.content`.
     /// Verify the parser captures it as a `ThinkingDelta` so the assembly
     /// pipeline can build a `ContentBlock::Thinking` for echo on later turns.
+    /// vLLM's `--reasoning-parser qwen3` (the Suite's image) streams
+    /// thinking as `delta.reasoning`; a frame with both fields counts once.
+    #[test]
+    fn parse_chunk_reads_vllm_reasoning_field() {
+        let events = parse_all(&[
+            "data: {\"id\":\"1\",\"model\":\"qwen\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"step one\"}}]}",
+            "data: {\"id\":\"1\",\"model\":\"qwen\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"x\",\"reasoning_content\":\" step two\"}}]}",
+            "data: {\"id\":\"1\",\"model\":\"qwen\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"}}]}",
+            "data: {\"id\":\"1\",\"model\":\"qwen\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
+        ]);
+        let thinking: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ThinkingDelta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, "step one step two");
+    }
+
     #[test]
     fn parse_chunk_emits_thinking_delta_for_reasoning_content() {
         let events = parse_all(&[
