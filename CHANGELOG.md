@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.156.0] — 2026-11-13
+
+A fix for agents whose subagents or scripts pinned a model that's no longer offered.
+
+### Fixed
+
+- **A subagent's pinned `model:` falls back to the session model on cloud workspaces when the gateway doesn't serve that provider.** Before, a cloud workspace counted its placeholder provider key as usable. Every call to the pinned provider failed with 401, as the research agent's planner, searcher and fetcher did once DeepSeek was withdrawn. The desktop is unchanged: a provider you have a key for is still honoured.
+
+### Added
+
+- **Bash commands see the calling agent's model as `THCLAWS_MODEL`.** Agent scripts that call an LLM themselves can follow the model the user picked instead of hard-coding one.
+
 ## [0.155.0] — 2026-11-12
 
 A security fix for Bash confinement on Linux, plus an opt-in web search backend.

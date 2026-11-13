@@ -1731,6 +1731,11 @@ fn apply_agent_dir_env(cmd: &mut tokio::process::Command) {
     // `$THCLAWS_AGENT_DIR/.thclaws/x` into `/.thclaws/x`.
     let dir = crate::workdir::agent_dir().unwrap_or_else(crate::workdir::workspace_root);
     cmd.env("THCLAWS_AGENT_DIR", dir);
+    // The model the calling agent runs on, so agent scripts that call an LLM
+    // themselves follow the user's choice rather than a hard-coded model.
+    if let Some(m) = crate::agent::current_tool_model() {
+        cmd.env("THCLAWS_MODEL", m);
+    }
 }
 
 fn apply_noninteractive_env(cmd: &mut tokio::process::Command) {

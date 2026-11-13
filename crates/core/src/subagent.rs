@@ -284,8 +284,14 @@ fn subagent_model<'a>(
         return session_model;
     };
     let same_provider = crate::providers::ProviderKind::detect(session_model) == Some(pk);
+    // A cloud runner's provider keys are placeholders the gateway swaps out,
+    // so "has a key" proves nothing there: only a gateway route does. A pin
+    // to a provider the gateway no longer serves (DeepSeek, 2026-11) 401'd
+    // every research subagent instead of falling back.
+    let gateway_pod = std::env::var("THCLAWS_USES_GATEWAY").ok().as_deref() == Some("1")
+        || crate::workdir::is_multiuser();
     if same_provider
-        || pk.has_key_available()
+        || (!gateway_pod && pk.has_key_available())
         || crate::providers::thclaws_gateway::for_kind(config, pk).is_some()
     {
         p
@@ -924,6 +930,22 @@ mod tests {
         );
 
         std::env::remove_var("THCLAWS_GATEWAY_API_KEY");
+
+        // Cloud runner: a placeholder key for an unrouted provider is not
+        // usable — the pin falls back to the session model.
+        std::env::set_var("DEEPSEEK_API_KEY", "placeholder");
+        assert_eq!(
+            subagent_model(Some("deepseek-v4-flash"), "claude-sonnet-4-6", &empty),
+            "deepseek-v4-flash",
+            "desktop: a local key makes the pin usable"
+        );
+        std::env::set_var("THCLAWS_USES_GATEWAY", "1");
+        assert_eq!(
+            subagent_model(Some("deepseek-v4-flash"), "claude-sonnet-4-6", &empty),
+            "claude-sonnet-4-6"
+        );
+        std::env::remove_var("THCLAWS_USES_GATEWAY");
+        std::env::remove_var("DEEPSEEK_API_KEY");
         std::env::remove_var("THCLAWS_DISABLE_KEYCHAIN");
     }
 

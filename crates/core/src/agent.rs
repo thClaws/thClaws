@@ -949,6 +949,25 @@ pub struct Agent {
     turn_usage: Arc<Mutex<Usage>>,
 }
 
+tokio::task_local! {
+    static TOOL_MODEL: String;
+}
+
+/// Run a tool call knowing the model of the agent that made it, so a Bash
+/// script can follow the user's model (`THCLAWS_MODEL`) instead of pinning
+/// one: a pinned provider can disappear (DeepSeek, 2026-11).
+async fn scope_tool_model<F: std::future::Future>(model: String, f: F) -> F::Output {
+    TOOL_MODEL.scope(model, f).await
+}
+
+/// The model of the agent whose tool call is running, if any.
+pub fn current_tool_model() -> Option<String> {
+    TOOL_MODEL
+        .try_with(|m| m.clone())
+        .ok()
+        .filter(|m| !m.is_empty())
+}
+
 /// Build a provider for a model that belongs to a different backend than
 /// the session's — the cross-provider half of a skill's `model:`
 /// recommendation. Returns `None` when the model routes to the same
@@ -1982,6 +2001,7 @@ impl Agent {
                         let futs = exec.into_iter().map(|(id, name, input)| {
                             let tool = tools.get(&name).expect("parallelizable ⇒ tool exists");
                             let hooks = hooks.clone();
+                            let model = model.clone();
                             async move {
                                 let hook_denied: Option<String> = if let Some(h) = &hooks {
                                     let input_str = serde_json::to_string(&input)
@@ -2000,7 +2020,10 @@ impl Agent {
                                     Some(reason) => Err(crate::error::Error::Tool(format!(
                                         "blocked by policy: {reason}"
                                     ))),
-                                    None => tool.call_multimodal(input.clone()).await,
+                                    None => {
+                                        scope_tool_model(model.clone(), tool.call_multimodal(input.clone()))
+                                            .await
+                                    }
                                 };
                                 let duration_ms = started.elapsed().as_millis() as u64;
                                 let ui_resource = if tool_result.is_ok() {
@@ -2411,8 +2434,11 @@ impl Agent {
                             Err(crate::error::Error::Tool(denied.clone()))
                         }
                         (None, _) => {
-                            crate::payments::scope(pay_ctx.clone(), tool.call_multimodal(input.clone()))
-                                .await
+                            crate::payments::scope(
+                                pay_ctx.clone(),
+                                scope_tool_model(model.clone(), tool.call_multimodal(input.clone())),
+                            )
+                            .await
                         }
                     };
                     if let Some((Ok(auth), q)) = &external_pay {
