@@ -52,8 +52,20 @@ jobs:
         # RUSTSEC-2026-0429 (zip: ZipArchive::extract aborts on a symlink entry
         # with a large declared size): same extract API, same reasoning; zip 2.x
         # and 7.x stay pinned by umya-spreadsheet and rust_xlsxwriter.
+        # RUSTSEC-2026-0546 / -0547 / -0548 (zip: ZipArchive::extract writing
+        # outside the destination or setting permissions through symlinks;
+        # ZipStreamReader extracting under local-header names): same extract
+        # APIs as -0367..-0369 above, which the engine does not call — it
+        # extracts entry by entry through enclosed_name().
+        # RUSTSEC-2026-0545 (zip: AES entries returned without their
+        # authentication check; legacy Shrink/Reduce/Implode decoders
+        # preallocating the declared size): the engine reads plugin, skill and
+        # office archives with only the `deflate` feature of its own zip dep.
+        # Fix for all four is zip >=9.0.5; zip 2.x, 7.x and 8.x stay pinned by
+        # umya-spreadsheet, rust_xlsxwriter and docx-rs. Moving the engine's
+        # own dep to zip 9 is tracked after v0.157.0.
         # RUSTSEC-2026-0387 (crypto-bigint 0.5 timing variability) via k256 0.13,
         # used only to sign opt-in x402 payments locally on the user's machine
         # after a mandate or human approval; no remote timing oracle. Fix is
         # k256 0.14 (API port), tracked after v0.153.0.
-        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0204 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429 --ignore RUSTSEC-2026-0387
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0204 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429 --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2026-0545 --ignore RUSTSEC-2026-0546 --ignore RUSTSEC-2026-0547 --ignore RUSTSEC-2026-0548

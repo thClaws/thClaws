@@ -405,6 +405,8 @@ jobs:
               <string>15.0</string>
               <key>NSHighResolutionCapable</key>
               <true/>
+              <key>NSMicrophoneUsageDescription</key>
+              <string>thClaws uses the microphone when you speak to it in voice mode.</string>
           </dict>
           </plist>
           EOF
