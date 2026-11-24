@@ -1461,7 +1461,7 @@ mod tests {
                 .unwrap(),
             "max"
         );
-        assert_eq!(reasoning_efforts("xai/grok-build-0.1"), Some(&[][..]));
+        assert_eq!(reasoning_efforts("xai/grok-4.20-0309-reasoning"), Some(&[][..]));
         assert_eq!(reasoning_efforts("gpt-4o"), None);
     }
 
