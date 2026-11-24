@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>AI Server</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="bar">
+      <span class="logo" aria-hidden="true">▦</span>
+      <h1>AI Server</h1>
+      <span class="box" id="box"></span>
+      <span class="spacer"></span>
+      <span class="jobs-pill" id="jobs-pill" hidden></span>
+      <button id="refresh" class="ghost-btn" title="ตรวจสถานะใหม่">↻</button>
+      <button id="exit-fullscreen" class="ghost-btn" title="ออกจากเต็มจอ (⌘⇧U)" hidden>⤢</button>
+    </header>
+    <div class="layout">
+      <nav class="caps" id="caps" role="tablist"></nav>
+      <main class="pane">
+        <div class="pane-head">
+          <h2 id="cap-title"></h2>
+          <span class="state" id="cap-state"></span>
+        </div>
+        <p class="hint" id="cap-hint"></p>
+        <form class="form" id="form" autocomplete="off"></form>
+        <div class="actions">
+          <button id="run" class="primary" type="button">เริ่ม</button>
+          <span class="status" id="status"></span>
+        </div>
+        <section class="result" id="result" hidden></section>
+        <section class="extra" id="extra"></section>
+        <h3 class="gallery-title" id="gallery-title" hidden>ผลงานก่อนหน้า</h3>
+        <section class="gallery" id="gallery"></section>
+      </main>
+    </div>
+  </div>
+  <script src="main.js"></script>
+</body>
+</html>

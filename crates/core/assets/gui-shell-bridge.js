@@ -45,6 +45,7 @@
 //   thclaws.connectors.remove(name)  -> Promise<{ok,name,scope}>                // connectors.write
 //   thclaws.skills.install(url, {name,user}) -> Promise<{ok,report,scope}>      // needs skills.write
 //   thclaws.llm.complete({prompt,system,maxTokens}) -> Promise<{text,model}>   // needs llm.complete
+//   thclaws.aiserver.request({method,path,json,form,saveTo}) -> Promise<{status,ok,json,saved}>  // needs aiserver.use
 //   thclaws.plugins.list()           -> Promise<{plugins:[{name,version,enabled,scope,skills,commands,agents,mcpServers}]}>  // plugins.read
 //   thclaws.plugins.install(url, {user}) -> Promise<{ok,name,version,skills,commands,agents,mcpServers}>  // plugins.write
 //   thclaws.plugins.setEnabled(name, on) -> Promise<{ok,name,enabled,scope}>    // plugins.write
@@ -1186,6 +1187,21 @@
           );
         }
         return send("connector_remove", { name });
+      },
+    },
+
+    // AIServer Suite API v1 (the nine capabilities on a DGX box). Needs
+    // `aiserver.use`. The engine makes the call; binary replies are written
+    // to `saveTo` in the workspace. spec: {method, path, json?, form?,
+    // saveTo?, timeoutSecs?} -> {status, ok, contentType, headers, json?,
+    // text?, saved?: {path, bytes}}.
+    aiserver: {
+      request(spec) {
+        const s = spec || {};
+        if (typeof s.path !== "string" || !s.path.startsWith("/v1/")) {
+          return Promise.reject(new TypeError("thclaws.aiserver.request: path must start with /v1/"));
+        }
+        return send("aiserver_request", { spec: s });
       },
     },
 

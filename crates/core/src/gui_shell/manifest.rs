@@ -121,6 +121,9 @@ const ALLOWED_PERMISSION_PREFIXES: &[&str] = &[
     // install screen; the functional route is driven per-call by the
     // bridge sending `preferInline` once an approval handler is registered.
     "approval.inline",
+    // AIServer Suite API v1 (thclaws.aiserver.request): the built-in
+    // aiserver-suite shell's nine capabilities, called by the engine.
+    "aiserver.use",
 ];
 
 impl ShellManifest {
@@ -164,7 +167,7 @@ impl ShellManifest {
                      fs.shell-scoped, tools.invoke:<tool>, network.outbound:<host>, model.read, \
                      model.write, kms.read, research.read, keys.write, connectors.read, \
                      connectors.write, plugins.read, plugins.write, llm.complete, \
-                     approval.inline"
+                     approval.inline, aiserver.use"
                 ));
             }
         }

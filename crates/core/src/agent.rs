@@ -648,16 +648,22 @@ pub fn build_todos_reminder() -> Option<String> {
 /// transcript, the session file and compaction see what the user typed.
 ///
 /// Keyed by the message's text rather than its position: compaction
-/// renumbers history, and the note is a function of the text anyway.
+/// renumbers history, and the note is a function of the text anyway. The
+/// same words can be said more than once, with another note each time (a
+/// spoken "ครับ" under a different voice, a search of a changed KMS), so a
+/// text keeps one slot per time it was said, lined up with history from
+/// the newest backwards: compaction and a new session drop the oldest.
 #[derive(Default)]
 pub struct TurnNotes {
-    notes: std::collections::VecDeque<(u64, String)>,
+    notes: std::collections::HashMap<u64, std::collections::VecDeque<Option<String>>>,
+    order: std::collections::VecDeque<u64>,
 }
 
 impl TurnNotes {
-    /// Past this the oldest note goes, at the cost of one cache miss deep
-    /// in a conversation long enough that compaction is already at work.
+    /// Past this many texts the oldest goes, at the cost of one cache miss
+    /// deep in a conversation long enough that compaction is already at work.
     const MAX: usize = 64;
+    const MAX_PER_TEXT: usize = 32;
 
     fn key(text: &str) -> u64 {
         use std::hash::{Hash as _, Hasher as _};
@@ -666,23 +672,59 @@ impl TurnNotes {
         h.finish()
     }
 
-    /// The first note made for a text is the one that stays: a later search
-    /// of a changed KMS must not rewrite what an earlier turn was sent.
-    pub fn remember(&mut self, user_text: &str, note: String) {
+    fn text_of(m: &Message) -> String {
+        m.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// How many user messages in `history` already say `text`.
+    pub fn said_before(history: &[Message], text: &str) -> usize {
+        history
+            .iter()
+            .filter(|m| m.role == Role::User && Self::text_of(m) == text)
+            .count()
+    }
+
+    /// The note (or none) for the message about to join history, which
+    /// already holds `said_before` messages with the same text. What those
+    /// earlier ones were sent stays as it was.
+    pub fn remember(&mut self, user_text: &str, note: Option<String>, said_before: usize) {
         let key = Self::key(user_text);
-        if self.notes.iter().any(|(k, _)| *k == key) {
+        if note.is_none() && !self.notes.contains_key(&key) {
             return;
         }
-        if self.notes.len() == Self::MAX {
-            self.notes.pop_front();
+        if !self.notes.contains_key(&key) {
+            if self.order.len() == Self::MAX {
+                if let Some(old) = self.order.pop_front() {
+                    self.notes.remove(&old);
+                }
+            }
+            self.order.push_back(key);
         }
-        self.notes.push_back((key, note));
+        let slots = self.notes.entry(key).or_default();
+        // More slots than history has messages: another session, or
+        // compaction, took the oldest.
+        while slots.len() > said_before {
+            slots.pop_front();
+        }
+        if slots.len() == Self::MAX_PER_TEXT {
+            slots.pop_front();
+        }
+        slots.push_back(note);
     }
 
     pub fn tokens(&self) -> usize {
         self.notes
-            .iter()
-            .map(|(_, n)| crate::tokens::estimate_tokens(n))
+            .values()
+            .flatten()
+            .flatten()
+            .map(|n| crate::tokens::estimate_tokens(n))
             .sum()
     }
 
@@ -691,27 +733,104 @@ impl TurnNotes {
         if self.notes.is_empty() {
             return;
         }
-        for m in messages.iter_mut().filter(|m| m.role == Role::User) {
-            let text = m
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            if text.is_empty() {
+        let keys: Vec<Option<u64>> = messages
+            .iter()
+            .map(|m| {
+                if m.role != Role::User {
+                    return None;
+                }
+                let text = Self::text_of(m);
+                (!text.is_empty()).then(|| Self::key(&text))
+            })
+            .collect();
+        let mut total: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for k in keys.iter().flatten() {
+            *total.entry(*k).or_default() += 1;
+        }
+        let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for (m, key) in messages.iter_mut().zip(&keys) {
+            let Some(key) = key else { continue };
+            let nth = seen.entry(*key).or_default();
+            let i = *nth;
+            *nth += 1;
+            let Some(slots) = self.notes.get(key) else {
                 continue;
-            }
-            let key = Self::key(&text);
-            if let Some((_, note)) = self.notes.iter().find(|(k, _)| *k == key) {
-                m.content.push(ContentBlock::text(format!(
-                    "<system-reminder>\n{note}\n</system-reminder>"
-                )));
-            }
+            };
+            // Slots line up with the newest messages of this text.
+            let Some(Some(note)) = (i + slots.len())
+                .checked_sub(total[key])
+                .and_then(|j| slots.get(j))
+            else {
+                continue;
+            };
+            m.content.push(ContentBlock::text(format!(
+                "<system-reminder>\n{note}\n</system-reminder>"
+            )));
         }
     }
+}
+
+/// Messages sent with the chat composer's speaker on, waiting for their
+/// turn. The composer flags the message; the turn that carries it attaches
+/// the voice-mode note to it, so the instruction is on for exactly the
+/// replies that will be read aloud and never changes `system`.
+static VOICE_TURNS: Mutex<std::collections::VecDeque<(String, VoiceGender)>> =
+    Mutex::new(std::collections::VecDeque::new());
+
+/// Whose voice reads the reply. Thai marks the speaker's gender in every
+/// polite sentence (ค่ะ / ครับ, ดิฉัน / ผม), and the model cannot hear the
+/// voice the user picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceGender {
+    Female,
+    Male,
+    Unknown,
+}
+
+impl VoiceGender {
+    pub fn parse(s: Option<&str>) -> Self {
+        match s.map(str::trim) {
+            Some("female") => Self::Female,
+            Some("male") => Self::Male,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Self::Female => "- The voice is a woman's. In Thai, speak as a woman: end polite sentences with ค่ะ or คะ and say ดิฉัน or ฉัน for \"I\"; never ครับ or ผม.",
+            Self::Male => "- The voice is a man's. In Thai, speak as a man: end polite sentences with ครับ and say ผม for \"I\"; never ค่ะ, คะ or ดิฉัน.",
+            Self::Unknown => "- Whether the voice is a woman's or a man's is not known. In Thai, leave out ครับ, ค่ะ and คะ, and say เรา for \"I\"; never ผม or ดิฉัน.",
+        }
+    }
+}
+
+pub fn mark_voice_turn(text: &str, gender: VoiceGender) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let mut q = VOICE_TURNS.lock().expect("voice turns lock");
+    // One entry per text, the newest: a mark nobody took (the frame can
+    // reach this handler more than once) must not answer a later turn that
+    // says the same words with another voice.
+    q.retain(|(t, _)| t != text);
+    if q.len() == 16 {
+        q.pop_front();
+    }
+    q.push_back((text.to_string(), gender));
+}
+
+/// Contains, not equals: attachments append their paths to the text.
+fn take_voice_turn(turn_text: &str) -> Option<VoiceGender> {
+    let mut q = VOICE_TURNS.lock().expect("voice turns lock");
+    let gender = q
+        .iter()
+        .rev()
+        .find(|(t, _)| turn_text.contains(t.as_str()))
+        .map(|(_, g)| *g)?;
+    q.retain(|(t, _)| !turn_text.contains(t.as_str()));
+    Some(gender)
 }
 
 /// Strip tantivy query-syntax metacharacters so a raw user message can be
@@ -1407,11 +1526,21 @@ impl Agent {
         // it differs every turn, and in `system` it sat ahead of the whole
         // history, so every turn re-billed the prompt, the tool
         // definitions and the conversation at full price.
-        if let Some(found) = build_kms_context_reminder(&kms_query) {
+        let voice = take_voice_turn(&kms_query).map(|gender| {
+            let base = crate::prompts::load("voice_mode", crate::prompts::defaults::VOICE_MODE);
+            format!("{}\n{}", base.trim(), gender.note())
+        });
+        let note = match (build_kms_context_reminder(&kms_query), voice) {
+            (Some(k), Some(v)) => Some(format!("{k}\n\n{v}")),
+            (k, v) => k.or(v),
+        };
+        {
+            let said_before =
+                TurnNotes::said_before(&self.history.lock().expect("history lock"), &kms_query);
             turn_notes
                 .lock()
                 .expect("turn_notes lock")
-                .remember(&kms_query, found);
+                .remember(&kms_query, note, said_before);
         }
         let budget_tokens = self.budget_tokens;
         let base_max_tokens = self.max_tokens;
@@ -3221,8 +3350,7 @@ mod tests {
     #[test]
     fn a_kms_note_stays_with_its_message_and_out_of_history() {
         let mut notes = TurnNotes::default();
-        notes.remember("ยุคที่ความฉลาดล้นเหลือคืออะไร", "pages: a".into());
-        notes.remember("ยุคที่ความฉลาดล้นเหลือคืออะไร", "pages: CHANGED".into());
+        notes.remember("ยุคที่ความฉลาดล้นเหลือคืออะไร", Some("pages: a".into()), 0);
 
         let history = vec![
             Message::user("ยุคที่ความฉลาดล้นเหลือคืออะไร"),
@@ -3231,7 +3359,7 @@ mod tests {
         ];
         let mut first = history.clone();
         notes.attach(&mut first);
-        notes.remember("ขอบคุณ", "pages: b".into());
+        notes.remember("ขอบคุณ", Some("pages: b".into()), 0);
         let mut second = history.clone();
         notes.attach(&mut second);
 
@@ -3250,11 +3378,56 @@ mod tests {
         assert_eq!(first[1], history[1], "only user messages carry notes");
     }
 
+    /// The same words said again get their own note; the earlier message
+    /// keeps what it was sent. A voice turn that repeated a greeting under
+    /// another voice used to get the first voice's note (ค่ะ for a man).
+    #[test]
+    fn the_same_words_said_again_get_their_own_note() {
+        let note_of = |m: &Message| match m.content.get(1) {
+            Some(ContentBlock::Text { text }) => text.clone(),
+            _ => String::new(),
+        };
+        let mut notes = TurnNotes::default();
+        let mut h = vec![Message::user("สวัสดีครับ")];
+        notes.remember("สวัสดีครับ", Some("female".into()), 0);
+        h.push(Message::assistant("ค่ะ"));
+        notes.remember(
+            "สวัสดีครับ",
+            Some("male".into()),
+            TurnNotes::said_before(&h, "สวัสดีครับ"),
+        );
+        h.push(Message::user("สวัสดีครับ"));
+        h.push(Message::assistant("ครับ"));
+        // Typed, with the speaker off: no note, and it must not borrow one.
+        notes.remember("สวัสดีครับ", None, TurnNotes::said_before(&h, "สวัสดีครับ"));
+        h.push(Message::user("สวัสดีครับ"));
+        let mut out = h.clone();
+        notes.attach(&mut out);
+        assert!(note_of(&out[0]).contains("female"));
+        assert!(note_of(&out[2]).contains("male") && !note_of(&out[2]).contains("female"));
+        assert_eq!(out[4].content.len(), 1);
+
+        // A new session: the old session's notes do not follow.
+        let fresh = vec![Message::user("สวัสดีครับ")];
+        notes.remember("สวัสดีครับ", Some("male".into()), 0);
+        let mut out = fresh.clone();
+        notes.attach(&mut out);
+        assert!(note_of(&out[0]).contains("<system-reminder>\nmale"));
+
+        // Compaction dropped the oldest message: the rest keep theirs.
+        let mut notes = TurnNotes::default();
+        notes.remember("a", Some("one".into()), 0);
+        notes.remember("a", Some("two".into()), 1);
+        let mut out = vec![Message::user("a")];
+        notes.attach(&mut out);
+        assert!(note_of(&out[0]).contains("two"));
+    }
+
     #[test]
     fn turn_notes_are_bounded() {
         let mut notes = TurnNotes::default();
         for i in 0..(TurnNotes::MAX + 5) {
-            notes.remember(&format!("q{i}"), "n".into());
+            notes.remember(&format!("q{i}"), Some("n".into()), 0);
         }
         assert_eq!(notes.notes.len(), TurnNotes::MAX);
         let mut m = vec![Message::user("q0"), Message::user("q68")];

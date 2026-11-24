@@ -42,6 +42,9 @@ pub mod defaults {
     /// script. Loaded by `crate::workflow::script::author`. No template
     /// variables — the user goal is passed as the user message.
     pub const WORKFLOW_AUTHOR: &str = include_str!("default_prompts/workflow_author.md");
+    /// Rides on the user's message (a turn note) while the chat composer's
+    /// speaker is on: the reply is read aloud, so it must be short and plain.
+    pub const VOICE_MODE: &str = include_str!("default_prompts/voice_mode.md");
 }
 
 fn project_path(name: &str) -> PathBuf {

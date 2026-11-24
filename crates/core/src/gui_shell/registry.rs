@@ -253,7 +253,12 @@ impl ShellRegistry {
 
     fn builtin_only_map() -> HashMap<String, EmbeddedShell> {
         let mut builtin = HashMap::new();
-        for shell in [session_explorer(), chatbot(), media_studio()] {
+        for shell in [
+            session_explorer(),
+            chatbot(),
+            media_studio(),
+            aiserver_suite(),
+        ] {
             builtin.insert(shell.manifest.id.clone(), shell);
         }
         builtin
@@ -305,7 +310,11 @@ impl ShellRegistry {
                 source: ShellSource::User,
             });
         }
-        self.builtin.get(id).cloned().map(ShellRef::Embedded)
+        self.builtin
+            .get(id)
+            .filter(|_| builtin_visible(id))
+            .cloned()
+            .map(ShellRef::Embedded)
     }
 
     /// Merged list across all sources, deduped by id with the same
@@ -326,7 +335,7 @@ impl ShellRegistry {
             }
         }
         for e in self.builtin.values() {
-            if seen.insert(e.manifest.id.clone()) {
+            if builtin_visible(&e.manifest.id) && seen.insert(e.manifest.id.clone()) {
                 out.push((ShellSource::Builtin, e.manifest.clone()));
             }
         }
@@ -558,6 +567,43 @@ fn chatbot() -> EmbeddedShell {
 /// / TextToVideo / ImageToVideo tools directly via `thclaws.callTool`;
 /// the submit tools route through the GuiApprover. Mode switch, model
 /// picker, params, gallery + lightbox.
+/// The AIServer Suite shell only exists where a Suite does: on the box, or
+/// in a workspace of the EE Pack beside one.
+fn builtin_visible(id: &str) -> bool {
+    id != AISERVER_SUITE_ID || crate::aiserver::suite_reachable()
+}
+
+const AISERVER_SUITE_ID: &str = "aiserver-suite";
+
+fn aiserver_suite() -> EmbeddedShell {
+    build_embedded_shell(
+        include_str!("../../assets/gui-shells/aiserver-suite/manifest.json"),
+        &[
+            (
+                "index.html",
+                include_bytes!("../../assets/gui-shells/aiserver-suite/index.html"),
+                "text/html; charset=utf-8",
+            ),
+            (
+                "main.js",
+                include_bytes!("../../assets/gui-shells/aiserver-suite/main.js"),
+                "application/javascript; charset=utf-8",
+            ),
+            (
+                "style.css",
+                include_bytes!("../../assets/gui-shells/aiserver-suite/style.css"),
+                "text/css; charset=utf-8",
+            ),
+            (
+                "icon.svg",
+                include_bytes!("../../assets/gui-shells/aiserver-suite/icon.svg"),
+                "image/svg+xml",
+            ),
+        ],
+        AISERVER_SUITE_ID,
+    )
+}
+
 fn media_studio() -> EmbeddedShell {
     build_embedded_shell(
         include_str!("../../assets/gui-shells/media-studio/manifest.json"),
@@ -699,6 +745,19 @@ mod tests {
         assert!(names.contains(&"session-explorer"));
         assert!(names.contains(&"chatbot"));
         assert!(names.contains(&"media-studio"));
+    }
+
+    #[test]
+    fn aiserver_suite_ships_assets_and_hides_off_the_box() {
+        let map = ShellRegistry::builtin_only_map();
+        let s = map.get("aiserver-suite").expect("embedded");
+        assert!(s.manifest.permissions.iter().any(|p| p == "aiserver.use"));
+        s.manifest.validate().expect("valid manifest");
+        let r = ShellRegistry::builtin_only();
+        if !crate::aiserver::suite_reachable() {
+            assert!(r.resolve("aiserver-suite").is_none());
+            assert!(r.list().iter().all(|(_, m)| m.id != "aiserver-suite"));
+        }
     }
 
     #[test]

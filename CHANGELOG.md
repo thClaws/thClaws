@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.157.0] — 2026-11-24
+
+A release for people who run an AIServer Suite: its nine capabilities get a built-in shell, and the chat composer gains a voice mode.
+
+### Added
+
+- **A built-in AI Server shell for an AIServer Suite.** It covers LLM, OCR, TTS, ASR, image, video, 3D, music and RAG through the Suite API v1. The shell shows only where thClaws reaches a Suite: on the box itself, in an Enterprise workspace, or with a Suite set in Settings. The engine makes each call and holds the key, so no key reaches the page.
+- **Settings → AI Server Suite connects a Suite on another machine.** Enter its address and key, then press Test. Its models join the model list without replacing a LiteLLM endpoint you already set, and models the Suite reports as not loaded are left out.
+- **Voice mode in the chat composer, on a Suite.** Hold the mic to talk. With the speaker on, the reply is read aloud as one stream and stops when you send a new message, press the mic or turn the speaker off. A voice turn asks the model for a short spoken answer, and a picker beside the voice sets whether Thai replies end in ค่ะ or ครับ. Without a Suite the composer shows no voice buttons.
+- **New models in the catalogue**, among them `claude-fable-5-2`, `gpt-6.2-sol`, `gpt-6.2-astra`, `gemini-4-hydrogen`, `gemini-4-neon`, `qwen4-max`, `kimi-k3.1-pro` and `glm-5.4`.
+
+### Fixed
+
+- **File previews load when thClaws is served under a path prefix.** The PDF preview asked for its file at the site root and came back empty.
+
+### Changed
+
+- **`lopdf` is bumped from 0.31 to 0.42** ([#229](https://github.com/thClaws/thClaws/pull/229)).
+- **The macOS app declares why it asks for the microphone**, so the system prompt appears the first time you use voice mode.
+
 ## [0.156.0] — 2026-11-13
 
 A fix for agents whose subagents or scripts pinned a model that's no longer offered.

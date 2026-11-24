@@ -55,6 +55,21 @@ fn main() {
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".into());
     let build_time = iso8601_utc_now();
 
+    // macOS asks for the microphone only when the program states why
+    // (NSMicrophoneUsageDescription); without it the first getUserMedia in
+    // voice mode is refused, or the process is killed. A `cargo build` binary
+    // and the release tarballs have no .app bundle to carry an Info.plist, so
+    // the statement is linked into the binary itself. Inside a .app the
+    // bundle's own Info.plist is the one macOS reads, and it carries the
+    // same key (release.yml, scripts/ee-build-macos.sh).
+    println!("cargo:rerun-if-changed=resources/macos-info.plist");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        println!(
+            "cargo:rustc-link-arg-bins=-Wl,-sectcreate,__TEXT,__info_plist,{dir}/resources/macos-info.plist"
+        );
+    }
+
     println!("cargo:rustc-env=THCLAWS_GIT_SHA={sha}");
     println!("cargo:rustc-env=THCLAWS_GIT_BRANCH={branch}");
     println!("cargo:rustc-env=THCLAWS_GIT_DIRTY={dirty}");

@@ -12,7 +12,7 @@
 // the prefix entirely and 404 at Traefik. Walk the prefix out of
 // `location.pathname` instead. Desktop / single-tenant `--serve` have no
 // prefix; this returns "".
-import { botQuery } from "../hooks/useIPC";
+import { basePath, botQuery } from "../hooks/useIPC";
 
 export function workspacePrefix(): string {
   // Path scheme — thclaws.cloud/u/<handle>/<slug>/… → the 3-segment prefix.
@@ -24,7 +24,9 @@ export function workspacePrefix(): string {
     const s = location.pathname.match(/^(\/[^/]+)/);
     if (s) return s[1];
   }
-  return "";
+  // Any other mount under a path (an AI Server Suite serves the app at
+  // /ui/thclaws/): the page's own path is the prefix, as it is for the WS.
+  return basePath().replace(/\/$/, "");
 }
 
 // Build a same-origin URL for the custom protocol's file-asset handler.

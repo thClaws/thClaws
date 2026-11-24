@@ -855,6 +855,9 @@ impl Provider for OpenAIProvider {
             .and_then(Value::as_array)
             .map(|arr| {
                 arr.iter()
+                    // The AI Server Suite lists models the box can serve
+                    // but has not loaded; a call to one gets 409.
+                    .filter(|m| m.get("loaded").and_then(Value::as_bool) != Some(false))
                     .filter_map(|m| {
                         let raw = m.get("id").and_then(Value::as_str)?;
                         // Prefix the listing so users can paste IDs straight

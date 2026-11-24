@@ -1129,6 +1129,15 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             if trimmed.is_empty() && attachments.is_empty() {
                 return true;
             }
+            if msg.get("voice").and_then(|v| v.as_bool()) == Some(true) && !trimmed.starts_with('/')
+            {
+                crate::agent::mark_voice_turn(
+                    &trimmed,
+                    crate::agent::VoiceGender::parse(
+                        msg.get("voiceGender").and_then(|v| v.as_str()),
+                    ),
+                );
+            }
             // dev-plan/32 Tier 3 Terminal-tab approval intercept. The
             // worker loop is blocked inside `dispatch_workflow_run`'s
             // `.await` on the WorkflowApprover's oneshot — any text
@@ -2606,6 +2615,203 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     request_id,
                     serde_json::json!({ "error": e.to_string() }),
                 )),
+            }
+        }
+
+        // AIServer Suite API v1 for the built-in aiserver-suite shell (the
+        // nine capabilities). The engine makes the call, so the box key or
+        // the user's gateway key never reaches the page. Gated on
+        // `aiserver.use`.
+        "gui_shell_aiserver_request" => {
+            let request_id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let shell_id = msg.get("shellId").and_then(|v| v.as_str()).unwrap_or("");
+            if !shell_has_permission(shell_id, "aiserver.use") {
+                (ctx.dispatch)(shell_reply(
+                    request_id,
+                    serde_json::json!({ "error": "permission 'aiserver.use' not declared" }),
+                ));
+                return true;
+            }
+            let spec = msg.get("spec").cloned().unwrap_or_default();
+            let root = crate::workdir::current_workdir();
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                let body = match crate::aiserver::suite_request(&spec, &root).await {
+                    Ok(r) => serde_json::json!({ "result": r }),
+                    Err(e) => serde_json::json!({ "error": e }),
+                };
+                dispatch(shell_reply(request_id, body));
+            });
+        }
+
+        // Voice mode in the chat composer, on an AIServer Suite (local AI
+        // box or EE Pack): mic clip → ASR, reply sentences → TTS. The engine
+        // makes the calls so no box or gateway key reaches the page.
+        "voice_status" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                let suite = crate::aiserver::suite_api().is_some();
+                let (asr, tts, mut error) = if suite {
+                    match crate::aiserver::voice_capabilities().await {
+                        Ok((a, t)) => (a, t, None),
+                        Err(e) => {
+                            eprintln!("[voice] status failed: {e}");
+                            (false, false, Some(e))
+                        }
+                    }
+                } else {
+                    (false, false, None)
+                };
+                let voices = if tts {
+                    match crate::aiserver::voice_list().await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error = Some(e);
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                dispatch(
+                    serde_json::json!({
+                        "type": "voice_status_result",
+                        "id": id,
+                        "available": asr || tts,
+                        "asr": asr,
+                        "tts": tts && !voices.is_empty(),
+                        "voices": voices,
+                        "defaultVoice": crate::aiserver::VOICE_DEFAULT,
+                        "error": error,
+                    })
+                    .to_string(),
+                );
+            });
+        }
+
+        "voice_transcribe" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let data = msg
+                .get("data")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mime = msg
+                .get("mime")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                let r = if data.is_empty() {
+                    Err("empty recording".to_string())
+                } else {
+                    crate::aiserver::voice_transcribe(&data, &mime).await
+                };
+                let body = match r {
+                    Ok(text) => {
+                        serde_json::json!({ "type": "voice_transcribe_result", "id": id, "text": text })
+                    }
+                    Err(e) => {
+                        eprintln!("[voice] transcribe failed: {e}");
+                        serde_json::json!({ "type": "voice_transcribe_result", "id": id, "error": e })
+                    }
+                };
+                dispatch(body.to_string());
+            });
+        }
+
+        "voice_speak" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let text = msg
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .chars()
+                .take(4000)
+                .collect::<String>();
+            let voice = msg
+                .get("voice")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                let body = if text.trim().is_empty() {
+                    serde_json::json!({ "type": "voice_speak_result", "id": id, "error": "nothing to say" })
+                } else {
+                    match crate::aiserver::voice_speak(&text, &voice).await {
+                        Ok((data, mime)) => {
+                            serde_json::json!({ "type": "voice_speak_result", "id": id, "data": data, "mime": mime })
+                        }
+                        Err(e) => {
+                            eprintln!("[voice] speak failed: {e}");
+                            serde_json::json!({ "type": "voice_speak_result", "id": id, "error": e })
+                        }
+                    }
+                };
+                dispatch(body.to_string());
+            });
+        }
+
+        // The whole answer as one stream: `voice_audio` frames (base64 PCM
+        // s16le mono at `rate`) while the box generates, then the result.
+        "voice_speak_stream" => {
+            let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let key = id.as_str().unwrap_or("").to_string();
+            let text = msg
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .chars()
+                .take(4000)
+                .collect::<String>();
+            let voice = msg
+                .get("voice")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let dispatch = ctx.dispatch.clone();
+            let task = tokio::spawn(async move {
+                use base64::Engine as _;
+                let audio = dispatch.clone();
+                let frame_id = id.clone();
+                let mut chunks = 0u64;
+                let r = if text.trim().is_empty() {
+                    Err("nothing to say".to_string())
+                } else {
+                    crate::aiserver::voice_speak_stream(&text, &voice, |rate, pcm| {
+                        chunks += 1;
+                        audio(
+                            serde_json::json!({
+                                "type": "voice_audio", "id": frame_id, "rate": rate,
+                                "data": base64::engine::general_purpose::STANDARD.encode(pcm),
+                            })
+                            .to_string(),
+                        );
+                    })
+                    .await
+                };
+                let body = match r {
+                    Ok(rate) => {
+                        serde_json::json!({ "type": "voice_speak_stream_result", "id": id, "rate": rate, "chunks": chunks })
+                    }
+                    Err(e) => {
+                        eprintln!("[voice] speak (stream) failed: {e}");
+                        serde_json::json!({ "type": "voice_speak_stream_result", "id": id, "chunks": chunks, "error": e })
+                    }
+                };
+                dispatch(body.to_string());
+            });
+            if !key.is_empty() {
+                crate::aiserver::voice_stream_register(&key, task.abort_handle());
+            }
+        }
+
+        "voice_speak_cancel" => {
+            if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
+                crate::aiserver::voice_stream_cancel(id);
             }
         }
 
@@ -5287,6 +5493,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 std::env::remove_var(var);
                 let _ = crate::dotenv::remove_from_user_env(var);
             }
+            if provider == crate::endpoints::AISERVER {
+                crate::aiserver::apply_remote();
+            }
             let (ok, error) = match keychain {
                 Ok(()) => (true, String::new()),
                 Err(e) => (true, format!("keychain remove warning: {e}")),
@@ -5303,6 +5512,15 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 .shared
                 .input_tx
                 .send(crate::shared_session::ShellInput::ReloadConfig);
+        }
+
+        "aiserver_check" => {
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                let mut r = crate::aiserver::check_suite().await;
+                r["type"] = serde_json::json!("aiserver_check_result");
+                dispatch(r.to_string());
+            });
         }
 
         "endpoint_status" => {
@@ -5326,16 +5544,28 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
 
         "endpoint_set" => {
             let provider = msg.get("provider").and_then(|v| v.as_str()).unwrap_or("");
-            let url = msg.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let (ok, error) = if provider.is_empty() || url.is_empty() {
-                (false, "provider and url are required".to_string())
+            let typed = msg.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let suite = provider == crate::endpoints::AISERVER;
+            let url = if suite {
+                crate::aiserver::normalize_suite_url(typed).unwrap_or_default()
             } else {
-                match crate::endpoints::set(provider, url) {
+                typed.to_string()
+            };
+            let (ok, error) = if provider.is_empty() || typed.is_empty() {
+                (false, "provider and url are required".to_string())
+            } else if url.is_empty() {
+                (
+                    false,
+                    "not an address (e.g. 192.168.0.114 or https://box:8101)".to_string(),
+                )
+            } else {
+                match crate::endpoints::set(provider, &url) {
                     Ok(()) => {
-                        if let Some(kind) = crate::providers::ProviderKind::from_name(provider) {
-                            if let Some(var) = kind.endpoint_env() {
-                                std::env::set_var(var, url.trim_end_matches('/'));
-                            }
+                        if let Some(var) = crate::endpoints::env_var_for(provider) {
+                            std::env::set_var(var, url.trim_end_matches('/'));
+                        }
+                        if suite {
+                            crate::aiserver::apply_remote();
                         }
                         (true, String::new())
                     }
@@ -5350,16 +5580,24 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "error": error,
             });
             (ctx.dispatch)(payload.to_string());
+            if ok && suite {
+                crate::providers::invalidate_picker_cache();
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::ReloadConfig);
+            }
         }
 
         "endpoint_clear" => {
             let provider = msg.get("provider").and_then(|v| v.as_str()).unwrap_or("");
             let (ok, error) = match crate::endpoints::clear(provider) {
                 Ok(()) => {
-                    if let Some(kind) = crate::providers::ProviderKind::from_name(provider) {
-                        if let Some(var) = kind.endpoint_env() {
-                            std::env::remove_var(var);
-                        }
+                    if let Some(var) = crate::endpoints::env_var_for(provider) {
+                        std::env::remove_var(var);
+                    }
+                    if provider == crate::endpoints::AISERVER {
+                        crate::aiserver::apply_remote();
                     }
                     (true, String::new())
                 }
@@ -5373,6 +5611,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 "error": error,
             });
             (ctx.dispatch)(payload.to_string());
+            if provider == crate::endpoints::AISERVER {
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::ReloadConfig);
+            }
         }
 
         "model_set" => {
@@ -6984,6 +7228,9 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let raw = msg.get("key").and_then(|v| v.as_str()).unwrap_or("").trim();
             let key = strip_wrapping_quotes(raw);
             let (ok, error, storage) = store_provider_key(provider, key);
+            if ok && provider == crate::endpoints::AISERVER {
+                crate::aiserver::apply_remote();
+            }
             announce_key_stored(provider, ok, &error, storage, ctx);
         }
 
@@ -8813,6 +9060,46 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
         assert!(
             parsed["error"].as_str().unwrap().contains("llm.complete"),
+            "should name the missing permission: {parsed}"
+        );
+    }
+
+    #[test]
+    fn gui_shell_aiserver_request_requires_permission() {
+        let shared = Arc::new(crate::shared_session::spawn());
+        let (approver, _rx) = crate::permissions::GuiApprover::new();
+        let pending_asks: PendingAsks = Arc::new(Mutex::new(HashMap::new()));
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        let ctx = IpcContext {
+            viewer_id: next_viewer_id(),
+            is_serve_mode: false,
+            shared,
+            approver,
+            pending_asks,
+            dispatch: Arc::new(move |payload| {
+                captured_clone.lock().unwrap().push(payload);
+            }),
+            on_quit: Arc::new(|| {}),
+            on_send_initial_state: Arc::new(|| {}),
+            on_zoom: Arc::new(|_| {}),
+            workflow_approver: crate::workflow::WorkflowApprover::new(),
+        };
+        let handled = handle_ipc(
+            serde_json::json!({
+                "type": "gui_shell_aiserver_request",
+                "id": 6,
+                "shellId": "no-such-shell",
+                "spec": { "method": "GET", "path": "/v1/capabilities" },
+            }),
+            &ctx,
+        );
+        assert!(handled);
+        let payloads = captured.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
+        assert!(
+            parsed["error"].as_str().unwrap().contains("aiserver.use"),
             "should name the missing permission: {parsed}"
         );
     }

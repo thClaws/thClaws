@@ -2309,6 +2309,13 @@ pub fn preferred_default_model(cfg: &crate::config::AppConfig) -> Option<String>
     if let Some(d) = crate::aiserver::cached() {
         return Some(d.model_id());
     }
+    // An agent's own process under a workspace host on the box: the host
+    // found the Suite and passed its model down (it skips discovery).
+    if let Ok(m) = std::env::var("THCLAWS_AISERVER_MODEL") {
+        if !m.trim().is_empty() {
+            return Some(m.trim().to_string());
+        }
+    }
     // Ordered (provider, model) preference: the first provider the user can
     // reach — own key OR a gateway route — picks the session default. Models
     // are pinned explicitly (not `kind.default_model()`) so the credential-
@@ -2910,7 +2917,8 @@ mod tests {
                 "object": "list",
                 "data": [
                     {"id": "qwen3.8-flash-next-udq2", "object": "model"},
-                    {"id": "auto", "object": "model"},
+                    {"id": "auto", "object": "model", "loaded": true},
+                    {"id": "qwen38-27b", "object": "model", "loaded": false},
                 ]
             })))
             .mount(&server)

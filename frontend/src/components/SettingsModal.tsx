@@ -73,6 +73,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   hal: "HAL Public API (YouTube transcript + Web scrape)",
   ltx: "LTX (video generation + native audio)",
   iapp: "iApp (Thai image generation)",
+  aiserver: "AI Server Suite",
 };
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
@@ -210,8 +211,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const featuredEntries = llmEntries.filter(([, row]) => row.key?.featured === true);
   const additionalEntries = llmEntries.filter(([, row]) => row.key?.featured !== true);
   const serviceEntries = Array.from(providers.entries()).filter(
-    ([, row]) => row.key?.kind === "service",
+    ([provider, row]) => row.key?.kind === "service" && provider !== "aiserver",
   );
+  const aiserverRow = providers.get("aiserver");
 
   const handleSaveKey = (provider: string) => {
     const key = (keyDrafts[provider] ?? "").trim();
@@ -317,6 +319,38 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           <CloudSection />
           <AgentIdentitySection />
           <AutoLearnSection />
+
+          {aiserverRow && (
+            <>
+              <div
+                className="text-[10px] uppercase tracking-wider mt-2"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                AI Server Suite
+              </div>
+              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                A Suite box on your network: its address and an{" "}
+                <span className="font-mono">ais_</span> key from its owner. Its models
+                appear under LiteLLM, and the AI Server shell opens all nine
+                capabilities. Prefer <span className="font-mono">https://&lt;box&gt;:8101</span>{" "}
+                when the network is not your own: over http the key is not encrypted.
+              </p>
+              {renderProviderCard(
+                "aiserver",
+                aiserverRow,
+                keyDrafts,
+                setKeyDrafts,
+                urlDrafts,
+                setUrlDrafts,
+                handleSaveKey,
+                handleClearKey,
+                handleSaveUrl,
+                handleClearUrl,
+                busy,
+                flash,
+              )}
+            </>
+          )}
 
           {featuredEntries.length > 0 && (
             <div className="flex items-center justify-between mt-2 gap-3">
@@ -509,6 +543,62 @@ function renderProviderCard(
       )}
 
       {provider === "openrouter" && <OpenRouterFreeOnlyToggle />}
+      {provider === "aiserver" && <AiServerCheck />}
+    </div>
+  );
+}
+
+type AiServerCheckResult = {
+  ok: boolean;
+  base?: string;
+  version?: string;
+  error?: string;
+  capabilities?: { id: string; available: boolean }[];
+};
+
+/** Settings' Test for the Suite: reachable, a Suite, the key accepted, and
+ *  which of its nine capabilities are up. */
+function AiServerCheck() {
+  const [result, setResult] = useState<AiServerCheckResult | null>(null);
+  const [checking, setChecking] = useState(false);
+  useEffect(
+    () =>
+      subscribe((msg) => {
+        if (msg.type === "aiserver_check_result") {
+          setResult(msg as unknown as AiServerCheckResult);
+          setChecking(false);
+        }
+      }),
+    [],
+  );
+  const caps = result?.capabilities ?? [];
+  const up = caps.filter((c) => c.available);
+  return (
+    <div className="mt-2 text-xs" style={{ color: "var(--text-secondary)" }}>
+      <button
+        type="button"
+        className="px-2 py-1 rounded"
+        style={{ border: "1px solid var(--border)", color: "var(--text-primary)" }}
+        disabled={checking}
+        onClick={() => {
+          setChecking(true);
+          setResult(null);
+          send({ type: "aiserver_check" });
+        }}
+      >
+        {checking ? "Testing…" : "Test"}
+      </button>
+      {result && !result.ok && (
+        <span className="ml-2" style={{ color: "var(--danger, #e5484d)" }}>
+          {result.error}
+        </span>
+      )}
+      {result?.ok && (
+        <span className="ml-2">
+          Suite {result.version} · {up.length}/{caps.length} capabilities up
+          {up.length > 0 && <> ({up.map((c) => c.id).join(", ")})</>}
+        </span>
+      )}
     </div>
   );
 }

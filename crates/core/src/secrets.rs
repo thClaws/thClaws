@@ -166,6 +166,9 @@ pub const SERVICE_KEYS: &[(&str, &str)] = &[
     // has to reach the process env for `IappImageProvider::generate` to
     // find it — same path as LTX above.
     ("iapp", "IAPP_API_KEY"),
+    // An AI Server Suite on another machine (its `ais_` key); the address
+    // lives in endpoints.json under THCLAWS_AISERVER_API.
+    ("aiserver", "THCLAWS_AISERVER_API_KEY"),
 ];
 
 /// Look up the env var for a non-LLM service key by account name.

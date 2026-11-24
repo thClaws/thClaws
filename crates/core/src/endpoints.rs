@@ -88,7 +88,7 @@ pub struct EndpointStatus {
 
 pub fn status() -> Vec<EndpointStatus> {
     let mut seen_env_vars: std::collections::HashSet<&'static str> = Default::default();
-    ProviderKind::ALL
+    let mut out: Vec<EndpointStatus> = ProviderKind::ALL
         .iter()
         .filter(|p| p.endpoint_user_configurable())
         .filter_map(|p| {
@@ -110,7 +110,14 @@ pub fn status() -> Vec<EndpointStatus> {
                 default_url,
             })
         })
-        .collect()
+        .collect();
+    out.push(EndpointStatus {
+        provider: AISERVER,
+        env_var: AISERVER_ENV,
+        configured_url: std::env::var(AISERVER_ENV).ok(),
+        default_url: "http://<box>:8100",
+    });
+    out
 }
 
 /// Inject persisted base URLs into the process environment. Call **before**
@@ -124,7 +131,15 @@ pub fn load_into_env() {
     }
 }
 
-fn env_var_for(provider: &str) -> Option<&'static str> {
+/// The AI Server Suite is no provider of its own (its models go through
+/// `litellm`), but its address is set beside its key like one.
+pub const AISERVER: &str = "aiserver";
+const AISERVER_ENV: &str = "THCLAWS_AISERVER_API";
+
+pub fn env_var_for(provider: &str) -> Option<&'static str> {
+    if provider == AISERVER {
+        return Some(AISERVER_ENV);
+    }
     ProviderKind::from_name(provider).and_then(|p| p.endpoint_env())
 }
 
@@ -142,6 +157,12 @@ mod tests {
         assert!(!providers.contains(&"ollama-anthropic"));
         // Hosted services are locked.
         assert!(!providers.contains(&"dashscope"));
+    }
+
+    #[test]
+    fn the_ai_server_suite_has_an_address_row() {
+        assert_eq!(env_var_for(AISERVER), Some("THCLAWS_AISERVER_API"));
+        assert!(status().iter().any(|e| e.provider == AISERVER));
     }
 
     #[test]

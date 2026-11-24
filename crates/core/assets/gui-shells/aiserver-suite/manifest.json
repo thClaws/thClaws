@@ -1,0 +1,14 @@
+{
+  "id": "aiserver-suite",
+  "name": "AI Server",
+  "version": "0.1.0",
+  "description": "The nine capabilities of the AIServer Suite on this box: LLM, OCR, text to speech, speech to text, image, video, 3D and music generation, and RAG. Appears only on an AI Server box or in a thClaws Enterprise for AI Server workspace. Results are saved under output/aiserver/.",
+  "entry": "index.html",
+  "icon": "icon.svg",
+  "minBridgeVersion": "1",
+  "permissions": [
+    "aiserver.use",
+    "llm.complete",
+    "fs.shell-scoped"
+  ]
+}

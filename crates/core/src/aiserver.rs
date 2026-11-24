@@ -207,6 +207,15 @@ async fn fetch() -> Option<Discovery> {
 /// `.env` > this. Returns true when it set the base URL.
 pub fn apply_to_env(d: &Discovery) -> bool {
     let mut set_base = false;
+    // The Suite API on the box's one port. Exported so an agent's own
+    // `--serve` child, which skips discovery once LITELLM_BASE_URL is set,
+    // still knows the Suite is here.
+    if std::env::var("THCLAWS_AISERVER_API").is_err() {
+        std::env::set_var("THCLAWS_AISERVER_API", "http://127.0.0.1:8100");
+    }
+    if std::env::var("THCLAWS_AISERVER_MODEL").is_err() {
+        std::env::set_var("THCLAWS_AISERVER_MODEL", d.model_id());
+    }
     if std::env::var("LITELLM_BASE_URL").is_err() {
         std::env::set_var("LITELLM_BASE_URL", &d.endpoints.openai.base_url);
         set_base = true;
@@ -268,6 +277,7 @@ fn rag_mcp_config_for(d: &Discovery, key: Option<String>) -> Option<crate::mcp::
 /// Called once at startup, before any `AppConfig::load`.
 pub async fn bootstrap() {
     let Some(d) = probe_and_cache().await else {
+        apply_remote();
         return;
     };
     if apply_to_env(d) {
@@ -286,9 +296,679 @@ pub async fn bootstrap() {
     }
 }
 
+/// Where the AIServer Suite API v1 (`/v1/...` on :8100) is reached from
+/// this engine, with the bearer to send. On the box: loopback, no key. In a
+/// Pack workspace (`THCLAWS_LOCAL_AI=1`): the pod cannot reach the host, so
+/// through the Pack gateway's `/aiserver` relay on the user's gateway key;
+/// the gateway adds the box key and the user's identity. `None` = no Suite.
+pub fn suite_api() -> Option<(String, Option<String>)> {
+    if let Ok(u) = std::env::var("THCLAWS_AISERVER_API") {
+        let u = u.trim().trim_end_matches('/').to_string();
+        if !u.is_empty() {
+            let key = std::env::var("THCLAWS_AISERVER_API_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty());
+            return Some((u, key));
+        }
+    }
+    if cached().is_some() {
+        return Some(("http://127.0.0.1:8100".to_string(), None));
+    }
+    if local_ai() {
+        let base = crate::providers::thclaws_gateway::resolve_base_url();
+        let key = crate::providers::thclaws_gateway::resolve_access_key()?;
+        return Some((
+            format!("{}/aiserver", base.trim_end_matches('/')),
+            Some(key),
+        ));
+    }
+    None
+}
+
+/// The model a Suite on another machine starts on: its stable alias, so the
+/// box owner can swap models without anyone re-configuring.
+const REMOTE_MODEL: &str = "litellm/llm-default";
+
+/// The `LITELLM_*` values [`apply_remote`] set, so it updates or removes only
+/// its own and never a LiteLLM the user configured.
+static REMOTE_DERIVED: std::sync::Mutex<Option<(String, Option<String>)>> =
+    std::sync::Mutex::new(None);
+
+/// A Suite address as a user types it in Settings (`192.168.0.114`,
+/// `box.local`, `https://box:8101`, even `http://box:8100/v1`) → the API
+/// base. No port means the Suite's: 8100, or 8101 for https.
+pub fn normalize_suite_url(input: &str) -> Option<String> {
+    let s = input.trim().trim_end_matches('/');
+    if s.is_empty() {
+        return None;
+    }
+    let full = if s.contains("://") {
+        s.to_string()
+    } else {
+        format!("http://{s}")
+    };
+    let mut u = reqwest::Url::parse(&full).ok()?;
+    if !matches!(u.scheme(), "http" | "https") || u.host_str().is_none() {
+        return None;
+    }
+    if u.port().is_none() {
+        let port = if u.scheme() == "https" { 8101 } else { 8100 };
+        u.set_port(Some(port)).ok()?;
+    }
+    u.set_path("");
+    u.set_query(None);
+    u.set_fragment(None);
+    Some(u.as_str().trim_end_matches('/').to_string())
+}
+
+/// A Suite on another machine, set in Settings (`THCLAWS_AISERVER_API` +
+/// `THCLAWS_AISERVER_API_KEY`): its models through the `litellm` provider
+/// (the Suite speaks OpenAI on `/v1`), the other capabilities through
+/// [`suite_api`]. Re-run whenever those settings change. On the box itself
+/// and in a Pack workspace the Suite is already wired, so this does nothing.
+pub fn apply_remote() {
+    if cached().is_some() || local_ai() {
+        return;
+    }
+    let mut derived = REMOTE_DERIVED.lock().unwrap_or_else(|e| e.into_inner());
+    let (prev_base, prev_key) = match derived.clone() {
+        Some((b, k)) => (Some(b), k),
+        None => (None, None),
+    };
+    let free = |var: &str, prev: Option<&str>| match std::env::var(var) {
+        Err(_) => true,
+        Ok(v) => prev == Some(v.as_str()),
+    };
+    let set = |var: &str| std::env::var(var).ok().filter(|v| !v.trim().is_empty());
+    match set("THCLAWS_AISERVER_API") {
+        None => {
+            if prev_base.is_some() && free("LITELLM_BASE_URL", prev_base.as_deref()) {
+                std::env::remove_var("LITELLM_BASE_URL");
+            }
+            if prev_key.is_some() && free("LITELLM_API_KEY", prev_key.as_deref()) {
+                std::env::remove_var("LITELLM_API_KEY");
+            }
+            if std::env::var("THCLAWS_AISERVER_MODEL").as_deref() == Ok(REMOTE_MODEL) {
+                std::env::remove_var("THCLAWS_AISERVER_MODEL");
+            }
+            *derived = None;
+        }
+        Some(api) => {
+            if !free("LITELLM_BASE_URL", prev_base.as_deref()) {
+                return;
+            }
+            let base = format!("{}/v1", api.trim().trim_end_matches('/'));
+            std::env::set_var("LITELLM_BASE_URL", &base);
+            let key = set("THCLAWS_AISERVER_API_KEY");
+            let key = if free("LITELLM_API_KEY", prev_key.as_deref()) {
+                match &key {
+                    Some(k) => std::env::set_var("LITELLM_API_KEY", k),
+                    None => std::env::remove_var("LITELLM_API_KEY"),
+                }
+                key
+            } else {
+                None
+            };
+            if std::env::var("THCLAWS_AISERVER_MODEL").is_err() {
+                std::env::set_var("THCLAWS_AISERVER_MODEL", REMOTE_MODEL);
+            }
+            *derived = Some((base, key));
+        }
+    }
+    crate::providers::invalidate_picker_cache();
+}
+
+/// Settings' "Test" for the Suite: is it a Suite, which version, does it
+/// take the key, and which of the nine capabilities are up.
+pub async fn check_suite() -> serde_json::Value {
+    let Some((base, key)) = suite_api() else {
+        return serde_json::json!({ "ok": false, "error": "No AI Server Suite address is set." });
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    let fail = |e: String| serde_json::json!({ "ok": false, "base": base, "error": e });
+    let health: serde_json::Value = match client.get(format!("{base}/v1/health")).send().await {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+        Ok(r) => return fail(format!("{base} answered HTTP {}.", r.status().as_u16())),
+        Err(e) => return fail(format!("Cannot reach {base}: {e}")),
+    };
+    if health["product"].as_str() != Some("aiserver-suite") {
+        return fail(format!("{base} is not an AI Server Suite."));
+    }
+    let mut req = client.get(format!("{base}/v1/capabilities"));
+    if let Some(k) = &key {
+        req = req.bearer_auth(k);
+    }
+    let caps: serde_json::Value = match req.send().await {
+        Ok(r) if r.status().as_u16() == 401 => {
+            return fail(if key.is_some() {
+                "The Suite refused the key.".into()
+            } else {
+                "The Suite needs a key (ais_…).".into()
+            })
+        }
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+        Ok(r) => return fail(format!("Capabilities: HTTP {}.", r.status().as_u16())),
+        Err(e) => return fail(format!("Capabilities: {e}")),
+    };
+    let capabilities: Vec<serde_json::Value> = caps["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|c| serde_json::json!({ "id": c["id"], "available": c["available"] }))
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "ok": true,
+        "base": base,
+        "version": health["version"],
+        "capabilities": capabilities,
+    })
+}
+
+/// Whether this engine can reach a Suite at all (no I/O): what decides if
+/// the aiserver-suite shell is offered.
+pub fn suite_reachable() -> bool {
+    std::env::var("THCLAWS_AISERVER_API").is_ok_and(|v| !v.trim().is_empty()) || local_ai()
+}
+
+/// A Suite path a shell may call: `/v1/...`, never box administration.
+pub fn suite_path_allowed(path: &str) -> bool {
+    path.starts_with("/v1/")
+        && !path.starts_with("/v1/admin")
+        && !path.contains("..")
+        && !path.contains("//")
+        && !path.contains('#')
+        && path.chars().all(|c| !c.is_control() && c != ' ')
+}
+
+/// A workspace-relative file path a shell names: no absolute paths, no `..`.
+pub fn workspace_file(root: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::Component;
+    let rel = rel.trim().trim_start_matches("./");
+    let p = std::path::Path::new(rel);
+    if rel.is_empty() || p.is_absolute() {
+        return Err(format!("'{rel}' must be a path inside the workspace"));
+    }
+    if p.components().any(|c| !matches!(c, Component::Normal(_))) {
+        return Err(format!("'{rel}' must not leave the workspace"));
+    }
+    Ok(root.join(p))
+}
+
+/// One Suite call for a GUI shell (`thclaws.aiserver.request`). JSON and
+/// text replies come back inline; anything else (audio, images, video, GLB)
+/// is written to `saveTo` in the workspace, since a shell has nowhere else to
+/// keep tens of MB. Multipart `form` fields are `{name, value}`,
+/// `{name, file}` (a workspace file) or `{name, data, filename}` (base64,
+/// e.g. a file the user picked in the browser).
+pub async fn suite_request(
+    spec: &serde_json::Value,
+    root: &std::path::Path,
+) -> Result<serde_json::Value, String> {
+    use base64::Engine as _;
+    let (base, key) = suite_api().ok_or("no AIServer Suite on this machine")?;
+    let path = spec.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let (path_only, query) = path.split_once('?').unwrap_or((path, ""));
+    if !suite_path_allowed(path_only) {
+        return Err(format!("path '{path_only}' is not allowed"));
+    }
+    let method = match spec
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET")
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "DELETE" => reqwest::Method::DELETE,
+        m => return Err(format!("method {m} is not allowed")),
+    };
+    let save_to = match spec
+        .get("saveTo")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(s) => Some((s.trim().to_string(), workspace_file(root, s)?)),
+        None => None,
+    };
+    let timeout = spec
+        .get("timeoutSecs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(600)
+        .clamp(5, 1800);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = if query.is_empty() {
+        format!("{base}{path_only}")
+    } else {
+        format!("{base}{path_only}?{query}")
+    };
+    let mut rb = client.request(method, &url);
+    if let Some(k) = key {
+        rb = rb.bearer_auth(k);
+    }
+    if let Some(form) = spec.get("form").and_then(|v| v.as_array()) {
+        let mut mp = reqwest::multipart::Form::new();
+        for f in form {
+            let name = f
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or("form field without a name")?
+                .to_string();
+            if let Some(rel) = f.get("file").and_then(|v| v.as_str()) {
+                let p = workspace_file(root, rel)?;
+                let bytes = tokio::fs::read(&p)
+                    .await
+                    .map_err(|e| format!("read {rel}: {e}"))?;
+                let fname = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "file".into());
+                mp = mp.part(
+                    name,
+                    reqwest::multipart::Part::bytes(bytes).file_name(fname),
+                );
+            } else if let Some(b64) = f.get("data").and_then(|v| v.as_str()) {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64.split_once(',').map(|(_, d)| d).unwrap_or(b64))
+                    .map_err(|e| format!("field {name}: bad base64: {e}"))?;
+                let fname = f
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("upload")
+                    .to_string();
+                mp = mp.part(
+                    name,
+                    reqwest::multipart::Part::bytes(bytes).file_name(fname),
+                );
+            } else {
+                let v = match f.get("value") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(serde_json::Value::Null) | None => continue,
+                    Some(other) => other.to_string(),
+                };
+                mp = mp.text(name, v);
+            }
+        }
+        rb = rb.multipart(mp);
+    } else if let Some(j) = spec.get("json") {
+        rb = rb.json(j);
+    }
+    let resp = rb.send().await.map_err(|e| format!("AIServer: {e}"))?;
+    let status = resp.status().as_u16();
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let mut headers = serde_json::Map::new();
+    for h in ["x-audio-seconds", "x-usage-characters", "retry-after"] {
+        if let Some(v) = resp.headers().get(h).and_then(|v| v.to_str().ok()) {
+            headers.insert(h.into(), v.into());
+        }
+    }
+    let textual = ctype.starts_with("application/json") || ctype.starts_with("text/");
+    let mut out = serde_json::json!({ "status": status, "ok": (200..300).contains(&status), "contentType": ctype, "headers": headers });
+    match save_to {
+        Some((rel, p))
+            if (200..300).contains(&status) && !ctype.starts_with("application/json") =>
+        {
+            if let Some(dir) = p.parent() {
+                tokio::fs::create_dir_all(dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| format!("AIServer body: {e}"))?;
+            tokio::fs::write(&p, &bytes)
+                .await
+                .map_err(|e| format!("write {rel}: {e}"))?;
+            out["saved"] = serde_json::json!({ "path": rel, "bytes": bytes.len() });
+        }
+        _ if textual || !(200..300).contains(&status) => {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| format!("AIServer body: {e}"))?;
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(j) => out["json"] = j,
+                Err(_) => out["text"] = text.chars().take(200_000).collect::<String>().into(),
+            }
+        }
+        _ if spec.get("inline").and_then(|v| v.as_bool()) == Some(true) => {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| format!("AIServer body: {e}"))?;
+            if bytes.len() > INLINE_MAX_BYTES {
+                return Err(format!(
+                    "the reply is {} MB, over the {} MB inline limit",
+                    bytes.len() / (1024 * 1024),
+                    INLINE_MAX_BYTES / (1024 * 1024)
+                ));
+            }
+            out["data"] = base64::engine::general_purpose::STANDARD
+                .encode(&bytes)
+                .into();
+        }
+        _ => {
+            return Err(format!(
+                "the reply is {ctype}: pass saveTo to keep it in the workspace"
+            ))
+        }
+    }
+    Ok(out)
+}
+
+/// Largest binary reply [`suite_request`] hands back inline (`inline: true`):
+/// a spoken sentence is tens of KB, so this only stops a runaway reply.
+const INLINE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Suite TTS voice for voice mode when the user has not picked one.
+pub const VOICE_DEFAULT: &str = "sample-1";
+
+/// One clip from the composer's mic → text, via the Suite's ASR.
+pub async fn voice_transcribe(data_b64: &str, mime: &str) -> Result<String, String> {
+    let ext = match mime.split(';').next().unwrap_or("").trim() {
+        "audio/webm" => "webm",
+        "audio/ogg" => "ogg",
+        "audio/mp4" | "audio/aac" => "m4a",
+        "audio/mpeg" => "mp3",
+        "audio/wav" | "audio/x-wav" => "wav",
+        _ => "webm",
+    };
+    let spec = serde_json::json!({
+        "method": "POST",
+        "path": "/v1/audio/transcriptions",
+        "timeoutSecs": 120,
+        "form": [
+            { "name": "file", "data": data_b64, "filename": format!("voice.{ext}") },
+            { "name": "model", "value": "asr-default" },
+            { "name": "language", "value": "th" },
+            { "name": "response_format", "value": "json" },
+        ],
+    });
+    let r = suite_request(&spec, std::path::Path::new(".")).await?;
+    if r["ok"].as_bool() != Some(true) {
+        return Err(suite_error(&r));
+    }
+    r["json"]["text"]
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| "ASR answered without text".into())
+}
+
+/// One sentence → speech via the Suite's TTS; returns (base64 audio, mime).
+pub async fn voice_speak(text: &str, voice: &str) -> Result<(String, String), String> {
+    let voice = if voice.trim().is_empty() {
+        VOICE_DEFAULT
+    } else {
+        voice.trim()
+    };
+    let spec = serde_json::json!({
+        "method": "POST",
+        "path": "/v1/audio/speech",
+        // One TTS worker per box and requests queue; a voice's first load
+        // alone measured 167 s on the Station.
+        "timeoutSecs": 300,
+        "inline": true,
+        "json": { "model": "tts-default", "input": text, "voice": voice, "response_format": "mp3" },
+    });
+    let r = suite_request(&spec, std::path::Path::new(".")).await?;
+    if r["ok"].as_bool() != Some(true) {
+        return Err(suite_error(&r));
+    }
+    let data = r["data"]
+        .as_str()
+        .ok_or("TTS answered without audio")?
+        .to_string();
+    let mime = r["contentType"]
+        .as_str()
+        .filter(|c| c.starts_with("audio/"))
+        .unwrap_or("audio/mpeg")
+        .to_string();
+    Ok((data, mime))
+}
+
+/// Speaks `text` as a stream: raw PCM (s16le, mono) handed to `on_audio` as
+/// the box makes it, so the sound starts within a second instead of after
+/// the whole answer. Returns the sample rate. A refusal that says when to
+/// come back (`Retry-After` on 503/504: an LLM is loading, the worker was
+/// restarted) is waited out and retried, a few times, before any audio.
+pub async fn voice_speak_stream(
+    text: &str,
+    voice: &str,
+    mut on_audio: impl FnMut(u32, &[u8]),
+) -> Result<u32, String> {
+    const TRIES: usize = 5;
+    const FIRST_BYTE_SECS: u64 = 300;
+    const NEXT_CHUNK_SECS: u64 = 60;
+    let (base, key) = suite_api().ok_or("no AIServer Suite on this machine")?;
+    let voice = if voice.trim().is_empty() {
+        VOICE_DEFAULT
+    } else {
+        voice.trim()
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({
+        "model": "tts-default", "input": text, "voice": voice,
+        "response_format": "pcm", "stream": true,
+    });
+    let mut attempt = 0;
+    let mut resp = loop {
+        attempt += 1;
+        let mut rb = client.post(format!("{base}/v1/audio/speech")).json(&body);
+        if let Some(k) = &key {
+            rb = rb.bearer_auth(k);
+        }
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(FIRST_BYTE_SECS), rb.send())
+            .await
+            .map_err(|_| "busy (504): the voice did not start in time".to_string())?
+            .map_err(|e| format!("AIServer: {e}"))?;
+        let status = resp.status().as_u16();
+        if resp.status().is_success() {
+            break resp;
+        }
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let reason = resp
+            .headers()
+            .get("x-aiserver-reason")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let text = resp.text().await.unwrap_or_default();
+        let json = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+        let err = suite_error(&serde_json::json!({ "status": status, "json": json, "text": text }));
+        match retry_after {
+            Some(secs) if matches!(status, 503 | 504) && attempt < TRIES => {
+                eprintln!("[voice] speak: {status} {reason}, retrying in {secs}s ({err})");
+                tokio::time::sleep(std::time::Duration::from_secs(secs.clamp(1, 60))).await;
+            }
+            _ => return Err(err),
+        }
+    };
+    let rate = resp
+        .headers()
+        .get("x-sample-rate")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|r| (8_000..=96_000).contains(r))
+        .unwrap_or(24_000);
+    // A chunk may end in the middle of a 16-bit sample: carry the odd byte.
+    let mut carry: Option<u8> = None;
+    loop {
+        let chunk = tokio::time::timeout(
+            std::time::Duration::from_secs(NEXT_CHUNK_SECS),
+            resp.chunk(),
+        )
+        .await
+        .map_err(|_| "busy (504): the voice stopped mid-answer".to_string())?
+        // An error after audio has started is how the box ends a stream early.
+        .unwrap_or(None);
+        let Some(chunk) = chunk else { break };
+        let mut buf = Vec::with_capacity(chunk.len() + 1);
+        buf.extend(carry.take());
+        buf.extend_from_slice(&chunk);
+        if buf.len() % 2 == 1 {
+            carry = buf.pop();
+        }
+        if !buf.is_empty() {
+            on_audio(rate, &buf);
+        }
+    }
+    Ok(rate)
+}
+
+/// Streams in flight, so the page can hang up on one (`voice_speak_cancel`).
+static VOICE_STREAMS: std::sync::Mutex<Vec<(String, tokio::task::AbortHandle)>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub fn voice_stream_register(id: &str, handle: tokio::task::AbortHandle) {
+    let mut v = VOICE_STREAMS.lock().expect("voice streams lock");
+    v.retain(|(_, h)| !h.is_finished());
+    v.push((id.to_string(), handle));
+}
+
+pub fn voice_stream_cancel(id: &str) {
+    let mut v = VOICE_STREAMS.lock().expect("voice streams lock");
+    v.retain(|(i, h)| {
+        if i == id {
+            h.abort();
+        }
+        i != id && !h.is_finished()
+    });
+}
+
+/// Voices the Suite offers, for the voice-mode picker. `mx-*` are lab
+/// voices that must never be shown to a customer (dgx).
+pub async fn voice_list() -> Result<Vec<serde_json::Value>, String> {
+    let spec =
+        serde_json::json!({ "method": "GET", "path": "/v1/audio/voices", "timeoutSecs": 15 });
+    let r = suite_request(&spec, std::path::Path::new(".")).await?;
+    if r["ok"].as_bool() != Some(true) {
+        return Err(suite_error(&r));
+    }
+    Ok(customer_voices(&r["json"]))
+}
+
+fn customer_voices(j: &serde_json::Value) -> Vec<serde_json::Value> {
+    j["voices"]
+        .as_array()
+        .map(|vs| {
+            vs.iter()
+                .filter(|v| v["id"].as_str().is_some_and(|id| !id.starts_with("mx-")))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// (asr up, tts up) from `GET /v1/capabilities`.
+pub async fn voice_capabilities() -> Result<(bool, bool), String> {
+    let spec =
+        serde_json::json!({ "method": "GET", "path": "/v1/capabilities", "timeoutSecs": 15 });
+    let r = suite_request(&spec, std::path::Path::new(".")).await?;
+    if r["ok"].as_bool() != Some(true) {
+        return Err(suite_error(&r));
+    }
+    Ok((cap_up(&r["json"], "asr"), cap_up(&r["json"], "tts")))
+}
+
+fn cap_up(j: &serde_json::Value, id: &str) -> bool {
+    j["data"].as_array().is_some_and(|caps| {
+        caps.iter().any(|c| {
+            c["id"].as_str() == Some(id)
+                && c["available"].as_bool() != Some(false)
+                && c["up"].as_bool() != Some(false)
+        })
+    })
+}
+
+fn suite_error(r: &serde_json::Value) -> String {
+    let status = r["status"].as_u64().unwrap_or(0);
+    let e = &r["json"]["error"];
+    let code = e["code"].as_str().or(e["type"].as_str()).unwrap_or("");
+    let msg = e["message"]
+        .as_str()
+        .or(r["json"]["detail"].as_str())
+        .or(r["text"].as_str())
+        .unwrap_or("");
+    // 507: too little unified memory to start, don't retry. 409/429/503/504:
+    // the GPU or worker is taken for now.
+    let head = match status {
+        507 => "memory short",
+        409 | 429 | 503 | 504 => "busy",
+        _ => "error",
+    };
+    let detail = [code, msg]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(": ");
+    let detail: String = detail.chars().take(300).collect();
+    if detail.is_empty() {
+        format!("{head} ({status})")
+    } else {
+        format!("{head} ({status}): {detail}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_errors_name_busy_and_keep_the_suite_message() {
+        let busy = serde_json::json!({ "status": 503, "json": { "error": { "code": "memory_short", "message": "free memory too low" } } });
+        assert_eq!(
+            suite_error(&busy),
+            "busy (503): memory_short: free memory too low"
+        );
+        let plain = serde_json::json!({ "status": 400, "json": { "detail": "bad file" } });
+        assert_eq!(suite_error(&plain), "error (400): bad file");
+        assert_eq!(
+            suite_error(&serde_json::json!({ "status": 500 })),
+            "error (500)"
+        );
+        assert!(suite_error(&serde_json::json!({ "status": 507 })).starts_with("memory short"));
+    }
+
+    #[test]
+    fn voice_mode_hides_lab_voices_and_reads_capabilities() {
+        let v = serde_json::json!({ "voices": [{ "id": "sample-1" }, { "id": "mx-charon" }, { "id": "acme-ceo" }] });
+        let ids: Vec<_> = customer_voices(&v)
+            .iter()
+            .map(|v| v["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, ["sample-1", "acme-ceo"]);
+        let caps = serde_json::json!({ "data": [{ "id": "asr", "up": true }, { "id": "tts", "available": false }] });
+        assert!(cap_up(&caps, "asr"));
+        assert!(!cap_up(&caps, "tts"));
+        assert!(!cap_up(&caps, "music"));
+    }
 
     #[test]
     fn web_tools_unchanged_off_the_box() {
@@ -308,6 +988,86 @@ mod tests {
         static CELL: OnceLock<String> = OnceLock::new();
         assert!(web_tool_description("base", &CELL).ends_with(WEB_ONLY_WHEN_ASKED));
         std::env::remove_var("THCLAWS_LOCAL_AI");
+    }
+
+    #[test]
+    fn suite_addresses_take_the_suite_ports() {
+        let n = |s| normalize_suite_url(s);
+        assert_eq!(
+            n("192.168.0.114").as_deref(),
+            Some("http://192.168.0.114:8100")
+        );
+        assert_eq!(n(" box.local/ ").as_deref(), Some("http://box.local:8100"));
+        assert_eq!(n("https://box").as_deref(), Some("https://box:8101"));
+        assert_eq!(n("http://box:8100/v1").as_deref(), Some("http://box:8100"));
+        assert_eq!(n("box:9100").as_deref(), Some("http://box:9100"));
+        assert_eq!(n(""), None);
+        assert_eq!(n("ftp://box"), None);
+    }
+
+    /// A Suite set in Settings drives `litellm` only where nobody else did,
+    /// and clearing it takes back exactly what it set.
+    #[test]
+    fn a_remote_suite_fills_litellm_and_clears_only_its_own() {
+        let _g = crate::kms::test_env_lock();
+        let vars = [
+            "THCLAWS_AISERVER_API",
+            "THCLAWS_AISERVER_API_KEY",
+            "THCLAWS_AISERVER_MODEL",
+            "LITELLM_BASE_URL",
+            "LITELLM_API_KEY",
+            "THCLAWS_LOCAL_AI",
+        ];
+        let saved: Vec<_> = vars.iter().map(|v| (v, std::env::var(v).ok())).collect();
+        for v in vars {
+            std::env::remove_var(v);
+        }
+
+        std::env::set_var("THCLAWS_AISERVER_API", "http://box:8100");
+        std::env::set_var("THCLAWS_AISERVER_API_KEY", "ais_test");
+        apply_remote();
+        assert_eq!(
+            std::env::var("LITELLM_BASE_URL").unwrap(),
+            "http://box:8100/v1"
+        );
+        assert_eq!(std::env::var("LITELLM_API_KEY").unwrap(), "ais_test");
+        assert_eq!(
+            std::env::var("THCLAWS_AISERVER_MODEL").unwrap(),
+            REMOTE_MODEL
+        );
+        assert!(suite_reachable());
+
+        std::env::set_var("THCLAWS_AISERVER_API", "http://other:8100");
+        apply_remote();
+        assert_eq!(
+            std::env::var("LITELLM_BASE_URL").unwrap(),
+            "http://other:8100/v1"
+        );
+
+        std::env::remove_var("THCLAWS_AISERVER_API");
+        std::env::remove_var("THCLAWS_AISERVER_API_KEY");
+        apply_remote();
+        assert!(std::env::var("LITELLM_BASE_URL").is_err());
+        assert!(std::env::var("LITELLM_API_KEY").is_err());
+        assert!(std::env::var("THCLAWS_AISERVER_MODEL").is_err());
+
+        std::env::set_var("LITELLM_BASE_URL", "http://my-litellm:4000/v1");
+        std::env::set_var("THCLAWS_AISERVER_API", "http://box:8100");
+        apply_remote();
+        assert_eq!(
+            std::env::var("LITELLM_BASE_URL").unwrap(),
+            "http://my-litellm:4000/v1"
+        );
+
+        for v in vars {
+            std::env::remove_var(v);
+        }
+        *REMOTE_DERIVED.lock().unwrap() = None;
+        for (v, val) in saved {
+            if let Some(val) = val {
+                std::env::set_var(v, val);
+            }
+        }
     }
 
     // `THCLAWS_AISERVER_HUB` is process-global, so the two probe tests must
@@ -457,5 +1217,40 @@ mod tests {
         let got = fetch().await;
         std::env::remove_var("THCLAWS_AISERVER_HUB");
         assert_eq!(got.expect("found").model_id(), "litellm/auto");
+    }
+
+    #[test]
+    fn suite_paths_exclude_admin_and_escapes() {
+        for p in [
+            "/v1/ocr",
+            "/v1/jobs/vid_1/artifacts/0",
+            "/v1/rag/collections/default:default/documents",
+        ] {
+            assert!(suite_path_allowed(p), "{p}");
+        }
+        for p in [
+            "/v1/admin/models/x:load",
+            "/api/discovery",
+            "/v1/../api",
+            "/v1//x",
+            "v1/ocr",
+            "/v1/a b",
+        ] {
+            assert!(!suite_path_allowed(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn workspace_files_stay_inside() {
+        let root = std::path::Path::new("/w");
+        assert_eq!(
+            workspace_file(root, "output/a.png").unwrap(),
+            root.join("output").join("a.png")
+        );
+        assert_eq!(workspace_file(root, "./a.png").unwrap(), root.join("a.png"));
+        assert!(workspace_file(root, "/etc/passwd").is_err());
+        assert!(workspace_file(root, "../x").is_err());
+        assert!(workspace_file(root, "a/../../x").is_err());
+        assert!(workspace_file(root, "").is_err());
     }
 }

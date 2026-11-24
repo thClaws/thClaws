@@ -3,12 +3,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { resolveAssetSrc } from "../lib/fileAsset";
-import { Check, Copy, Paperclip } from "lucide-react";
+import { Check, Copy, Loader2, Mic, Paperclip, Volume2, VolumeX } from "lucide-react";
 import { basePath, botQuery, send, subscribe } from "../hooks/useIPC";
 import { useBranding } from "../hooks/useBranding";
 import { promptHistory, recordPrompt } from "../hooks/promptHistory";
 import { useTheme } from "../hooks/useTheme";
 import { useVersion } from "../hooks/useVersion";
+import { useVoiceMode } from "../hooks/useVoiceMode";
 import logoDark from "../assets/thClaws-logo-dark.png";
 import logoLight from "../assets/thClaws-logo-light.png";
 import { WorkflowReviewBubble } from "./WorkflowReviewBubble";
@@ -276,6 +277,10 @@ export function ChatView({ active, modalOpen }: Props) {
     null,
   );
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const submitTextRef = useRef<(text: string) => void>(() => {});
+  const voice = useVoiceMode((text) => submitTextRef.current(text));
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
   /// `true` when the model has been streaming for >5s with zero bytes
@@ -595,6 +600,7 @@ export function ChatView({ active, modalOpen }: Props) {
           break;
         }
         case "chat_text_delta":
+          voiceRef.current.feed(msg.text as string);
           firstByteSeenRef.current = true;
           setWaitingFirstByte(false);
           setMessages((prev) => {
@@ -656,6 +662,7 @@ export function ChatView({ active, modalOpen }: Props) {
           });
           break;
         case "chat_tool_call":
+          voiceRef.current.discard();
           // Compact one-line indicator only — the actual tool output
           // is intentionally suppressed in the chat tab to keep the
           // conversation focused on user/assistant exchange. Users
@@ -843,6 +850,7 @@ export function ChatView({ active, modalOpen }: Props) {
           ]);
           break;
         case "chat_done":
+          voiceRef.current.flush();
           setStreaming(false);
           setAskPrompt(null);
           setWaitingFirstByte(false);
@@ -1098,9 +1106,10 @@ export function ChatView({ active, modalOpen }: Props) {
     [],
   );
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = input.trim();
+  const handleSubmit = (e?: React.FormEvent, spoken?: string) => {
+    e?.preventDefault();
+    const text = (spoken ?? input).trim();
+    voiceRef.current.stopSpeaking();
     // Record every non-empty submission in the shared recall ring and reset
     // navigation so the next Up starts from the newest entry.
     if (text) {
@@ -1187,12 +1196,19 @@ export function ChatView({ active, modalOpen }: Props) {
     send({
       type: "shell_input",
       text,
+      // The reply will be read aloud: the engine asks for a short spoken one.
+      // voiceGender: whose voice it is, for ค่ะ / ครับ.
+      ...(voiceRef.current.speakOn && voiceRef.current.ttsUp
+        ? { voice: true, voiceGender: voiceRef.current.gender }
+        : {}),
       attachments: pendingAttachments.map((a) => ({
         mediaType: a.mediaType,
         data: a.data,
       })),
     });
   };
+
+  submitTextRef.current = (text: string) => handleSubmit(undefined, text);
 
   const acceptSlashCommand = (cmd: SlashCommandInfo) => {
     // Always append a trailing space so the popup closes (slashOpen
@@ -1831,6 +1847,22 @@ export function ChatView({ active, modalOpen }: Props) {
         }}
       >
         {/* Attachment error banner — auto-clears after 4s */}
+        {voice.error && (
+          <div
+            role="status"
+            onClick={voice.clearError}
+            className="text-xs px-2 py-1 mb-1 rounded cursor-pointer"
+            style={{ color: "var(--danger, #c0392b)", border: "1px solid var(--border)" }}
+            title="Dismiss"
+          >
+            Voice: {voice.error}
+          </div>
+        )}
+        {voice.preparing && !voice.error && (
+          <div role="status" className="text-xs px-2 py-1 mb-1" style={{ color: "var(--text-secondary)" }}>
+            Preparing the voice… after a voice change the first audio can take a minute or more.
+          </div>
+        )}
         {attachmentError && (
           <div
             role="alert"
@@ -1955,6 +1987,111 @@ export function ChatView({ active, modalOpen }: Props) {
               >
                 <Paperclip size={16} />
               </button>
+            </>
+          )}
+          {voice.available && (
+            <>
+              {voice.asrUp && (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  void voice.startRecording();
+                }}
+                onPointerUp={voice.stopRecording}
+                onPointerLeave={voice.stopRecording}
+                onContextMenu={(e) => e.preventDefault()}
+                disabled={!voice.micSupported || voice.transcribing || inputDisabled}
+                aria-label={voice.recording ? "Release to send" : "Hold to talk"}
+                title={
+                  !voice.micSupported
+                    ? "The microphone needs HTTPS (or localhost) and permission to use it"
+                    : voice.recording
+                      ? "Release to send"
+                      : voice.transcribing
+                        ? "Transcribing…"
+                        : "Hold to talk"
+                }
+                className="px-2 py-2 rounded text-sm transition-colors inline-flex items-center justify-center select-none"
+                style={{
+                  background: voice.recording ? "var(--accent)" : "var(--bg-tertiary)",
+                  color: voice.recording ? "var(--accent-fg, #fff)" : "var(--text-primary)",
+                  border: "1px solid var(--border)",
+                  cursor: !voice.micSupported || voice.transcribing ? "not-allowed" : "pointer",
+                  minHeight: "36px",
+                  touchAction: "none",
+                }}
+              >
+                {voice.transcribing ? <Loader2 size={16} className="animate-spin" /> : <Mic size={16} />}
+              </button>
+              )}
+              {voice.ttsUp && (
+              <button
+                type="button"
+                onClick={() => (voice.speaking ? voice.stopSpeaking() : voice.toggleSpeak())}
+                aria-label={voice.speaking ? "Stop speaking" : voice.speakOn ? "Stop reading replies aloud" : "Read replies aloud"}
+                aria-pressed={voice.speakOn}
+                title={voice.speaking ? "Stop speaking" : voice.speakOn ? "Replies are read aloud (click to turn off)" : "Read replies aloud"}
+                className="px-2 py-2 rounded text-sm transition-colors inline-flex items-center justify-center"
+                style={{
+                  background: voice.speakOn ? "var(--bg-secondary)" : "var(--bg-tertiary)",
+                  color: voice.speakOn ? "var(--accent)" : "var(--text-secondary)",
+                  border: "1px solid var(--border)",
+                  cursor: "pointer",
+                  minHeight: "36px",
+                }}
+              >
+                {voice.preparing ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : voice.speakOn ? (
+                  <Volume2 size={16} />
+                ) : (
+                  <VolumeX size={16} />
+                )}
+              </button>
+              )}
+              {voice.ttsUp && voice.speakOn && voice.voices.length > 1 && (
+                <select
+                  value={voice.voice}
+                  onChange={(e) => voice.setVoice(e.target.value)}
+                  aria-label="Voice"
+                  title="Voice for replies"
+                  className="px-1 py-2 rounded text-xs"
+                  style={{
+                    background: "var(--bg-tertiary)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border)",
+                    minHeight: "36px",
+                    maxWidth: "7rem",
+                  }}
+                >
+                  {voice.voices.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.label || v.id}
+                      {v.base === "7b" ? " (slow)" : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {voice.ttsUp && voice.speakOn && (
+                <select
+                  value={voice.gender}
+                  onChange={(e) => voice.setGender(e.target.value as "female" | "male" | "")}
+                  aria-label="Voice gender"
+                  title="Whose voice this is: the reply uses ค่ะ or ครับ to match"
+                  className="px-1 py-2 rounded text-xs"
+                  style={{
+                    background: "var(--bg-tertiary)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border)",
+                    minHeight: "36px",
+                  }}
+                >
+                  {voice.gender === "" && <option value="">ค่ะ/ครับ?</option>}
+                  <option value="female">ค่ะ</option>
+                  <option value="male">ครับ</option>
+                </select>
+              )}
             </>
           )}
           <textarea

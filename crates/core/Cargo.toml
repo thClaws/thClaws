@@ -1,6 +1,6 @@
 [package]
 name = "thclaws-core"
-version = "0.156.0"
+version = "0.157.0"
 edition = "2021"
 description = "thClaws — native Rust AI agent workspace with CLI and desktop GUI."
 license = "MIT OR Apache-2.0"
@@ -101,8 +101,9 @@ rustybuzz = "0.14"
 icu_segmenter = { version = "1.5", features = ["auto"] }
 # Post-process PdfCreate output: printpdf writes outline /Title as
 # Literal UTF-8 (viewers read PDFDocEncoding → Thai mojibake); we
-# re-encode titles as UTF-16BE+BOM. Same version printpdf uses.
-lopdf = "0.31"
+# re-encode titles as UTF-16BE+BOM. Newer than the copy printpdf pulls
+# in (0.31); the two only meet through the PDF bytes.
+lopdf = "0.42"
 # DOCX generation backing DocxCreate. Markdown → Word XML via docx-rs's
 # document builder; renders runs/paragraphs/tables/headings/lists with
 # explicit fontTable references (Calibri for Latin, Noto Sans Thai for
