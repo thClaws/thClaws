@@ -1066,6 +1066,14 @@ pub struct Agent {
     /// yields `Done`, so surfaces read this instead
     /// ([`Agent::partial_turn_usage`]) — the gateway billed those calls.
     turn_usage: Arc<Mutex<Usage>>,
+    /// Optional dollar cap. Every provider call's reported usage is priced
+    /// on the model that served it and booked here; once the cap is spent
+    /// the loop stops before the next provider call with stop reason
+    /// `budget_exhausted`. `max_iterations` counts loops, not money, so a
+    /// 200-iteration turn on an expensive model has no ceiling without it.
+    /// Share one `Arc` across agents (subagents, team members) to cap them
+    /// together. `None` keeps the original behavior.
+    pub(crate) cost_budget: Option<Arc<CostBudget>>,
 }
 
 tokio::task_local! {
@@ -1232,6 +1240,7 @@ impl Agent {
             turn_notes: Arc::new(Mutex::new(TurnNotes::default())),
             injection_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             turn_usage: Arc::new(Mutex::new(Usage::default())),
+            cost_budget: None,
         }
     }
 
@@ -1336,6 +1345,17 @@ impl Agent {
     pub fn with_max_iterations(mut self, n: usize) -> Self {
         self.max_iterations = n;
         self
+    }
+
+    /// Cap the agent's spend in USD. See [`Agent::cost_budget`].
+    pub fn with_cost_budget(mut self, budget: Arc<CostBudget>) -> Self {
+        self.cost_budget = Some(budget);
+        self
+    }
+
+    /// The dollar budget this agent books its provider calls on, if any.
+    pub fn cost_budget(&self) -> Option<&Arc<CostBudget>> {
+        self.cost_budget.as_ref()
     }
 
     /// Override the per-request output token budget. The provider receives
@@ -1571,6 +1591,7 @@ impl Agent {
         if let Ok(mut g) = turn_usage.lock() {
             *g = Usage::default();
         }
+        let cost_budget = self.cost_budget.clone();
 
         try_stream! {
             // One turn id for every gateway call this turn makes, so a quota
@@ -1603,6 +1624,23 @@ impl Agent {
             // not one kind of turn. This carries the per-iteration answer.
             let mut browser_step = BrowserStepThinking::default();
             for iteration in 0..effective_max {
+                // Dollar cap: checked before every provider call, so the
+                // call that would start past the cap is never made.
+                if let Some(b) = &cost_budget {
+                    if b.is_exhausted() {
+                        if let Ok(mut g) = model_override.lock() {
+                            *g = None;
+                        }
+                        if let Ok(mut g) = next_turn_chunk_timeout.lock() {
+                            *g = None;
+                        }
+                        yield AgentEvent::Done {
+                            stop_reason: Some("budget_exhausted".to_string()),
+                            usage: cumulative_usage,
+                        };
+                        return;
+                    }
+                }
                 yield AgentEvent::IterationStart { iteration };
 
                 let messages = {
@@ -1978,6 +2016,9 @@ impl Agent {
                                 cumulative_usage.accumulate(u);
                                 if let Ok(mut g) = turn_usage.lock() {
                                     *g = cumulative_usage.clone();
+                                }
+                                if let Some(b) = &cost_budget {
+                                    b.record(&active_model, u)?;
                                 }
                             }
                         }
@@ -2805,6 +2846,95 @@ impl Agent {
                 usage: cumulative_usage,
             };
         }
+    }
+}
+
+/// Prices one provider call's reported usage on the model that served it,
+/// in USD. `None` means the model has no price.
+pub type CostPricer = Arc<dyn Fn(&str, &Usage) -> Option<f64> + Send + Sync>;
+
+/// A dollar cap for [`Agent::with_cost_budget`]. Calls are priced through
+/// the engine's model catalogue (`model_catalogue.json` plus the refreshed
+/// cache and user overrides, via [`EffectiveCatalogue`]), the same prices
+/// the rest of the product shows. Share one `Arc` across agents to cap
+/// them together.
+///
+/// [`EffectiveCatalogue`]: crate::model_catalogue::EffectiveCatalogue
+pub struct CostBudget {
+    limit_usd: f64,
+    spent_usd: Mutex<f64>,
+    pricer: CostPricer,
+}
+
+impl CostBudget {
+    /// A cap of `limit_usd`, priced through the model catalogue.
+    pub fn new(limit_usd: f64) -> Result<Self> {
+        let catalogue = crate::model_catalogue::EffectiveCatalogue::load();
+        Self::with_pricer(
+            limit_usd,
+            Arc::new(move |model: &str, usage: &Usage| {
+                catalogue.compute_cost_usd(
+                    model,
+                    &crate::model_catalogue::TokenUsage::from_usage(usage),
+                )
+            }),
+        )
+    }
+
+    /// A cap of `limit_usd` with a caller-supplied price lookup.
+    pub fn with_pricer(limit_usd: f64, pricer: CostPricer) -> Result<Self> {
+        if !limit_usd.is_finite() || limit_usd < 0.0 {
+            return Err(Error::Agent(format!(
+                "cost budget: limit must be a finite, non-negative USD amount, got {limit_usd}"
+            )));
+        }
+        Ok(Self {
+            limit_usd,
+            spent_usd: Mutex::new(0.0),
+            pricer,
+        })
+    }
+
+    /// The cap in USD.
+    pub fn limit_usd(&self) -> f64 {
+        self.limit_usd
+    }
+
+    /// USD booked so far.
+    pub fn spent_usd(&self) -> f64 {
+        self.spent_usd.lock().map(|g| *g).unwrap_or(f64::INFINITY)
+    }
+
+    /// True once the booked spend has reached the cap.
+    pub fn is_exhausted(&self) -> bool {
+        self.spent_usd() >= self.limit_usd
+    }
+
+    /// Price one provider call's reported usage on `model` and book it.
+    /// Booking always happens (the provider already billed the call); the
+    /// loop checks the cap before its next call. A model with no price is
+    /// an error, so a cap is never silently unenforced.
+    pub fn record(&self, model: &str, usage: &Usage) -> Result<f64> {
+        let cost = (self.pricer)(model, usage).ok_or_else(|| {
+            Error::Agent(format!(
+                "cost budget: no price for model '{model}' in the model catalogue"
+            ))
+        })?;
+        let mut spent = self
+            .spent_usd
+            .lock()
+            .map_err(|_| Error::Agent("cost budget: lock poisoned".to_string()))?;
+        *spent += cost;
+        Ok(cost)
+    }
+}
+
+impl std::fmt::Debug for CostBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CostBudget")
+            .field("limit_usd", &self.limit_usd)
+            .field("spent_usd", &self.spent_usd())
+            .finish_non_exhaustive()
     }
 }
 
@@ -4984,6 +5114,120 @@ mod tests {
     // dedicated unit test. The cross-test pollution would cause flakes
     // in `permission_denied_in_ask_mode_emits_denial_event` and
     // similar tests that depend on `current_mode() == Ask`.
+
+    fn priced_tool_script(input_tokens: u32, output_tokens: u32) -> Vec<ProviderEvent> {
+        let mut script = tool_script("toolu_loop", "Read", r#"{"path":"/nope"}"#);
+        if let Some(ProviderEvent::MessageStop { usage, .. }) = script.last_mut() {
+            *usage = Some(Usage {
+                input_tokens,
+                output_tokens,
+                ..Usage::default()
+            });
+        }
+        script
+    }
+
+    fn test_budget(limit_usd: f64) -> Arc<CostBudget> {
+        // $1 per million input tokens, $4 per million output tokens.
+        Arc::new(
+            CostBudget::with_pricer(
+                limit_usd,
+                Arc::new(|model: &str, u: &Usage| {
+                    (model == "test-model").then(|| {
+                        (f64::from(u.input_tokens) + 4.0 * f64::from(u.output_tokens)) / 1e6
+                    })
+                }),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn cost_budget_stops_runaway_loop_before_next_call() {
+        // Each call: 100k input + 25k output = $0.10 + $0.10 = $0.20.
+        // A $0.30 cap admits two calls ($0.40 booked, the second call
+        // crossed the cap) and refuses the third, long before the
+        // 200-iteration default would end the loop.
+        let provider = ScriptedProvider::new(
+            (0..10)
+                .map(|_| priced_tool_script(100_000, 25_000))
+                .collect(),
+        );
+        let budget = test_budget(0.30);
+        let agent = Agent::new(provider, ToolRegistry::with_builtins(), "test-model", "")
+            .with_cost_budget(budget.clone());
+
+        let outcome = collect_agent_turn(agent.run_turn("loop".into()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(outcome.stop_reason.as_deref(), Some("budget_exhausted"));
+        assert!(
+            (budget.spent_usd() - 0.40).abs() < 1e-9,
+            "spent {}",
+            budget.spent_usd()
+        );
+    }
+
+    #[tokio::test]
+    async fn cost_budget_shared_across_turns_refuses_spent_budget() {
+        let budget = test_budget(0.10);
+        let provider = ScriptedProvider::new(vec![
+            priced_tool_script(100_000, 0),
+            text_script(&["never"]),
+        ]);
+        let agent = Agent::new(provider, ToolRegistry::with_builtins(), "test-model", "")
+            .with_cost_budget(budget.clone());
+        let first = collect_agent_turn(agent.run_turn("one".into()))
+            .await
+            .unwrap();
+        assert_eq!(first.stop_reason.as_deref(), Some("budget_exhausted"));
+        let second = collect_agent_turn(agent.run_turn("two".into()))
+            .await
+            .unwrap();
+        assert_eq!(second.iterations, 0);
+        assert_eq!(second.stop_reason.as_deref(), Some("budget_exhausted"));
+    }
+
+    #[test]
+    fn cost_budget_prices_through_the_model_catalogue() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..Usage::default()
+        };
+        let expected = crate::model_catalogue::EffectiveCatalogue::load()
+            .compute_cost_usd(
+                "claude-sonnet-4-6",
+                &crate::model_catalogue::TokenUsage::from_usage(&usage),
+            )
+            .expect("catalogue prices claude-sonnet-4-6");
+        let budget = CostBudget::new(100.0).unwrap();
+        let booked = budget.record("claude-sonnet-4-6", &usage).unwrap();
+        assert!((booked - expected).abs() < 1e-12, "{booked} vs {expected}");
+        assert!((budget.spent_usd() - expected).abs() < 1e-12);
+        assert!(budget.record("no-such-model-xyz", &usage).is_err());
+    }
+
+    #[test]
+    fn cost_budget_rejects_invalid_limits() {
+        for limit in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(CostBudget::new(limit).is_err(), "{limit}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cost_budget_refuses_unpriced_model_instead_of_running_uncapped() {
+        let budget = test_budget(10.0);
+        let provider =
+            ScriptedProvider::new(vec![priced_tool_script(1_000, 0), text_script(&["done"])]);
+        let agent = Agent::new(provider, ToolRegistry::with_builtins(), "mystery-model", "")
+            .with_cost_budget(budget);
+        let err = collect_agent_turn(agent.run_turn("go".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cost budget"), "{err}");
+    }
 
     #[tokio::test]
     async fn max_iterations_short_circuits_runaway_loops() {
