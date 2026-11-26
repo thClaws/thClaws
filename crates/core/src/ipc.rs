@@ -2637,7 +2637,11 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let dispatch = ctx.dispatch.clone();
             tokio::spawn(async move {
                 let body = match crate::aiserver::suite_request(&spec, &root).await {
-                    Ok(r) => serde_json::json!({ "result": r }),
+                    Ok(mut r) => {
+                        // Media Studio lists cloud models only where they can run.
+                        r["cloudMedia"] = (!crate::media::registry::local_only()).into();
+                        serde_json::json!({ "result": r })
+                    }
                     Err(e) => serde_json::json!({ "error": e }),
                 };
                 dispatch(shell_reply(request_id, body));
@@ -3107,8 +3111,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         .enable_all()
                         .build()
                         .map_err(|e| format!("tokio runtime build: {e}"))?;
+                    // Media made by the box's own models costs nothing per
+                    // call, so Media Studio does not ask before each one.
+                    let free_local = shell_id == "media-studio"
+                        && crate::media::registry::runs_on_suite(&tool_name, &args);
                     rt.block_on(scope.run(async {
-                        if tool.requires_approval(&args) {
+                        if tool.requires_approval(&args) && !free_local {
                             let decision = if prefer_inline {
                                 // Inline path: dispatch an approval_request
                                 // event to the shell + await its widget's
@@ -6230,7 +6238,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         // tools (`imageToolsEnabled` / `mediaToolsEnabled`). Off by default,
         // forced on where the organisation pays (config.rs).
         "media_tools_enabled_get" => {
-            let forced = crate::shared::org_billed();
+            let forced = crate::shared::org_billed() || crate::aiserver::on_box();
             let enabled = forced
                 || crate::config::ProjectConfig::load()
                     .and_then(|c| c.image_tools_enabled)

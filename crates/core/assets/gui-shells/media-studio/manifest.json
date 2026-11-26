@@ -1,7 +1,7 @@
 {
   "id": "media-studio",
   "name": "Media Studio",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Generate images, video and speech across providers (Gemini, OpenAI gpt-image-2, Qwen, Veo, LTX 2.3/2.5, DashScope) from one surface. Pick a mode, model and parameters; renders queue in the background with live progress and survive a reload, and everything under output/ lands in a filterable gallery with a lightbox and inline playback. Drives the built-in TextToImage / ImageToImage / TextToVideo / ImageToVideo / TextToSpeech tools directly.",
   "entry": "index.html",
   "icon": "icon.svg",
@@ -14,6 +14,7 @@
     "tools.invoke:TextToSpeech",
     "tools.invoke:MediaJobStatus",
     "tools.invoke:Glob",
+    "aiserver.use",
     "llm.complete",
     "fs.shell-scoped"
   ]

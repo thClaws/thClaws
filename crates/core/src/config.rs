@@ -3034,6 +3034,11 @@ impl AppConfig {
         if crate::shared::org_billed() {
             config.image_tools_enabled = true;
         }
+        // On an AI Server box media is made by the box's own models, so the
+        // tools are there in chat as they are in Media Studio.
+        if crate::aiserver::on_box() {
+            config.image_tools_enabled = true;
+        }
 
         if config.model != Self::default().model {
             model_explicit = true;

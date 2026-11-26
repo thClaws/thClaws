@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.158.0] — 2026-11-27
+
+A release for people who run thClaws on an AIServer Suite: image, video and speech now use the box's own models, in chat and in Media Studio.
+
+### Added
+
+- **Media on the AIServer Suite's own models.** On the box, image generation uses Z-Image Turbo and Qwen-Image 2.1, image to image goes to the Suite's compose and refine, video uses its LTX model, and speech uses its voices. Nothing needs setting up: thClaws finds the Suite and makes the local models the default. With the box's cloud switch off, only the local models are offered. A Suite set in Settings on another machine adds its models to the list without changing the default.
+- **Media Studio lists what the Suite offers.** Local models come first, marked "(ในเครื่อง)", and the speech voice list shows the box's voices. A Generate that runs on the box's own models no longer asks for approval.
+- **Pick a picture from the Media Studio gallery to edit or animate.** Right-click an image, use the ⋯ button on it, or open it and press Edit or To video; the mode switches and the source is filled in.
+- **The media tools are on in chat on an AIServer box** without a setting.
+- **New models in the catalogue**, among them `gpt-6.2-sol-healthcare`, `gpt-6.2-astra-healthcare`, `solar-mini-4-5` and `mimo-v2.6-flash-mopd`.
+
+### Fixed
+
+- **A generated picture shows in the chat.** The image tool now hands the model the line that displays it; a small local model used to answer "here it is" with nothing to see.
+
 ## [0.157.0] — 2026-11-24
 
 A release for people who run an AIServer Suite: its nine capabilities get a built-in shell, and the chat composer gains a voice mode.

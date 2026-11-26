@@ -149,6 +149,17 @@ pub fn local_ai() -> bool {
             .unwrap_or(false)
 }
 
+/// Set by the process that found the box, for the agent processes it starts:
+/// those are handed `LITELLM_BASE_URL` and so never probe themselves.
+const BOX_ENV: &str = "THCLAWS_AISERVER_BOX";
+
+/// On an AI Server box itself: this process found it, or the one that
+/// started it did. A Suite set in Settings is not the box, whatever its
+/// address (a tunnel to `127.0.0.1` included).
+pub fn on_box() -> bool {
+    cached().is_some() || std::env::var(BOX_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
 /// `base` off the box; `base` plus [`WEB_ONLY_WHEN_ASKED`] on it.
 pub fn web_tool_description(base: &'static str, cell: &'static OnceLock<String>) -> &'static str {
     if !local_ai() {
@@ -213,6 +224,7 @@ pub fn apply_to_env(d: &Discovery) -> bool {
     if std::env::var("THCLAWS_AISERVER_API").is_err() {
         std::env::set_var("THCLAWS_AISERVER_API", "http://127.0.0.1:8100");
     }
+    std::env::set_var(BOX_ENV, "1");
     if std::env::var("THCLAWS_AISERVER_MODEL").is_err() {
         std::env::set_var("THCLAWS_AISERVER_MODEL", d.model_id());
     }
@@ -938,6 +950,7 @@ fn suite_error(r: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

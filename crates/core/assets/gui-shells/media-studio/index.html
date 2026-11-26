@@ -37,7 +37,7 @@
           <span class="label">Source image</span>
           <input id="input-path" type="text" autocomplete="off"
                  placeholder="output/img-….png — or click an image below" />
-          <span class="sub">Click any image in the gallery to use it as the source.</span>
+          <span class="sub">Click any image in the gallery to use it as the source, or right-click one and pick Edit or Make a video.</span>
         </label>
 
         <div class="field">
@@ -206,6 +206,8 @@
       <div class="lightbox-bar">
         <button class="ghost-btn" id="toggle-prompt" type="button">Show prompt</button>
         <span class="lightbox-meta" id="lightbox-meta"></span>
+        <button class="ghost-btn" id="lightbox-edit" type="button" title="Use this image as the source for Image → Image">Edit</button>
+        <button class="ghost-btn" id="lightbox-to-video" type="button" title="Use this image as the first frame for Image → Video">To video</button>
         <button class="ghost-btn" id="copy-path" title="Copy the workspace path">Copy path</button>
       </div>
       <div class="lightbox-caption" id="lightbox-caption" hidden></div>

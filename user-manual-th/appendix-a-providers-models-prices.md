@@ -37,7 +37,7 @@ DB เก็บเป็น microcent ต่อ 1k token (`µ¢/kt`) สูต�
 
 context ที่มี **`?`** คือค่าที่ provider ไม่เคยประกาศ — เป็นค่า default ของ provider นั้นที่ใส่ไว้เพราะถ้าเว้นว่างจะทำให้ตัวเลือกโมเดลพัง ให้ถือเป็นขอบล่าง ไม่ใช่สเปกจริง
 
-622 โมเดล จาก 14 provider
+623 โมเดล จาก 14 provider
 
 ### Anthropic
 
@@ -126,12 +126,16 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `gpt-5.6-sol` | 1.05M | $5.00 | — | $25.00 |
 | `gpt-5.6-terra` | 1.05M | $2.50 | — | $15.00 |
 | `gpt-6-astra` | 922k | $12.50 | — | $62.50 |
+| `gpt-6-astra-healthcare` | 922k | $12.50 | — | $62.50 |
 | `gpt-6-luna` | 922k | $0.12 | — | $0.62 |
 | `gpt-6-sol` | 922k | $2.50 | — | $12.50 |
 | `gpt-6.1-sol` | 922k | $2.50 | — | $12.50 |
+| `gpt-6.1-sol-healthcare` | 922k | $2.50 | — | $12.50 |
 | `gpt-6.1-terra` | 922k | $1.25 | — | $6.25 |
 | `gpt-6.2-astra` | 922k | $10.00 | — | $50.00 |
+| `gpt-6.2-astra-healthcare` | 922k | $10.00 | — | $50.00 |
 | `gpt-6.2-sol` | 922k | $2.50 | — | $12.50 |
+| `gpt-6.2-sol-healthcare` | 922k | $2.50 | — | $12.50 |
 | `o1` | 200k | $18.75 | $9.38 | $75.00 |
 | `o1-2024-12-17` | 200k | $18.75 | $9.38 | $75.00 |
 | `o1-mini` | 128k | $1.38 | — | $5.50 |
@@ -251,13 +255,12 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `deepseek/deepseek-v3.2` | 131k | $0.33 | — | $0.47 |
 | `deepseek/deepseek-v3.2-exp` | 164k | $0.34 | — | $0.51 |
 | `deepseek/deepseek-v4-flash` | 1.04858M | $0.11 | — | $0.22 |
-| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.06 | — | $0.38 |
-| `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.27 | — | $0.81 |
-| `deepseek/deepseek-v4-pro` | 1.04858M | $1.60 | — | $3.20 |
+| `deepseek/deepseek-v4-flash-0731` | 1.04858M | $0.07 | — | $0.22 |
+| `deepseek/deepseek-v4-flash-vision-exp` | 1.04858M | $0.55 | — | $1.65 |
+| `deepseek/deepseek-v4-pro` | 1.04858M | $1.11 | — | $1.89 |
 | `deepseek/deepseek-v4-pro-0813` | 1.04858M | $0.14 | — | $5.55 |
-| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.06 | — | $0.25 |
-| `deepseek/deepseek-v4.1-flash-1017` | 1.04858M | $0.04 | — | $0.25 |
-| `dots-studio/dots-3-note-preview:free` | 512k | free | — | free |
+| `deepseek/deepseek-v4.1-flash` | 1.04858M | $0.18 | — | $0.53 |
+| `deepseek/deepseek-v4.1-flash-1017` | 1.04858M | $0.19 | — | $0.75 |
 | `elorian/glimpse` | 262k | $0.75 | — | $3.75 |
 | `fireworks/ember-1` | 1.04858M | $3.75 | — | $18.75 |
 | `google/gemini-2.5-flash` | 1.04858M | $0.38 | — | $3.12 |
@@ -286,7 +289,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `google/gemini-omni-1.2-flash` | 131k | $1.88 | — | $11.25 |
 | `google/gemma-2-27b-it` | 8k | $0.81 | — | $0.81 |
 | `google/gemma-3-12b-it` | 131k | $0.06 | — | $0.19 |
-| `google/gemma-3-27b-it` | 131k | $0.10 | — | $0.20 |
+| `google/gemma-3-27b-it` | 131k | $0.10 | — | $0.56 |
 | `google/gemma-3-4b-it` | 131k | $0.05 | — | $0.06 |
 | `google/gemma-4-26b-a4b-it` | 262k | $0.11 | — | $0.38 |
 | `google/gemma-4-26b-a4b-it:free` | 262k | free | — | free |
@@ -323,10 +326,10 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `meta/muse-spark-open` | 1.04858M | $1.56 | — | $5.31 |
 | `meta/muse-wonder` | 1.04858M | $5.00 | — | $25.00 |
 | `microsoft/phi-4` | 16k | $0.09 | — | $0.18 |
-| `minimax/minimax-m2.5` | 197k | $0.34 | $0.19 | $1.19 |
+| `minimax/minimax-m2.5` | 197k | $0.38 | $0.19 | $1.50 |
 | `minimax/minimax-m2.7` | 197k | $0.75 | — | $2.25 |
 | `minimax/minimax-m3` | 1.04858M | $0.29 | — | $1.20 |
-| `minimax/minimax-m3.1-flash` | 1.04858M | $0.12 | — | $0.50 |
+| `minimax/minimax-m3.1-flash` | 1.04858M | $0.09 | — | $0.38 |
 | `mistralai/codestral-2508` | 256k | $0.38 | — | $1.12 |
 | `mistralai/devstral-2512` | 262k | $0.50 | — | $2.50 |
 | `mistralai/ministral-14b-2512` | 262k | $0.25 | — | $0.25 |
@@ -336,9 +339,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `mistralai/mistral-large-2407` | 131k | $2.50 | — | $7.50 |
 | `mistralai/mistral-large-2512` | 262k | $0.62 | — | $1.88 |
 | `mistralai/mistral-large-4-0` | 1.04858M | $0.88 | — | $2.62 |
-| `mistralai/mistral-medium-3` | 131k | $0.55 | — | $2.75 |
 | `mistralai/mistral-medium-3-5` | 262k | $1.88 | — | $9.38 |
-| `mistralai/mistral-medium-3.1` | 131k | $0.55 | — | $2.75 |
 | `mistralai/mistral-nemo` | 131k | $0.04 | — | $0.04 |
 | `mistralai/mistral-saba` | 33k | $0.25 | — | $0.75 |
 | `mistralai/mistral-small-24b-instruct-2501` | 33k | $0.06 | — | $0.10 |
@@ -368,7 +369,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `nvidia/nemotron-3-ultra-550b-a55b` | 1M | $0.62 | — | $2.75 |
 | `nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | free | — | free |
 | `nvidia/nemotron-3.5-content-safety` | 131k | $0.25 | — | $0.25 |
-| `nvidia/nemotron-3.5-lightning` | 262k | $0.06 | — | $0.25 |
+| `nvidia/nemotron-3.5-lightning` | 262k | $0.09 | — | $0.25 |
 | `nvidia/nemotron-3.5-lightning:free` | 1M | free | — | free |
 | `nvidia/nemotron-3.5-super-vl` | 1.04858M | $0.19 | — | $0.59 |
 | `nvidia/nemotron-3.5-super-vl:free` | 1M | free | — | free |
@@ -461,20 +462,20 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen3.5-122b-a10b` | 262k | $0.33 | — | $2.60 |
 | `qwen/qwen3.5-27b` | 262k | $0.33 | — | $3.25 |
 | `qwen/qwen3.5-35b-a3b` | 262k | $0.18 | — | $1.25 |
-| `qwen/qwen3.5-397b-a17b` | 262k | $0.56 | — | $3.75 |
-| `qwen/qwen3.5-9b` | 262k | $0.21 | — | $0.31 |
+| `qwen/qwen3.5-397b-a17b` | 262k | $0.62 | — | $4.50 |
+| `qwen/qwen3.5-9b` | 262k | $0.12 | — | $0.31 |
 | `qwen/qwen3.5-flash-02-23` | 1M | $0.08 | — | $0.33 |
 | `qwen/qwen3.5-plus-02-15` | 1M | $0.33 | — | $1.95 |
 | `qwen/qwen3.5-plus-20260420` | 1M | $0.38 | — | $2.25 |
 | `qwen/qwen3.6-27b` | 262k | $0.40 | — | $4.00 |
-| `qwen/qwen3.6-35b-a3b` | 262k | $0.06 | — | $0.88 |
+| `qwen/qwen3.6-35b-a3b` | 262k | $0.12 | — | $1.11 |
 | `qwen/qwen3.6-flash` | 1M | $0.23 | — | $1.41 |
 | `qwen/qwen3.6-plus` | 1M | $0.41 | — | $2.44 |
 | `qwen/qwen3.7-flash` | 1M | $0.04 | — | $0.16 |
 | `qwen/qwen3.7-max` | 1M | $1.84 | — | $5.53 |
 | `qwen/qwen3.7-plus` | 1M | $0.40 | — | $1.60 |
 | `qwen/qwen3.8-2.4t-a95b` | 1.04858M | $2.50 | — | $7.50 |
-| `qwen/qwen3.8-27b` | 1M | $0.04 | — | $1.88 |
+| `qwen/qwen3.8-27b` | 1M | $0.07 | — | $2.45 |
 | `qwen/qwen3.8-flash` | 1M | $0.19 | — | $0.59 |
 | `qwen/qwen3.8-max-0902` | 1M | $2.50 | — | $7.50 |
 | `qwen/qwen3.8-max-prime` | 1M | $5.00 | — | $15.00 |
@@ -482,7 +483,7 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `qwen/qwen4-max` | 1M | $1.78 | — | $5.34 |
 | `radixark/daisyrose-27b` | 262k | $0.19 | — | $2.34 |
 | `recursive/flint-v1.0:free` | 262k | free | — | free |
-| `reflection/beam-1.0-501b-a23b` | 1.04858M | $0.31 | — | $1.25 |
+| `reflection/beam-1.0-501b-a23b` | 1.04858M | $0.38 | — | $1.25 |
 | `rekaai/reka-edge` | 16k | $0.12 | — | $0.12 |
 | `rekaai/reka-flash-3` | 66k | $0.12 | — | $0.25 |
 | `relace/relace-apply-3` | 256k | $1.06 | — | $1.56 |
@@ -512,11 +513,11 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `thinkingmachines/inkling-2-mini` | 1.04858M | $0.09 | — | $0.38 |
 | `thinkingmachines/inkling-2-small` | 1.04858M | $0.38 | — | $1.25 |
 | `thinkingmachines/inkling-small` | 524k | $0.56 | — | $1.50 |
-| `unbiased/pareto-26.10` | 1.04858M | $1.00 | — | $4.00 |
-| `unbiased/pareto-26.10-preview` | 1.04858M | $1.00 | — | $4.00 |
-| `unbiased/pareto-26.9` | 262k | $3.12 | — | $9.38 |
+| `tngtech/deepseek-r1t2-chimera` | 131k | $1.25 | — | $3.28 |
 | `undi95/remm-slerp-l2-13b` | 6k | $0.38 | — | $0.62 |
+| `upstage/solar-mini-4-5` | 524k | $0.01 | — | $0.05 |
 | `upstage/solar-mini4` | 524k | $0.06 | — | $0.25 |
+| `upstage/solar-pro-4-contributor` | 524k | $0.11 | — | $0.45 |
 | `upstage/solar-pro4` | 524k | $0.19 | — | $0.75 |
 | `writer/palmyra-x5` | 1.04M | $0.75 | — | $7.50 |
 | `x-ai/grok-4.20` | 2M | $1.56 | — | $3.12 |
@@ -525,12 +526,12 @@ context ที่มี **`?`** คือค่าที่ provider ไม่�
 | `x-ai/grok-4.5` | 500k | $2.50 | — | $7.50 |
 | `x-ai/grok-4.6` | 500k | $2.50 | — | $7.50 |
 | `x-ai/grok-4.7` | 500k | $2.50 | — | $7.50 |
-| `xiaomi/mimo-v2.5` | 1.04858M | $0.50 | $0.10 | $2.50 |
 | `xiaomi/mimo-v2.6-flash` | 1.04858M | $0.18 | — | $0.35 |
+| `xiaomi/mimo-v2.6-flash-mopd` | 1.04858M | $0.62 | — | $1.25 |
 | `xiaomi/mimo-v2.6-pro` | 1.04858M | $0.54 | — | $1.09 |
 | `xiaomi/mimo-v2.6-pro-ultraspeed` | 1.04858M | $5.44 | — | $10.88 |
 | `z-ai/glm-4.5` | 131k | $0.75 | — | $2.75 |
-| `z-ai/glm-4.5-air` | 131k | $0.16 | — | $1.06 |
+| `z-ai/glm-4.5-air` | 131k | $0.25 | — | $1.38 |
 | `z-ai/glm-4.5v` | 66k | $0.75 | — | $2.25 |
 | `z-ai/glm-4.6` | 205k | $0.62 | — | $2.50 |
 | `z-ai/glm-4.6v` | 131k | $0.38 | — | $1.12 |

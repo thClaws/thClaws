@@ -74,14 +74,19 @@ fn opt(input: &Value, key: &str) -> String {
 /// `Read` the returned path with a vision-capable model.
 fn build_image_result(bytes: &[u8], path: &std::path::Path) -> ToolResultContent {
     let d = Sha256::digest(bytes);
+    // The chat shows a picture only where the reply carries it as markdown.
+    // A strong model writes that line unasked; a small local one answers
+    // "here it is" with nothing to see, so the result hands it the line.
     ToolResultContent::Text(format!(
-        "Wrote {} ({} bytes, sha256-4={:02x}{:02x}{:02x}{:02x})",
-        path.display(),
+        "Wrote {p} ({} bytes, sha256-4={:02x}{:02x}{:02x}{:02x})\n\
+         The user cannot see it until your reply contains this line, copied exactly:\n\
+         ![image]({p})",
         bytes.len(),
         d[0],
         d[1],
         d[2],
         d[3],
+        p = path.display(),
     ))
 }
 
@@ -105,7 +110,14 @@ fn model_desc() -> String {
     }
 }
 const PROVIDER_DESC: &str = "Optional explicit provider (`gemini` | `openai` | `qwen` \
-| `iapp`). Usually omit — it's inferred from `model`.";
+| `iapp`; `aiserver` where an AI Server box's own models are reachable). Usually omit — \
+it's inferred from `model`.";
+
+/// The provider ids this install can name: the registry's, so a box with its
+/// cloud switch off offers only `aiserver` and a plain desktop never sees it.
+fn provider_ids() -> Vec<&'static str> {
+    registry::all().iter().map(|p| p.id()).collect()
+}
 
 /// Schema fragment for the iApp-only text overlay. Shared by both tools
 /// so the font list can't drift between them; the enum comes straight
@@ -161,7 +173,7 @@ impl Tool for TextToImageTool {
                     "description": "Description of the image. Be specific about subject, style, composition, colors. A 2–3 sentence brief beats a one-word tag."
                 },
                 "model": { "type": "string", "description": model_desc() },
-                "provider": { "type": "string", "description": PROVIDER_DESC, "enum": ["gemini", "openai", "qwen", "iapp"] },
+                "provider": { "type": "string", "description": PROVIDER_DESC, "enum": provider_ids() },
                 "aspect_ratio": {
                     "type": "string",
                     "description": "Output aspect ratio. Default 16:9.",
@@ -250,7 +262,7 @@ impl Tool for ImageToImageTool {
                     "description": "What to change. Be explicit about what should STAY the same — vague prompts produce drift."
                 },
                 "model": { "type": "string", "description": model_desc() },
-                "provider": { "type": "string", "description": PROVIDER_DESC, "enum": ["gemini", "openai", "qwen", "iapp"] },
+                "provider": { "type": "string", "description": PROVIDER_DESC, "enum": provider_ids() },
                 "aspect_ratio": { "type": "string", "enum": ["1:1", "3:4", "4:3", "9:16", "16:9"] },
                 "size": { "type": "string", "enum": ["512", "1K", "2K"] },
                 "text": text,

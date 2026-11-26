@@ -276,3 +276,22 @@ input.search { width: 220px; flex: 0 0 auto; }
   .search { width: 140px; }
   .gallery { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 }
+
+/* Image card actions: the ⋯ button and the menu it (or a right-click) opens. */
+.card-more {
+  position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; padding: 0;
+  border: 0; border-radius: 6px; background: rgba(0, 0, 0, .55); color: #fff;
+  font-size: 16px; line-height: 26px; cursor: pointer; opacity: 0; transition: opacity .12s; z-index: 2;
+}
+.card:hover .card-more, .card-more:focus-visible { opacity: 1; }
+@media (hover: none) { .card-more { opacity: 1; } }
+.card-menu {
+  position: fixed; z-index: 70; min-width: 180px; padding: 4px;
+  background: var(--bg-side); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+}
+.card-menu button {
+  display: block; width: 100%; padding: 7px 10px; border: 0; border-radius: 5px;
+  background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.card-menu button:hover { background: var(--accent); color: #fff; }

@@ -8,8 +8,9 @@
 use crate::error::{Error, Result};
 use crate::media::provider::{ImageModelInfo, ImageProvider, SpeechProvider, VideoProvider};
 use crate::media::providers::{
-    DashScopeSpeechProvider, DashScopeVideoProvider, GeminiImageProvider, GeminiSpeechProvider,
-    IappImageProvider, LtxVideoProvider, OmniVideoProvider, OpenAiImageProvider, QwenImageProvider,
+    AiServerImageProvider, AiServerSpeechProvider, AiServerVideoProvider, DashScopeSpeechProvider,
+    DashScopeVideoProvider, GeminiImageProvider, GeminiSpeechProvider, IappImageProvider,
+    LtxVideoProvider, OmniVideoProvider, OpenAiImageProvider, QwenImageProvider,
 };
 use std::sync::Arc;
 
@@ -20,12 +21,46 @@ pub fn all() -> Vec<Arc<dyn ImageProvider>> {
 }
 
 fn registered() -> Vec<Arc<dyn ImageProvider>> {
-    vec![
+    let cloud: Vec<Arc<dyn ImageProvider>> = vec![
         Arc::new(GeminiImageProvider),
         Arc::new(OpenAiImageProvider),
         Arc::new(QwenImageProvider),
         Arc::new(IappImageProvider),
-    ]
+    ];
+    with_suite(Arc::new(AiServerImageProvider), cloud)
+}
+
+/// Where an AIServer Suite is reachable its provider leads; on a box whose
+/// cloud switch is off it is the only one.
+fn with_suite<P: ?Sized>(suite: Arc<P>, cloud: Vec<Arc<P>>) -> Vec<Arc<P>> {
+    if !crate::aiserver::suite_reachable() {
+        return cloud;
+    }
+    let mut out = vec![suite];
+    if !local_only() {
+        out.extend(cloud);
+    }
+    out
+}
+
+/// Whether this media tool call would be served by the AIServer Suite: the
+/// box's own models, which cost nothing per call. Media Studio skips the
+/// approval prompt for these (owner decision, 2026-11-26).
+pub fn runs_on_suite(tool: &str, args: &serde_json::Value) -> bool {
+    let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let (provider, model) = (arg("provider"), arg("model"));
+    let id = match tool {
+        "TextToImage" | "ImageToImage" => resolve(provider, model).ok().map(|(p, _)| p.id()),
+        "TextToVideo" | "ImageToVideo" => resolve_video(provider, model).ok().map(|(p, _)| p.id()),
+        "TextToSpeech" => resolve_speech(provider, model).ok().map(|(p, _)| p.id()),
+        _ => None,
+    };
+    id == Some(crate::media::providers::aiserver::ID)
+}
+
+/// On an AIServer box with its cloud switch off: media stays on the box.
+pub fn local_only() -> bool {
+    crate::aiserver::on_box() && !crate::providers::thclaws_gateway::cloud_mode().0
 }
 
 /// Video providers this install can reach, in resolution priority order.
@@ -38,7 +73,7 @@ pub fn video_all() -> Vec<Arc<dyn VideoProvider>> {
 /// schemas append it so the model never picks one it can't reach (SIS asked
 /// for ltx-2-5-pro off the static description and failed, 2026-10-22).
 pub fn reachable_image_models() -> Option<String> {
-    crate::shared::gateway_providers_locked().then(|| {
+    (crate::shared::gateway_providers_locked() || crate::aiserver::suite_reachable()).then(|| {
         all()
             .iter()
             .flat_map(|p| p.models().iter().map(|m| m.id))
@@ -48,7 +83,7 @@ pub fn reachable_image_models() -> Option<String> {
 }
 
 pub fn reachable_video_models() -> Option<String> {
-    crate::shared::gateway_providers_locked().then(|| {
+    (crate::shared::gateway_providers_locked() || crate::aiserver::suite_reachable()).then(|| {
         video_all()
             .iter()
             .flat_map(|p| p.models().iter().map(|m| m.id))
@@ -58,11 +93,12 @@ pub fn reachable_video_models() -> Option<String> {
 }
 
 fn video_registered() -> Vec<Arc<dyn VideoProvider>> {
-    vec![
+    let cloud: Vec<Arc<dyn VideoProvider>> = vec![
         Arc::new(OmniVideoProvider),
         Arc::new(LtxVideoProvider),
         Arc::new(DashScopeVideoProvider),
-    ]
+    ];
+    with_suite(Arc::new(AiServerVideoProvider), cloud)
 }
 
 fn reachable<P: ?Sized + HasId>(ps: Vec<Arc<P>>) -> Vec<Arc<P>> {
@@ -106,7 +142,10 @@ pub(crate) fn locked_reachable(id: &str, locked: bool, routed: &[String]) -> boo
 }
 
 fn reachable_under(id: &str, locked: bool, routed: &[String]) -> bool {
-    !locked || media_segment(id, locked, routed).is_some_and(|s| routed.iter().any(|r| r == s))
+    // The Suite's provider is only registered where a Suite is reachable.
+    id == crate::media::providers::aiserver::ID
+        || !locked
+        || media_segment(id, locked, routed).is_some_and(|s| routed.iter().any(|r| r == s))
 }
 
 /// The error for an explicit provider that exists but this install can't reach.
@@ -129,10 +168,11 @@ pub fn speech_all() -> Vec<Arc<dyn SpeechProvider>> {
 }
 
 fn speech_registered() -> Vec<Arc<dyn SpeechProvider>> {
-    vec![
+    let cloud: Vec<Arc<dyn SpeechProvider>> = vec![
         Arc::new(GeminiSpeechProvider),
         Arc::new(DashScopeSpeechProvider),
-    ]
+    ];
+    with_suite(Arc::new(AiServerSpeechProvider), cloud)
 }
 
 /// Resolve a speech `provider`/`model` pair to a concrete provider + its
@@ -424,6 +464,83 @@ pub fn list_models() -> Vec<(&'static str, ImageModelInfo)> {
 
 #[cfg(test)]
 mod tests {
+    /// Off an AI Server box nothing of the Suite's shows: no provider, no
+    /// local default, no forced media tools, no approval skip.
+    #[test]
+    fn off_the_box_the_registries_are_as_before() {
+        let _guard = crate::kms::test_env_lock();
+        let saved: Vec<_> = [
+            "THCLAWS_AISERVER_API",
+            "THCLAWS_AISERVER_BOX",
+            "THCLAWS_LOCAL_AI",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
+        for (k, _) in &saved {
+            std::env::remove_var(k);
+        }
+        if crate::aiserver::cached().is_none() {
+            assert!(!crate::aiserver::on_box());
+            assert!(!local_only());
+            let ids: Vec<_> = registered().iter().map(|p| p.id()).collect();
+            assert_eq!(ids, ["gemini", "openai", "qwen", "iapp"]);
+            let v: Vec<_> = video_registered().iter().map(|p| p.id()).collect();
+            assert_eq!(v, ["omni", "ltx", "dashscope"]);
+            let sp: Vec<_> = speech_registered().iter().map(|p| p.id()).collect();
+            assert_eq!(sp, ["gemini", "dashscope"]);
+            assert!(!runs_on_suite("TextToImage", &serde_json::json!({})));
+            assert!(!runs_on_suite(
+                "TextToImage",
+                &serde_json::json!({ "model": "z" })
+            ));
+        }
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    /// A Suite set in Settings (another machine) adds its provider but is
+    /// not the box: the default stays the cloud one, the cloud switch does
+    /// not apply.
+    #[test]
+    fn a_remote_suite_adds_a_provider_but_keeps_the_cloud_default() {
+        let _guard = crate::kms::test_env_lock();
+        let saved: Vec<_> = [
+            "THCLAWS_AISERVER_API",
+            "THCLAWS_AISERVER_BOX",
+            "THCLAWS_LOCAL_AI",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
+        std::env::remove_var("THCLAWS_AISERVER_BOX");
+        std::env::remove_var("THCLAWS_LOCAL_AI");
+        std::env::set_var("THCLAWS_AISERVER_API", "http://10.0.0.5:8100");
+        if crate::aiserver::cached().is_none() {
+            assert!(!crate::aiserver::on_box());
+            let ids: Vec<_> = registered().iter().map(|p| p.id()).collect();
+            assert_eq!(ids, ["aiserver", "gemini", "openai", "qwen", "iapp"]);
+            let (p, _) = resolve_in(registered(), "", "").unwrap();
+            assert_eq!(
+                p.id(),
+                "gemini",
+                "an empty model still means the cloud default"
+            );
+            let (p, m) = resolve_in(registered(), "", "z").unwrap();
+            assert_eq!((p.id(), m.as_str()), ("aiserver", "z"));
+        }
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
     use super::*;
 
     fn routed(v: &[&str]) -> Vec<String> {

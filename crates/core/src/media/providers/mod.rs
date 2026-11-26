@@ -1,5 +1,6 @@
 //! Concrete `ImageProvider` implementations (dev-plan/40, Tier 1).
 
+pub mod aiserver;
 pub mod dashscope_tts;
 pub mod dashscope_video;
 pub mod gemini;
@@ -9,6 +10,7 @@ pub mod omni;
 pub mod openai;
 pub mod qwen;
 
+pub use aiserver::{AiServerImageProvider, AiServerSpeechProvider, AiServerVideoProvider};
 pub use dashscope_tts::DashScopeSpeechProvider;
 pub use dashscope_video::DashScopeVideoProvider;
 pub use gemini::{GeminiImageProvider, GeminiSpeechProvider};

@@ -229,6 +229,7 @@ function applyMode() {
     modelSel.appendChild(o);
   }
 
+  applyVoices();
   inputPathField.hidden = !needsInput();
   imageParams.hidden = isSpeech();
   speechParams.hidden = !isSpeech();
@@ -369,6 +370,25 @@ function makeCard(item, index) {
   cap.title = item.path;
   card.appendChild(cap);
 
+  if (item.type === "image") {
+    // Right-click, or the ⋯ button for touch and for finding it at all.
+    card.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      openCardMenu(item, index, e.clientX, e.clientY);
+    });
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "card-more";
+    more.textContent = "⋯";
+    more.title = "Edit this image, or make a video from it";
+    more.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const r = more.getBoundingClientRect();
+      openCardMenu(item, index, r.left, r.bottom + 4);
+    });
+    card.appendChild(more);
+  }
+
   card.addEventListener("click", () => {
     // In a mode that needs a source frame, clicking an image picks it;
     // everything else opens the lightbox.
@@ -381,6 +401,61 @@ function makeCard(item, index) {
   });
   return card;
 }
+
+// ── image as a source ────────────────────────────────────────────────
+// Typing a path into "Source image" was the only way in; these switch the
+// mode and fill it from a picture the user is already looking at.
+function useAsSource(item, targetMode) {
+  closeCardMenu();
+  if (!lightbox.hidden) closeLightbox();
+  mode = targetMode;
+  applyMode();
+  inputPath.value = item.path;
+  setStatus(
+    `${targetMode === "image2video" ? "Video from" : "Editing"} ${basename(item.path)} — describe what you want, then Generate.`,
+    "ok",
+  );
+  promptEl.focus();
+}
+
+let cardMenu = null;
+
+function closeCardMenu() {
+  if (cardMenu) cardMenu.remove();
+  cardMenu = null;
+}
+
+function openCardMenu(item, index, x, y) {
+  closeCardMenu();
+  const menu = document.createElement("div");
+  menu.className = "card-menu";
+  const add = (label, run) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeCardMenu();
+      run();
+    });
+    menu.appendChild(b);
+  };
+  add("Edit this image", () => useAsSource(item, "image2image"));
+  add("Make a video from it", () => useAsSource(item, "image2video"));
+  add("Open", () => openLightbox(index));
+  document.body.appendChild(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - r.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - r.height - 4))}px`;
+  cardMenu = menu;
+}
+
+document.addEventListener("click", closeCardMenu);
+document.addEventListener("scroll", closeCardMenu, true);
+window.addEventListener("resize", closeCardMenu);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeCardMenu();
+});
 
 function recordMeta(path, info) {
   meta[basename(path)] = info;
@@ -505,6 +580,8 @@ const lightbox = $("lightbox");
 const lightboxBody = $("lightbox-body");
 const lightboxCaption = $("lightbox-caption");
 const lightboxMeta = $("lightbox-meta");
+const lightboxEdit = $("lightbox-edit");
+const lightboxToVideo = $("lightbox-to-video");
 const togglePromptBtn = $("toggle-prompt");
 
 // Hidden by default: the prompt used to sit over the media, where it
@@ -544,6 +621,7 @@ function openLightbox(index) {
 
   // The one-line identity sits in the bar; the prompt — which can run to
   // a paragraph after an enhance — gets the panel.
+  lightboxEdit.hidden = lightboxToVideo.hidden = item.type !== "image";
   lightboxMeta.textContent = [item.model, item.path].filter(Boolean).join(" · ");
   lightboxMeta.title = item.path;
   lightboxCaption.textContent = item.prompt || "";
@@ -569,6 +647,14 @@ togglePromptBtn.addEventListener("click", (e) => {
   paintPromptToggle(Boolean(lightboxCaption.textContent));
 });
 $("lightbox-close").addEventListener("click", closeLightbox);
+lightboxEdit.addEventListener("click", () => {
+  const item = visibleItems()[lightboxIndex];
+  if (item) useAsSource(item, "image2image");
+});
+lightboxToVideo.addEventListener("click", () => {
+  const item = visibleItems()[lightboxIndex];
+  if (item) useAsSource(item, "image2video");
+});
 $("lightbox-prev").addEventListener("click", (e) => {
   e.stopPropagation();
   stepLightbox(-1);
@@ -814,6 +900,7 @@ searchEl.addEventListener("input", () => {
 modelSel.addEventListener("change", () => {
   applyLtxOnlyFields();
   applyIappOnlyFields();
+  applyVoices();
 });
 generateBtn.addEventListener("click", generate);
 enhanceBtn.addEventListener("click", enhancePrompt);
@@ -853,8 +940,98 @@ setInterval(() => {
   if (jobs.length) renderJobs();
 }, 1000);
 
+// ── local models (AIServer Suite) ────────────────────────────────────
+// Where thClaws reaches a Suite, its image and video models lead each list
+// and are the default. On a box whose cloud switch is off they are the whole
+// list. Without a Suite the request is refused and the lists stay as written.
+const LOCAL_LABELS = {
+  z: "Z-Image Turbo",
+  "qwen21-turbo": "Qwen-Image 2.1 Turbo",
+  qwen21: "Qwen-Image 2.1",
+  "video-default": "LTX",
+};
+
+// The voice list follows the speech model: the box's own voices for the
+// local model, the page's built-in (Gemini) names for a cloud one.
+const CLOUD_VOICES = voiceSel.innerHTML;
+let localVoices = [];
+let voicesAreLocal = false;
+
+function applyVoices() {
+  const local = isSpeech() && modelSel.value === "tts-default" && localVoices.length > 0;
+  if (local === voicesAreLocal) return;
+  voicesAreLocal = local;
+  if (!local) {
+    voiceSel.innerHTML = CLOUD_VOICES;
+    return;
+  }
+  voiceSel.innerHTML = "";
+  for (const v of localVoices) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v;
+    voiceSel.appendChild(o);
+  }
+  if (localVoices.includes("sample-1")) voiceSel.value = "sample-1";
+}
+
+async function loadLocalVoices() {
+  try {
+    const r = await thclaws.aiserver.request({ method: "GET", path: "/v1/audio/voices", timeoutSecs: 15 });
+    const list = (r && r.ok && r.json && (r.json.voices || r.json.data)) || [];
+    localVoices = list
+      .map((v) => (v && typeof v === "object" ? v.id : v))
+      .filter((id) => typeof id === "string" && id && !id.startsWith("mx-"));
+  } catch {
+    localVoices = [];
+  }
+}
+
+async function loadLocalModels() {
+  let r;
+  try {
+    r = await thclaws.aiserver.request({ method: "GET", path: "/v1/capabilities", timeoutSecs: 15 });
+  } catch {
+    return;
+  }
+  if (!r || !r.ok || !r.json) return;
+  const caps = Array.isArray(r.json.data) ? r.json.data : Array.isArray(r.json) ? r.json : [];
+  const local = (capId) => {
+    const cap = caps.find((c) => c && c.id === capId);
+    const up = cap && (cap.available === true || cap.up === true);
+    if (!up || !Array.isArray(cap.models)) return [];
+    const models = cap.models
+      .filter((m) => m && m.id)
+      .map((m) => ({ value: m.id, label: `${m.label || LOCAL_LABELS[m.id] || m.id} (ในเครื่อง)` }));
+    // The Suite lists by name; the fast model first reads better as the default.
+    models.sort((a, b) => (a.value === "z" ? -1 : b.value === "z" ? 1 : 0));
+    return models;
+  };
+  const image = local("image");
+  const video = local("video");
+  const merge = (key, mine) => {
+    if (!mine.length && r.cloudMedia !== false) return;
+    const cloud = r.cloudMedia === false ? [] : MODELS[key];
+    if (mine.length || cloud.length) MODELS[key] = [...mine, ...cloud];
+  };
+  merge("text2image", image);
+  merge("image2image", image);
+  merge("text2video", video);
+  merge("image2video", video);
+  // Speech has one local entry: the box picks the model behind it.
+  const tts = caps.find((c) => c && (c.id === "tts" || c.id === "speech"));
+  if (tts && (tts.available === true || tts.up === true)) {
+    await loadLocalVoices();
+    merge("text2speech", [{ value: "tts-default", label: "เสียงของเครื่อง (ในเครื่อง)" }]);
+  } else {
+    merge("text2speech", []);
+  }
+  applyMode();
+}
+
 // ── init ─────────────────────────────────────────────────────────────
 applyMode();
+loadLocalModels();
 
 // storage.get resolves to the reply body — `{value: …}` — not the bare
 // value. Reading it directly is why saved prompts never came back after a
